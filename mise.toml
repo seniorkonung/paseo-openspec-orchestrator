@@ -1,3 +1,6 @@
 [tools]
 node = "22"
+"github:microsoft/apm" = "0.30.0"
 "npm:@getpaseo/cli" = "0.8.0-beta.1"
+"github:bug-ops/mcpls" = "latest"
+"npm:typescript-language-server" = "latest"

@@ -1,0 +1,24 @@
+[[lsp_servers]]
+name = "typescript"
+language_id = "typescript"
+command = "typescript-language-server"
+args = ["--stdio"]
+file_patterns = [
+    "**/*.ts",
+    "**/*.tsx",
+    "**/*.mts",
+    "**/*.cts"
+]
+timeout_seconds = 30
+request_timeout_seconds = 30
+
+[lsp_servers.initialization_options]
+enable = true
+lint = true
+
+[lsp_servers.heuristics]
+project_markers = [
+    "package.json",
+    "tsconfig.json",
+    "jsconfig.json"
+]

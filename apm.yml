@@ -1,0 +1,29 @@
+name: paseo-openspec-orchestrator
+version: 0.0.1
+targets:
+  - claude
+  - codex
+  - agent-skills
+dependencies:
+  apm:
+    - git: seniorkonung/agent-skills
+      ref: main
+      skills:
+        - code-review-and-quality
+        - idea-refine
+        - incremental-implementation
+        - planning-and-task-breakdown
+        - security-and-hardening
+        - shipping-and-launch
+        - test-driven-development
+        - discussion
+        - change-summary
+        - domain-modeling
+  mcp:
+    - name: typescript
+      registry: false
+      transport: stdio
+      command: mcpls
+      args: ["--trust-project-config"]
+includes: auto
+scripts: {}
