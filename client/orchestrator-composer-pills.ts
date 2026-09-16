@@ -4,6 +4,7 @@ import { openSpecAvailability } from "../shared/openspec-availability";
 
 const AGENT_PAGE_SIZE = 200;
 const AGENT_SUBSCRIPTION_ID = "openspec-orchestrator-composer-pills";
+const ICON_ONLY_COMPOSER_LABEL = "\u2060";
 
 type AgentSnapshot = Awaited<
   ReturnType<PluginClientContext["paseo"]["agents"]["list"]>
@@ -24,7 +25,7 @@ export function registerOrchestratorComposerPills(client: PluginClientContext): 
       button: {
         title: "Открыть оркестратор OpenSpec",
         icon: "Workflow",
-        label: "Оркестратор",
+        label: ICON_ONLY_COMPOSER_LABEL,
         behavior: {
           kind: "action",
           onPress() {
