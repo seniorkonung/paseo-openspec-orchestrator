@@ -1,5 +1,9 @@
 import { ORCHESTRATOR_LIMITS, type ControlCommand } from "../shared/orchestrator.ts";
-import type { OrchestratorNotificationRequest } from "../shared/orchestrator-notifications.ts";
+import {
+  normalizeOrchestratorWorkspaceDisplay,
+  type OrchestratorNotificationRequest,
+  type OrchestratorWorkspaceDisplay,
+} from "../shared/orchestrator-notifications.ts";
 import { readGitBranch, type GitBranchProbe } from "./git-branch.ts";
 import { readGitWorktreeStatus, type GitWorktreeProbe } from "./git-worktree.ts";
 import {
@@ -32,6 +36,7 @@ export interface OpenSpecOrchestratorEngineOptions {
 
 interface WorkspaceRuntime {
   workspaceDirectory: string;
+  workspaceDisplay: OrchestratorWorkspaceDisplay;
   generation: number;
   pauseRequested: boolean;
   active: boolean;
@@ -100,6 +105,10 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
     const checkpoint = this.#ledger.getWorkflowCheckpoint(workspaceId);
     this.#runtime.set(workspaceId, {
       workspaceDirectory: context.workspaceDirectory,
+      workspaceDisplay: normalizeOrchestratorWorkspaceDisplay({
+        projectName: context.projectName,
+        workspaceName: context.workspaceName,
+      }),
       generation: 0,
       pauseRequested: false,
       active: false,
@@ -278,7 +287,8 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
           services: {
             gitBranch: this.#branchProbe,
             gitWorktree: this.#worktreeProbe,
-            notify: (notification) => this.#notify(workspaceId, notification),
+            notify: (notification) =>
+              this.#notify(workspaceId, notification, runtime.workspaceDisplay),
           },
         });
         if (this.#disposed || runtime.generation !== generation) return;
@@ -357,10 +367,14 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
     runtime.abortController = null;
     runtime.resumeFromCheckpoint = false;
     reporter.setLifecycle({ status: "completed", availableCommand: "start" });
-    this.#notify(workspaceId, {
-      kind: "completed",
-      message: "Все действия текущего запуска завершены",
-    });
+    this.#notify(
+      workspaceId,
+      {
+        kind: "completed",
+        message: "Все действия текущего запуска завершены",
+      },
+      runtime.workspaceDisplay,
+    );
   }
 
   #fail(
@@ -380,7 +394,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       runtime.currentHandle = null;
     }
     reporter.setLifecycle({ status: "failed", availableCommand: "retry", message });
-    this.#notify(workspaceId, { kind: "retry", message });
+    this.#notify(workspaceId, { kind: "retry", message }, runtime.workspaceDisplay);
   }
 
   #reachPause(reporter: OrchestratorReporter, runtime: WorkspaceRuntime): void {
@@ -442,8 +456,9 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
   #notify(
     workspaceId: string,
     notification: OrchestratorNotificationRequest,
+    workspace?: OrchestratorWorkspaceDisplay | null,
   ): Promise<boolean> {
-    return this.#notifications.notify(workspaceId, notification).catch((error) => {
+    return this.#notifications.notify(workspaceId, notification, workspace).catch((error) => {
       console.warn("[OpenSpec] Не удалось отправить уведомление оркестратора", {
         workspaceId,
         kind: notification.kind,

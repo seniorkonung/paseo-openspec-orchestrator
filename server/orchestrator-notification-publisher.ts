@@ -1,7 +1,8 @@
 import {
-  orchestratorNotificationKindLabels,
+  formatOrchestratorNotificationTitle,
   type OrchestratorNotificationRequest,
   type OrchestratorNotificationSettingsValues,
+  type OrchestratorWorkspaceDisplay,
 } from "../shared/orchestrator-notifications.ts";
 
 export interface OrchestratorNotificationFetchResponse {
@@ -22,6 +23,7 @@ export interface PublishOrchestratorNotificationOptions {
   fetch?: OrchestratorNotificationFetch;
   signal?: AbortSignal;
   timeoutMs?: number;
+  workspace?: OrchestratorWorkspaceDisplay | null;
 }
 
 export async function publishOrchestratorNotification(
@@ -43,7 +45,7 @@ export async function publishOrchestratorNotification(
   }
   const body = {
     topic: settings.topic,
-    title: orchestratorNotificationKindLabels[notification.kind],
+    title: formatOrchestratorNotificationTitle(notification.kind, options.workspace),
     message: notification.message,
     priority: settings.priority,
   };

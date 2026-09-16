@@ -20,6 +20,13 @@ export type OrchestratorNotificationKind = z.infer<
   typeof orchestratorNotificationKindSchema
 >;
 
+const MAX_DISPLAY_NAME_LENGTH = 256;
+
+export interface OrchestratorWorkspaceDisplay {
+  readonly projectName: string | null;
+  readonly workspaceName: string | null;
+}
+
 export const orchestratorNotificationRequestSchema = z
   .object({
     kind: orchestratorNotificationKindSchema,
@@ -130,3 +137,31 @@ export const orchestratorNotificationKindLabels: Record<
   manual: "Уведомление оркестратора",
   progress: "Workflow в работе",
 };
+
+export function normalizeOrchestratorWorkspaceDisplay(
+  workspace: Partial<OrchestratorWorkspaceDisplay> | null | undefined,
+): OrchestratorWorkspaceDisplay {
+  return {
+    projectName: normalizeDisplayName(workspace?.projectName),
+    workspaceName: normalizeDisplayName(workspace?.workspaceName),
+  };
+}
+
+function normalizeDisplayName(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized ? normalized.slice(0, MAX_DISPLAY_NAME_LENGTH) : null;
+}
+
+export function formatOrchestratorNotificationTitle(
+  kind: OrchestratorNotificationKind,
+  workspace?: OrchestratorWorkspaceDisplay | null,
+): string {
+  const labels = normalizeOrchestratorWorkspaceDisplay(workspace);
+  const location = [labels.projectName, labels.workspaceName].filter(Boolean).join(" / ");
+  const event = orchestratorNotificationKindLabels[kind];
+  return location ? `${location} — ${event}` : event;
+}

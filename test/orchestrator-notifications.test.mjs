@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   DEFAULT_ORCHESTRATOR_NOTIFICATION_SETTINGS,
+  formatOrchestratorNotificationTitle,
+  normalizeOrchestratorWorkspaceDisplay,
 } from "../shared/orchestrator-notifications.ts";
 import {
   normalizeOrchestratorNotificationSettings,
@@ -106,7 +108,50 @@ test("publisher отправляет минимальное типизирова
   assert.equal(requests.length, 1);
 });
 
-test("service добавляет workspace-контекст и безопасно отключается без темы", async (context) => {
+test("publisher ставит проект и workspace в начало заголовка без идентификатора", async () => {
+  const requests = [];
+  await publishOrchestratorNotification(
+    {
+      ...DEFAULT_ORCHESTRATOR_NOTIFICATION_SETTINGS,
+      topic: "openspec",
+    },
+    { kind: "retry", message: "Нужен retry" },
+    {
+      fetch: async (input, init) => {
+        requests.push({ input, init });
+        return { ok: true, status: 200 };
+      },
+      workspace: {
+        projectName: "Платёжный сервис",
+        workspaceName: "Проверка авторизации",
+      },
+    },
+  );
+
+  assert.deepEqual(JSON.parse(requests[0].init.body), {
+    topic: "openspec",
+    title: "Платёжный сервис / Проверка авторизации — Требуется повтор",
+    message: "Нужен retry",
+    priority: 3,
+  });
+  assert.equal(requests[0].init.body.includes("workspace-42"), false);
+});
+
+test("display-контекст нормализует управляющие символы и длинные названия", () => {
+  const display = normalizeOrchestratorWorkspaceDisplay({
+    projectName: "  Проект\nвторой  ",
+    workspaceName: `${"w".repeat(300)}\tокно`,
+  });
+
+  assert.equal(display.projectName, "Проект второй");
+  assert.equal(display.workspaceName.length, 256);
+  assert.equal(
+    formatOrchestratorNotificationTitle("completed", display),
+    `Проект второй / ${"w".repeat(256)} — Workflow завершён`,
+  );
+});
+
+test("service передаёт display-контекст и безопасно отключается без темы", async (context) => {
   const directory = await temporaryDirectory(context, "openspec-notification-service-");
   const settings = new OrchestratorNotificationSettingsStore(join(directory, "settings.json"));
   await settings.save(0, {
@@ -116,16 +161,24 @@ test("service добавляет workspace-контекст и безопасн�
   const published = [];
   const service = new OrchestratorNotificationService({
     settings,
-    publish: async (values, notification) => {
-      published.push({ values, notification });
+    publish: async (values, notification, options) => {
+      published.push({ values, notification, options });
     },
   });
 
   assert.equal(
-    await service.notify("workspace-42", { kind: "manual", message: "Готово" }),
+    await service.notify(
+      "workspace-42",
+      { kind: "manual", message: "Готово" },
+      { projectName: "Платёжный сервис", workspaceName: "Проверка авторизации" },
+    ),
     true,
   );
-  assert.equal(published[0].notification.message, "[workspace-42] Готово");
+  assert.equal(published[0].notification.message, "Готово");
+  assert.deepEqual(published[0].options.workspace, {
+    projectName: "Платёжный сервис",
+    workspaceName: "Проверка авторизации",
+  });
 
   await settings.save(1, {
     ...DEFAULT_ORCHESTRATOR_NOTIFICATION_SETTINGS,
@@ -145,8 +198,8 @@ test("engine уведомляет о retry, прогрессе шага и за�
   await ledger.open("workspace-notifications");
   const events = [];
   const notifications = {
-    async notify(workspaceId, notification) {
-      events.push({ workspaceId, ...notification });
+    async notify(workspaceId, notification, workspace) {
+      events.push({ workspaceId, ...notification, workspace });
       return true;
     },
   };
@@ -170,16 +223,32 @@ test("engine уведомляет о retry, прогрессе шага и за�
       },
     ],
   });
-  engine.initialize("workspace-notifications", { workspaceDirectory: "/workspace/project" });
+  engine.initialize("workspace-notifications", {
+    workspaceDirectory: "/workspace/project",
+    projectName: "Платёжный сервис",
+    workspaceName: "Проверка авторизации",
+  });
   engine.command("workspace-notifications", "start");
   await new Promise((resolve) => setTimeout(resolve, 60));
 
   assert.deepEqual(events, [
-    { workspaceId: "workspace-notifications", kind: "progress", message: "Шаг выполняется" },
+    {
+      workspaceId: "workspace-notifications",
+      kind: "progress",
+      message: "Шаг выполняется",
+      workspace: {
+        projectName: "Платёжный сервис",
+        workspaceName: "Проверка авторизации",
+      },
+    },
     {
       workspaceId: "workspace-notifications",
       kind: "completed",
       message: "Все действия текущего запуска завершены",
+      workspace: {
+        projectName: "Платёжный сервис",
+        workspaceName: "Проверка авторизации",
+      },
     },
   ]);
 

@@ -593,7 +593,7 @@ test("после reload незавершённая проверка ветки �
   await restoredLedger.close();
 });
 
-test("контроллер передаёт engine директорию workspace и сохраняет защиту revision", async (context) => {
+test("контроллер передаёт engine директорию и названия проекта с workspace", async (context) => {
   const paseoHome = await temporaryHome(context);
   const ledger = new OrchestratorLedger({ paseoHome });
   const calls = [];
@@ -616,7 +616,12 @@ test("контроллер передаёт engine директорию workspac
     workspaces: {
       ref: () => ({
         directory: "/tmp/workspace-1",
-        refresh: async () => undefined,
+        refresh: async () => ({
+          projectCustomName: "Платёжный сервис",
+          projectDisplayName: "payments",
+          title: "Проверка авторизации",
+          name: "feature/auth",
+        }),
       }),
     },
   };
@@ -627,7 +632,11 @@ test("контроллер передаёт engine директорию workspac
   assert.deepEqual(calls[0], [
     "initialize",
     "workspace-1",
-    { workspaceDirectory: "/tmp/workspace-1" },
+    {
+      workspaceDirectory: "/tmp/workspace-1",
+      projectName: "Платёжный сервис",
+      workspaceName: "Проверка авторизации",
+    },
   ]);
   assert.deepEqual(calls[1], ["command", "workspace-1", "start"]);
 

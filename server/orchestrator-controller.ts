@@ -116,12 +116,26 @@ export class OrchestratorController {
     if (this.#ledger.has(workspaceId)) return;
 
     const workspace = paseo.workspaces.ref(workspaceId);
-    await workspace.refresh();
+    const snapshot = await workspace.refresh();
     if (!workspace.directory) {
       throw new Error("Рабочая область недоступна или не имеет директории");
     }
 
     await this.#ledger.open(workspaceId);
-    this.#engine.initialize(workspaceId, { workspaceDirectory: workspace.directory });
+    this.#engine.initialize(workspaceId, {
+      workspaceDirectory: workspace.directory,
+      projectName: preferredName(snapshot?.projectCustomName, snapshot?.projectDisplayName),
+      workspaceName: preferredName(snapshot?.title, snapshot?.name),
+    });
   }
+}
+
+function preferredName(
+  primary: string | null | undefined,
+  fallback: string | null | undefined,
+): string | null {
+  const normalizedPrimary = primary?.trim();
+  if (normalizedPrimary) return normalizedPrimary;
+  const normalizedFallback = fallback?.trim();
+  return normalizedFallback || null;
 }
