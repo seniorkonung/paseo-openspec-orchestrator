@@ -1,5 +1,6 @@
 import type { ControlCommand } from "../shared/orchestrator.ts";
 import { readGitBranch, type GitBranchProbe } from "./git-branch.ts";
+import { readGitWorktreeStatus, type GitWorktreeProbe } from "./git-worktree.ts";
 import type { OrchestratorEngine, OrchestratorEngineContext } from "./orchestrator-engine.ts";
 import { OrchestratorLedger } from "./orchestrator-ledger.ts";
 import {
@@ -16,6 +17,7 @@ import { OPEN_SPEC_WORKFLOW_STEPS } from "./workflow/steps/index.ts";
 
 export interface OpenSpecOrchestratorEngineOptions {
   branchProbe?: GitBranchProbe;
+  worktreeProbe?: GitWorktreeProbe;
   steps?: readonly WorkflowStepDefinition[];
   now?: () => Date;
 }
@@ -40,6 +42,7 @@ function isActiveLifecycleStatus(status: string): boolean {
 export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
   readonly #ledger: OrchestratorLedger;
   readonly #branchProbe: GitBranchProbe;
+  readonly #worktreeProbe: GitWorktreeProbe;
   readonly #steps: readonly WorkflowStepDefinition[];
   readonly #now: () => Date;
   readonly #runtime = new Map<string, WorkspaceRuntime>();
@@ -50,6 +53,9 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
     this.#branchProbe =
       options.branchProbe ??
       ((workspaceDirectory, signal) => readGitBranch(workspaceDirectory, { signal }));
+    this.#worktreeProbe =
+      options.worktreeProbe ??
+      ((workspaceDirectory, signal) => readGitWorktreeStatus(workspaceDirectory, { signal }));
     this.#steps = Object.freeze([...(options.steps ?? OPEN_SPEC_WORKFLOW_STEPS)]);
     if (this.#steps.length === 0) {
       throw new Error("Workflow должен содержать хотя бы один шаг");
@@ -196,7 +202,10 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
           workspaceDirectory: runtime.workspaceDirectory,
           signal: abortController.signal,
           state: runtime.state,
-          services: { gitBranch: this.#branchProbe },
+          services: {
+            gitBranch: this.#branchProbe,
+            gitWorktree: this.#worktreeProbe,
+          },
         });
         if (this.#disposed || runtime.generation !== generation) return;
 

@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { OpenSpecOrchestratorEngine } from "../server/openspec-orchestrator-engine.ts";
 import { readGitBranch } from "../server/git-branch.ts";
+import { readGitWorktreeStatus } from "../server/git-worktree.ts";
 import { OrchestratorController } from "../server/orchestrator-controller.ts";
 import { OrchestratorLedger } from "../server/orchestrator-ledger.ts";
 import { createOrchestratorReporter } from "../server/orchestrator-reporter.ts";
@@ -59,6 +60,33 @@ test("возвращает типизированное решение для ma
   );
 });
 
+test("определяет чистое и изменённое рабочее дерево Git", async () => {
+  assert.deepEqual(await readGitWorktreeStatus("/workspace", { command: async () => "" }), {
+    kind: "clean",
+  });
+  assert.deepEqual(
+    await readGitWorktreeStatus("/workspace", {
+      command: async () => " M tracked.txt\n?? untracked.txt\n",
+    }),
+    { kind: "dirty" },
+  );
+});
+
+test("проверяет реальное рабочее дерево с неотслеживаемым и изменённым файлом", async (context) => {
+  const workspaceDirectory = await temporaryHome(context, "openspec-git-status-");
+  await execFileAsync("git", ["init"], { cwd: workspaceDirectory });
+
+  assert.deepEqual(await readGitWorktreeStatus(workspaceDirectory), { kind: "clean" });
+
+  const filePath = join(workspaceDirectory, "tracked.txt");
+  await writeFile(filePath, "initial\n");
+  assert.deepEqual(await readGitWorktreeStatus(workspaceDirectory), { kind: "dirty" });
+
+  await execFileAsync("git", ["add", "tracked.txt"], { cwd: workspaceDirectory });
+  await writeFile(filePath, "modified\n");
+  assert.deepEqual(await readGitWorktreeStatus(workspaceDirectory), { kind: "dirty" });
+});
+
 test("на non-main ветке workflow завершает инициализацию", async (context) => {
   const paseoHome = await temporaryHome(context);
   const ledger = new OrchestratorLedger({ paseoHome });
@@ -69,6 +97,7 @@ test("на non-main ветке workflow завершает инициализа�
       directories.push(directory);
       return { kind: "non-main", name: "feature/orchestrator" };
     },
+    worktreeProbe: async () => ({ kind: "clean" }),
   });
   engine.initialize("workspace-1", { workspaceDirectory: "/workspace/project" });
 
@@ -80,6 +109,44 @@ test("на non-main ветке workflow завершает инициализа�
   assert.equal(snapshot.lifecycle.status, "completed");
   assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
     ["Git-ветка: feature/orchestrator", "succeeded"],
+    ["Рабочее дерево Git чистое", "succeeded"],
+  ]);
+  engine.dispose();
+  await ledger.close();
+});
+
+test("изменения рабочего дерева блокируют workflow, а retry проверяет заново", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-dirty");
+  let worktree = { kind: "dirty" };
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    branchProbe: async () => ({ kind: "non-main", name: "feature/clean-check" }),
+    worktreeProbe: async () => worktree,
+  });
+  engine.initialize("workspace-dirty", { workspaceDirectory: "/workspace/project" });
+
+  engine.command("workspace-dirty", "start");
+  await settleWorkflow();
+  let snapshot = ledger.get("workspace-dirty");
+  assert.equal(snapshot.lifecycle.status, "failed");
+  assert.equal(snapshot.lifecycle.availableCommand, "retry");
+  assert.match(snapshot.lifecycle.message, /незакоммиченные или неотслеживаемые/);
+  assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
+    ["Git-ветка: feature/clean-check", "succeeded"],
+    ["Рабочее дерево Git содержит изменения", "failed"],
+  ]);
+
+  worktree = { kind: "clean" };
+  engine.command("workspace-dirty", "retry");
+  await settleWorkflow();
+  snapshot = ledger.get("workspace-dirty");
+  assert.equal(snapshot.lifecycle.status, "completed");
+  assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
+    ["Git-ветка: feature/clean-check", "succeeded"],
+    ["Рабочее дерево Git содержит изменения", "failed"],
+    ["Git-ветка: feature/clean-check", "succeeded"],
+    ["Рабочее дерево Git чистое", "succeeded"],
   ]);
   engine.dispose();
   await ledger.close();
@@ -197,6 +264,7 @@ test("на main ветке workflow останавливается, а retry п�
   let decision = { kind: "main", name: "main" };
   const engine = new OpenSpecOrchestratorEngine(ledger, {
     branchProbe: async () => decision,
+    worktreeProbe: async () => ({ kind: "clean" }),
   });
   engine.initialize("workspace-1", { workspaceDirectory: "/workspace/project" });
 
@@ -217,6 +285,7 @@ test("на main ветке workflow останавливается, а retry п�
   assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
     ["Git-ветка main — запуск запрещён", "failed"],
     ["Git-ветка: feature/after-switch", "succeeded"],
+    ["Рабочее дерево Git чистое", "succeeded"],
   ]);
   engine.dispose();
   await ledger.close();
@@ -269,6 +338,7 @@ test("пауза во время проверки ветки применяет�
         resolveBranch = resolve;
       });
     },
+    worktreeProbe: async () => ({ kind: "clean" }),
   });
   engine.initialize("workspace-1", { workspaceDirectory: "/workspace/project" });
 

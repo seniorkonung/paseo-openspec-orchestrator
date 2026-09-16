@@ -1,4 +1,5 @@
 import type { GitBranchDecision, GitBranchProbe } from "../git-branch.ts";
+import type { GitWorktreeProbe } from "../git-worktree.ts";
 
 export interface WorkflowState {
   readonly branch: Extract<GitBranchDecision, { kind: "non-main" }>["name"] | null;
@@ -6,6 +7,7 @@ export interface WorkflowState {
 
 export interface WorkflowServices {
   readonly gitBranch: GitBranchProbe;
+  readonly gitWorktree: GitWorktreeProbe;
 }
 
 export interface WorkflowStepContext {
