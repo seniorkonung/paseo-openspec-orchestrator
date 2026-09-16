@@ -28,16 +28,10 @@ dependencies:
   - .agents/skills/idea-refine/frameworks.md
   - .agents/skills/idea-refine/refinement-criteria.md
   - .agents/skills/idea-refine/scripts/idea-refine.sh
-  - .agents/skills/incremental-implementation
-  - .agents/skills/incremental-implementation/SKILL.md
-  - .agents/skills/planning-and-task-breakdown
-  - .agents/skills/planning-and-task-breakdown/SKILL.md
   - .agents/skills/security-and-hardening
   - .agents/skills/security-and-hardening/SKILL.md
   - .agents/skills/shipping-and-launch
   - .agents/skills/shipping-and-launch/SKILL.md
-  - .agents/skills/test-driven-development
-  - .agents/skills/test-driven-development/SKILL.md
   - .claude/agents/code-reviewer.md
   - .claude/agents/security-auditor.md
   - .claude/agents/test-engineer.md
@@ -63,16 +57,10 @@ dependencies:
   - .claude/skills/idea-refine/frameworks.md
   - .claude/skills/idea-refine/refinement-criteria.md
   - .claude/skills/idea-refine/scripts/idea-refine.sh
-  - .claude/skills/incremental-implementation
-  - .claude/skills/incremental-implementation/SKILL.md
-  - .claude/skills/planning-and-task-breakdown
-  - .claude/skills/planning-and-task-breakdown/SKILL.md
   - .claude/skills/security-and-hardening
   - .claude/skills/security-and-hardening/SKILL.md
   - .claude/skills/shipping-and-launch
   - .claude/skills/shipping-and-launch/SKILL.md
-  - .claude/skills/test-driven-development
-  - .claude/skills/test-driven-development/SKILL.md
   - .codex/agents/code-reviewer.toml
   - .codex/agents/security-auditor.toml
   - .codex/agents/test-engineer.toml
@@ -91,11 +79,8 @@ dependencies:
     .agents/skills/idea-refine/frameworks.md: sha256:161ebc18fdf2d996bc62a87a2d747cf1bf53548354f8925de25c732c27f00309
     .agents/skills/idea-refine/refinement-criteria.md: sha256:1ca2973a4d01b5cb37ab7ddb2eff77fa4e792634a33d0ce44961c068fc88d51a
     .agents/skills/idea-refine/scripts/idea-refine.sh: sha256:f02a52408a4218047c032d221483abfbb48d11f090bb4915965c7419bf2e0e47
-    .agents/skills/incremental-implementation/SKILL.md: sha256:9fc3b1931a1aa6da02e51d030f872cb52771843830b375fc91e43885a73fa853
-    .agents/skills/planning-and-task-breakdown/SKILL.md: sha256:3a46c9031f2d70d5333bcd418ce835a866028e7d6abd8ed7cee621f20d6dfa72
     .agents/skills/security-and-hardening/SKILL.md: sha256:7dee4d2cc8b417b90790bf6016f74a3dcd1adcddde6e42f545a391f950778ebe
     .agents/skills/shipping-and-launch/SKILL.md: sha256:ca9216f73ac6dfd1b1104ccd7de570acc5a22e11b1bf0ad4bafde1009afc4512
-    .agents/skills/test-driven-development/SKILL.md: sha256:0b3eadb3e71a64d015933f8fd41d6bff678b2ee174d638b0bbe79d8f54513860
     .claude/agents/code-reviewer.md: sha256:8efeec034eb299bf63eacda4b9aa7126dfaa61d122b807fbb679502151567d1f
     .claude/agents/security-auditor.md: sha256:e9d51b87b02eae4e7af55a549fcb8fcc1289dce81a39806d2739d2d5c3f867db
     .claude/agents/test-engineer.md: sha256:7fa49278ec977731a18f7ce743561a6d62945db0be15578e748945cf19ae822a
@@ -116,11 +101,8 @@ dependencies:
     .claude/skills/idea-refine/frameworks.md: sha256:161ebc18fdf2d996bc62a87a2d747cf1bf53548354f8925de25c732c27f00309
     .claude/skills/idea-refine/refinement-criteria.md: sha256:1ca2973a4d01b5cb37ab7ddb2eff77fa4e792634a33d0ce44961c068fc88d51a
     .claude/skills/idea-refine/scripts/idea-refine.sh: sha256:f02a52408a4218047c032d221483abfbb48d11f090bb4915965c7419bf2e0e47
-    .claude/skills/incremental-implementation/SKILL.md: sha256:9fc3b1931a1aa6da02e51d030f872cb52771843830b375fc91e43885a73fa853
-    .claude/skills/planning-and-task-breakdown/SKILL.md: sha256:3a46c9031f2d70d5333bcd418ce835a866028e7d6abd8ed7cee621f20d6dfa72
     .claude/skills/security-and-hardening/SKILL.md: sha256:7dee4d2cc8b417b90790bf6016f74a3dcd1adcddde6e42f545a391f950778ebe
     .claude/skills/shipping-and-launch/SKILL.md: sha256:ca9216f73ac6dfd1b1104ccd7de570acc5a22e11b1bf0ad4bafde1009afc4512
-    .claude/skills/test-driven-development/SKILL.md: sha256:0b3eadb3e71a64d015933f8fd41d6bff678b2ee174d638b0bbe79d8f54513860
     .codex/agents/code-reviewer.toml: sha256:68551392550f16bad4545b154ec710ba215623bcb35f95f8ab2e613d798b50dd
     .codex/agents/security-auditor.toml: sha256:6f2bec3bded4da237fa14b74fd77720f0e7d96982f09288652aec26b228110dd
     .codex/agents/test-engineer.toml: sha256:729261399bedbfa7af957725773fddea919b1e094a81ebe6d8a6e476d54c7ff8
@@ -131,11 +113,8 @@ dependencies:
   - discussion
   - domain-modeling
   - idea-refine
-  - incremental-implementation
-  - planning-and-task-breakdown
   - security-and-hardening
   - shipping-and-launch
-  - test-driven-development
 - repo_url: addyosmani/agent-skills
   name: code-simplification
   host: github.com
@@ -614,42 +593,6 @@ deployments:
   content_hash: sha256:f02a52408a4218047c032d221483abfbb48d11f090bb4915965c7419bf2e0e47
 - kind: project-relative
   target: agent-skills
-  value: .agents/skills/incremental-implementation
-  runtime: null
-  scope: project
-  owners:
-  - seniorkonung/agent-skills
-  active_owner: seniorkonung/agent-skills
-  content_hash: null
-- kind: project-relative
-  target: agent-skills
-  value: .agents/skills/incremental-implementation/SKILL.md
-  runtime: null
-  scope: project
-  owners:
-  - seniorkonung/agent-skills
-  active_owner: seniorkonung/agent-skills
-  content_hash: sha256:9fc3b1931a1aa6da02e51d030f872cb52771843830b375fc91e43885a73fa853
-- kind: project-relative
-  target: agent-skills
-  value: .agents/skills/planning-and-task-breakdown
-  runtime: null
-  scope: project
-  owners:
-  - seniorkonung/agent-skills
-  active_owner: seniorkonung/agent-skills
-  content_hash: null
-- kind: project-relative
-  target: agent-skills
-  value: .agents/skills/planning-and-task-breakdown/SKILL.md
-  runtime: null
-  scope: project
-  owners:
-  - seniorkonung/agent-skills
-  active_owner: seniorkonung/agent-skills
-  content_hash: sha256:3a46c9031f2d70d5333bcd418ce835a866028e7d6abd8ed7cee621f20d6dfa72
-- kind: project-relative
-  target: agent-skills
   value: .agents/skills/security-and-hardening
   runtime: null
   scope: project
@@ -702,24 +645,6 @@ deployments:
   - addyosmani/agent-skills/skills/source-driven-development
   active_owner: addyosmani/agent-skills/skills/source-driven-development
   content_hash: sha256:719d4e54083c90ded62112fb41df3dbc4619309118ee0e6aa4d846f92d8204af
-- kind: project-relative
-  target: agent-skills
-  value: .agents/skills/test-driven-development
-  runtime: null
-  scope: project
-  owners:
-  - seniorkonung/agent-skills
-  active_owner: seniorkonung/agent-skills
-  content_hash: null
-- kind: project-relative
-  target: agent-skills
-  value: .agents/skills/test-driven-development/SKILL.md
-  runtime: null
-  scope: project
-  owners:
-  - seniorkonung/agent-skills
-  active_owner: seniorkonung/agent-skills
-  content_hash: sha256:0b3eadb3e71a64d015933f8fd41d6bff678b2ee174d638b0bbe79d8f54513860
 - kind: project-relative
   target: agent-skills
   value: .agents/skills/verification-before-completion
@@ -1127,42 +1052,6 @@ deployments:
   content_hash: sha256:f02a52408a4218047c032d221483abfbb48d11f090bb4915965c7419bf2e0e47
 - kind: project-relative
   target: claude
-  value: .claude/skills/incremental-implementation
-  runtime: null
-  scope: project
-  owners:
-  - seniorkonung/agent-skills
-  active_owner: seniorkonung/agent-skills
-  content_hash: null
-- kind: project-relative
-  target: claude
-  value: .claude/skills/incremental-implementation/SKILL.md
-  runtime: null
-  scope: project
-  owners:
-  - seniorkonung/agent-skills
-  active_owner: seniorkonung/agent-skills
-  content_hash: sha256:9fc3b1931a1aa6da02e51d030f872cb52771843830b375fc91e43885a73fa853
-- kind: project-relative
-  target: claude
-  value: .claude/skills/planning-and-task-breakdown
-  runtime: null
-  scope: project
-  owners:
-  - seniorkonung/agent-skills
-  active_owner: seniorkonung/agent-skills
-  content_hash: null
-- kind: project-relative
-  target: claude
-  value: .claude/skills/planning-and-task-breakdown/SKILL.md
-  runtime: null
-  scope: project
-  owners:
-  - seniorkonung/agent-skills
-  active_owner: seniorkonung/agent-skills
-  content_hash: sha256:3a46c9031f2d70d5333bcd418ce835a866028e7d6abd8ed7cee621f20d6dfa72
-- kind: project-relative
-  target: claude
   value: .claude/skills/security-and-hardening
   runtime: null
   scope: project
@@ -1215,24 +1104,6 @@ deployments:
   - addyosmani/agent-skills/skills/source-driven-development
   active_owner: addyosmani/agent-skills/skills/source-driven-development
   content_hash: sha256:719d4e54083c90ded62112fb41df3dbc4619309118ee0e6aa4d846f92d8204af
-- kind: project-relative
-  target: claude
-  value: .claude/skills/test-driven-development
-  runtime: null
-  scope: project
-  owners:
-  - seniorkonung/agent-skills
-  active_owner: seniorkonung/agent-skills
-  content_hash: null
-- kind: project-relative
-  target: claude
-  value: .claude/skills/test-driven-development/SKILL.md
-  runtime: null
-  scope: project
-  owners:
-  - seniorkonung/agent-skills
-  active_owner: seniorkonung/agent-skills
-  content_hash: sha256:0b3eadb3e71a64d015933f8fd41d6bff678b2ee174d638b0bbe79d8f54513860
 - kind: project-relative
   target: claude
   value: .claude/skills/verification-before-completion

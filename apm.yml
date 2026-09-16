@@ -11,11 +11,8 @@ dependencies:
       skills:
         - code-review-and-quality
         - idea-refine
-        - incremental-implementation
-        - planning-and-task-breakdown
         - security-and-hardening
         - shipping-and-launch
-        - test-driven-development
         - discussion
         - change-summary
         - domain-modeling
