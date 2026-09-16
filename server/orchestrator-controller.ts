@@ -1,6 +1,6 @@
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { ControlCommand, OrchestratorSnapshot } from "../shared/orchestrator.ts";
-import { DemoOrchestratorEngine } from "./demo-orchestrator-engine.ts";
+import { OpenSpecOrchestratorEngine } from "./openspec-orchestrator-engine.ts";
 import type { OrchestratorEngine } from "./orchestrator-engine.ts";
 import { OrchestratorLedger, type WaitResult } from "./orchestrator-ledger.ts";
 
@@ -26,7 +26,8 @@ export class OrchestratorController {
 
   constructor(options: OrchestratorControllerOptions = {}) {
     this.#ledger = options.ledger ?? new OrchestratorLedger();
-    this.#engine = options.createEngine?.(this.#ledger) ?? new DemoOrchestratorEngine(this.#ledger);
+    this.#engine =
+      options.createEngine?.(this.#ledger) ?? new OpenSpecOrchestratorEngine(this.#ledger);
   }
 
   async get(workspaceId: string, paseo: PaseoApi): Promise<OrchestratorSnapshot> {
@@ -98,6 +99,6 @@ export class OrchestratorController {
     }
 
     await this.#ledger.open(workspaceId);
-    this.#engine.initialize(workspaceId);
+    this.#engine.initialize(workspaceId, { workspaceDirectory: workspace.directory });
   }
 }

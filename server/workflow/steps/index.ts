@@ -1,0 +1,10 @@
+import { checkGitBranch } from "./check-git-branch.ts";
+import type { WorkflowStepDefinition } from "../types.ts";
+
+/**
+ * Единственное место, где задаются порядок и состав workflow.
+ * Добавляйте новую функцию-описание шага в `steps/` и включайте её сюда.
+ */
+export const OPEN_SPEC_WORKFLOW_STEPS: readonly WorkflowStepDefinition[] = Object.freeze([
+  checkGitBranch,
+]);
