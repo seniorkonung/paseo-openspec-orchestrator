@@ -12,6 +12,7 @@ export const ORCHESTRATOR_LIMITS = {
   agentLabel: 120,
   agentLinks: 8,
   message: 500,
+  notificationMessage: 1_000,
 } as const;
 
 const boundedText = (maximum: number) => z.string().trim().min(1).max(maximum);

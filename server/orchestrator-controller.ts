@@ -3,6 +3,10 @@ import type { ControlCommand, OrchestratorSnapshot } from "../shared/orchestrato
 import { OpenSpecOrchestratorEngine } from "./openspec-orchestrator-engine.ts";
 import type { OrchestratorEngine } from "./orchestrator-engine.ts";
 import { OrchestratorLedger, type WaitResult } from "./orchestrator-ledger.ts";
+import {
+  NoopOrchestratorNotificationSink,
+  type OrchestratorNotificationSink,
+} from "./orchestrator-notifications.ts";
 
 type PaseoApi = PluginHandlerContext["paseo"];
 
@@ -18,16 +22,20 @@ export type ControlResult =
 export interface OrchestratorControllerOptions {
   ledger?: OrchestratorLedger;
   createEngine?: (ledger: OrchestratorLedger) => OrchestratorEngine;
+  notifications?: OrchestratorNotificationSink;
 }
 
 export class OrchestratorController {
   readonly #ledger: OrchestratorLedger;
   readonly #engine: OrchestratorEngine;
+  readonly #notifications: OrchestratorNotificationSink;
 
   constructor(options: OrchestratorControllerOptions = {}) {
     this.#ledger = options.ledger ?? new OrchestratorLedger();
+    this.#notifications = options.notifications ?? new NoopOrchestratorNotificationSink();
     this.#engine =
-      options.createEngine?.(this.#ledger) ?? new OpenSpecOrchestratorEngine(this.#ledger);
+      options.createEngine?.(this.#ledger) ??
+      new OpenSpecOrchestratorEngine(this.#ledger, { notifications: this.#notifications });
   }
 
   async get(workspaceId: string, paseo: PaseoApi): Promise<OrchestratorSnapshot> {

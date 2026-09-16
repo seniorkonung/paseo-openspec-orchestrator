@@ -1,6 +1,11 @@
 import { ORCHESTRATOR_LIMITS, type ControlCommand } from "../shared/orchestrator.ts";
+import type { OrchestratorNotificationRequest } from "../shared/orchestrator-notifications.ts";
 import { readGitBranch, type GitBranchProbe } from "./git-branch.ts";
 import { readGitWorktreeStatus, type GitWorktreeProbe } from "./git-worktree.ts";
+import {
+  NoopOrchestratorNotificationSink,
+  type OrchestratorNotificationSink,
+} from "./orchestrator-notifications.ts";
 import type { OrchestratorEngine, OrchestratorEngineContext } from "./orchestrator-engine.ts";
 import { OrchestratorLedger } from "./orchestrator-ledger.ts";
 import {
@@ -19,6 +24,7 @@ import { OPEN_SPEC_WORKFLOW_STEPS } from "./workflow/steps/index.ts";
 export interface OpenSpecOrchestratorEngineOptions {
   branchProbe?: GitBranchProbe;
   worktreeProbe?: GitWorktreeProbe;
+  notifications?: OrchestratorNotificationSink;
   steps?: readonly WorkflowStepDefinition[];
   startStepId?: WorkflowStepId;
   now?: () => Date;
@@ -47,6 +53,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
   readonly #ledger: OrchestratorLedger;
   readonly #branchProbe: GitBranchProbe;
   readonly #worktreeProbe: GitWorktreeProbe;
+  readonly #notifications: OrchestratorNotificationSink;
   readonly #steps: ReadonlyMap<WorkflowStepId, WorkflowStepDefinition>;
   readonly #startStepId: WorkflowStepId;
   readonly #now: () => Date;
@@ -61,6 +68,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
     this.#worktreeProbe =
       options.worktreeProbe ??
       ((workspaceDirectory, signal) => readGitWorktreeStatus(workspaceDirectory, { signal }));
+    this.#notifications = options.notifications ?? new NoopOrchestratorNotificationSink();
     const configuredSteps = [...(options.steps ?? OPEN_SPEC_WORKFLOW_STEPS)];
     if (configuredSteps.length === 0) {
       throw new Error("Workflow должен содержать хотя бы один шаг");
@@ -201,6 +209,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
             error,
           });
           this.#fail(
+            workspaceId,
             reporter,
             runtime,
             "Не удалось очистить предыдущий checkpoint; проверьте диск и нажмите «Повторить»",
@@ -234,12 +243,13 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
 
       const currentStepId = runtime.currentStepId;
       if (currentStepId === null) {
-        this.#complete(reporter, runtime);
+        this.#complete(workspaceId, reporter, runtime);
         return;
       }
       const step = this.#steps.get(currentStepId);
       if (!step) {
         this.#fail(
+          workspaceId,
           reporter,
           runtime,
           `Шаг «${currentStepId}» не найден; проверьте конфигурацию workflow и нажмите «Повторить»`,
@@ -252,6 +262,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       const abortController = runtime.abortController;
       if (!abortController) {
         this.#fail(
+          workspaceId,
           reporter,
           runtime,
           `Шаг «${step.label}» не может начаться; нажмите «Повторить»`,
@@ -267,6 +278,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
           services: {
             gitBranch: this.#branchProbe,
             gitWorktree: this.#worktreeProbe,
+            notify: (notification) => this.#notify(workspaceId, notification),
           },
         });
         if (this.#disposed || runtime.generation !== generation) return;
@@ -276,7 +288,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
 
         switch (result.kind) {
           case "halt":
-            this.#fail(reporter, runtime, result.message);
+            this.#fail(workspaceId, reporter, runtime, result.message);
             return;
           case "complete":
             handle.succeed();
@@ -284,11 +296,12 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
             runtime.currentStepId = null;
             if (!(await this.#saveCheckpoint(workspaceId, runtime, reporter, generation, null))) return;
             if (this.#disposed || runtime.generation !== generation) return;
-            this.#complete(reporter, runtime);
+            this.#complete(workspaceId, reporter, runtime);
             return;
           case "continue":
             if (!this.#steps.has(result.next)) {
               this.#fail(
+                workspaceId,
                 reporter,
                 runtime,
                 `Следующий шаг «${result.next}» не найден; проверьте конфигурацию workflow и нажмите «Повторить»`,
@@ -324,20 +337,38 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
               ? String(Reflect.get(error, "code"))
               : "unknown",
         });
-        this.#fail(reporter, runtime, `Шаг «${step.label}» завершился ошибкой; нажмите «Повторить»`);
+        this.#fail(
+          workspaceId,
+          reporter,
+          runtime,
+          `Шаг «${step.label}» завершился ошибкой; нажмите «Повторить»`,
+        );
         return;
       }
     }
   }
 
-  #complete(reporter: OrchestratorReporter, runtime: WorkspaceRuntime): void {
+  #complete(
+    workspaceId: string,
+    reporter: OrchestratorReporter,
+    runtime: WorkspaceRuntime,
+  ): void {
     runtime.active = false;
     runtime.abortController = null;
     runtime.resumeFromCheckpoint = false;
     reporter.setLifecycle({ status: "completed", availableCommand: "start" });
+    this.#notify(workspaceId, {
+      kind: "completed",
+      message: "Все действия текущего запуска завершены",
+    });
   }
 
-  #fail(reporter: OrchestratorReporter, runtime: WorkspaceRuntime, message: string): void {
+  #fail(
+    workspaceId: string,
+    reporter: OrchestratorReporter,
+    runtime: WorkspaceRuntime,
+    message: string,
+  ): void {
     runtime.active = false;
     runtime.abortController = null;
     if (runtime.currentHandle) {
@@ -349,6 +380,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       runtime.currentHandle = null;
     }
     reporter.setLifecycle({ status: "failed", availableCommand: "retry", message });
+    this.#notify(workspaceId, { kind: "retry", message });
   }
 
   #reachPause(reporter: OrchestratorReporter, runtime: WorkspaceRuntime): void {
@@ -398,12 +430,27 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
         error,
       });
       this.#fail(
+        workspaceId,
         reporter,
         runtime,
         "Не удалось сохранить состояние workflow; проверьте диск и нажмите «Повторить»",
       );
       return false;
     }
+  }
+
+  #notify(
+    workspaceId: string,
+    notification: OrchestratorNotificationRequest,
+  ): Promise<boolean> {
+    return this.#notifications.notify(workspaceId, notification).catch((error) => {
+      console.warn("[OpenSpec] Не удалось отправить уведомление оркестратора", {
+        workspaceId,
+        kind: notification.kind,
+        error,
+      });
+      return false;
+    });
   }
 
   #recoverInterruptedRun(workspaceId: string): void {

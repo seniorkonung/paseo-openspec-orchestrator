@@ -1,5 +1,6 @@
 import type { GitBranchDecision, GitBranchProbe } from "../git-branch.ts";
 import type { GitWorktreeProbe } from "../git-worktree.ts";
+import type { OrchestratorNotificationRequest } from "../../shared/orchestrator-notifications.ts";
 import { z } from "zod";
 
 export interface WorkflowState {
@@ -9,6 +10,8 @@ export interface WorkflowState {
 export interface WorkflowServices {
   readonly gitBranch: GitBranchProbe;
   readonly gitWorktree: GitWorktreeProbe;
+  /** Не блокирует и не ломает шаг при ошибке доставки уведомления. */
+  readonly notify: (notification: OrchestratorNotificationRequest) => Promise<boolean>;
 }
 
 export type WorkflowStepId = string;
