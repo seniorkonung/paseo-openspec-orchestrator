@@ -1,5 +1,5 @@
 import type { PluginClientContext } from "@getpaseo/plugin/client";
-import { OrchestratorComposerPillRegistry } from "./orchestrator-composer-pill-registry";
+import { createOrchestratorComposerPillRegistry } from "./orchestrator-composer-pill-registry";
 import { openSpecAvailability } from "../shared/openspec-availability";
 
 const AGENT_PAGE_SIZE = 200;
@@ -16,7 +16,7 @@ export function registerOrchestratorComposerPills(client: PluginClientContext): 
   let loadingInitialSnapshot = true;
   const bufferedUpdates: AgentUpdate[] = [];
   const availabilityRequests = new Map<string, Promise<void>>();
-  const registry = new OrchestratorComposerPillRegistry(({ agentId, workspaceId }) =>
+  const registry = createOrchestratorComposerPillRegistry(({ agentId, workspaceId }) =>
     client.addComposerPill({
       id: "open-orchestrator",
       workspaceId,

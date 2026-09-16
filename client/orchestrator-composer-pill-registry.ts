@@ -13,83 +13,89 @@ export type ComposerPillFactory = (target: {
   workspaceId: string;
 }) => ComposerPillRegistration;
 
-export class OrchestratorComposerPillRegistry {
-  private readonly agents = new Map<string, string>();
-  private readonly availability = new Map<string, boolean>();
-  private readonly pills = new Map<string, ComposerPillRegistration>();
-  private readonly createPill: ComposerPillFactory;
+export interface OrchestratorComposerPillRegistry {
+  upsertAgent(target: AgentComposerTarget): string | null;
+  removeAgent(agentId: string): void;
+  setWorkspaceAvailability(workspaceId: string, installed: boolean): void;
+  clear(): void;
+}
 
-  constructor(createPill: ComposerPillFactory) {
-    this.createPill = createPill;
-  }
+export function createOrchestratorComposerPillRegistry(
+  createPill: ComposerPillFactory,
+): OrchestratorComposerPillRegistry {
+  const agents = new Map<string, string>();
+  const availability = new Map<string, boolean>();
+  const pills = new Map<string, ComposerPillRegistration>();
 
-  upsertAgent(target: AgentComposerTarget): string | null {
+  function upsertAgent(target: AgentComposerTarget): string | null {
     const agentId = target.agentId.trim();
     const workspaceId = target.workspaceId?.trim() || null;
     if (!agentId || !workspaceId || target.archived) {
-      this.removeAgent(agentId);
+      removeAgent(agentId);
       return null;
     }
 
-    const previousWorkspaceId = this.agents.get(agentId);
+    const previousWorkspaceId = agents.get(agentId);
     if (previousWorkspaceId === workspaceId) return null;
 
-    this.removePill(agentId);
-    this.agents.set(agentId, workspaceId);
-    this.reconcileAgent(agentId, workspaceId);
-    if (previousWorkspaceId) this.removeUnusedAvailability(previousWorkspaceId);
+    removePill(agentId);
+    agents.set(agentId, workspaceId);
+    reconcileAgent(agentId, workspaceId);
+    if (previousWorkspaceId) removeUnusedAvailability(previousWorkspaceId);
     return workspaceId;
   }
 
-  removeAgent(agentId: string): void {
+  function removeAgent(agentId: string): void {
     const normalizedAgentId = agentId.trim();
     if (!normalizedAgentId) return;
-    const workspaceId = this.agents.get(normalizedAgentId);
-    this.removePill(normalizedAgentId);
-    this.agents.delete(normalizedAgentId);
-    if (workspaceId) this.removeUnusedAvailability(workspaceId);
+    const workspaceId = agents.get(normalizedAgentId);
+    removePill(normalizedAgentId);
+    agents.delete(normalizedAgentId);
+    if (workspaceId) removeUnusedAvailability(workspaceId);
   }
 
-  setWorkspaceAvailability(workspaceId: string, installed: boolean): void {
+  function setWorkspaceAvailability(workspaceId: string, installed: boolean): void {
     const normalizedWorkspaceId = workspaceId.trim();
-    if (!normalizedWorkspaceId || !this.hasAgentsInWorkspace(normalizedWorkspaceId)) return;
-    this.availability.set(normalizedWorkspaceId, installed);
-    for (const [agentId, agentWorkspaceId] of this.agents) {
+    if (!normalizedWorkspaceId || !hasAgentsInWorkspace(normalizedWorkspaceId)) return;
+    availability.set(normalizedWorkspaceId, installed);
+    for (const [agentId, agentWorkspaceId] of agents) {
       if (agentWorkspaceId === normalizedWorkspaceId) {
-        this.reconcileAgent(agentId, normalizedWorkspaceId);
+        reconcileAgent(agentId, normalizedWorkspaceId);
       }
     }
   }
 
-  clear(): void {
-    for (const registration of this.pills.values()) registration.remove();
-    this.pills.clear();
-    this.agents.clear();
-    this.availability.clear();
+  function clear(): void {
+    for (const registration of pills.values()) registration.remove();
+    pills.clear();
+    agents.clear();
+    availability.clear();
   }
 
-  private reconcileAgent(agentId: string, workspaceId: string): void {
-    if (this.availability.get(workspaceId) !== true) {
-      this.removePill(agentId);
+  function reconcileAgent(agentId: string, workspaceId: string): void {
+    if (availability.get(workspaceId) !== true) {
+      removePill(agentId);
       return;
     }
-    if (this.pills.has(agentId)) return;
-    this.pills.set(agentId, this.createPill({ agentId, workspaceId }));
+    if (pills.has(agentId)) return;
+    pills.set(agentId, createPill({ agentId, workspaceId }));
   }
 
-  private removePill(agentId: string): void {
-    this.pills.get(agentId)?.remove();
-    this.pills.delete(agentId);
+  function removePill(agentId: string): void {
+    pills.get(agentId)?.remove();
+    pills.delete(agentId);
   }
 
-  private removeUnusedAvailability(workspaceId: string): void {
-    if (!this.hasAgentsInWorkspace(workspaceId)) this.availability.delete(workspaceId);
+  function removeUnusedAvailability(workspaceId: string): void {
+    if (!hasAgentsInWorkspace(workspaceId)) availability.delete(workspaceId);
   }
 
-  private hasAgentsInWorkspace(workspaceId: string): boolean {
-    for (const agentWorkspaceId of this.agents.values()) {
+  function hasAgentsInWorkspace(workspaceId: string): boolean {
+    for (const agentWorkspaceId of agents.values()) {
       if (agentWorkspaceId === workspaceId) return true;
     }
     return false;
   }
+
+  return { clear, removeAgent, setWorkspaceAvailability, upsertAgent };
 }

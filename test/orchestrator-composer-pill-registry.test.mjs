@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { OrchestratorComposerPillRegistry } from "../client/orchestrator-composer-pill-registry.ts";
+import { createOrchestratorComposerPillRegistry } from "../client/orchestrator-composer-pill-registry.ts";
 
 function createHarness() {
   const created = [];
   const removed = [];
-  const registry = new OrchestratorComposerPillRegistry(({ agentId, workspaceId }) => {
+  const registry = createOrchestratorComposerPillRegistry(({ agentId, workspaceId }) => {
     created.push({ agentId, workspaceId });
     return {
       remove() {
