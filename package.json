@@ -1,8 +1,10 @@
 {
   "name": "paseo-openspec-orchestrator",
   "private": true,
+  "type": "module",
   "version": "0.0.1",
   "scripts": {
+    "test": "node --test test/*.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
