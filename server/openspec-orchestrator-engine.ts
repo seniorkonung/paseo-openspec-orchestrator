@@ -1,4 +1,4 @@
-import type { ControlCommand } from "../shared/orchestrator.ts";
+import { ORCHESTRATOR_LIMITS, type ControlCommand } from "../shared/orchestrator.ts";
 import { readGitBranch, type GitBranchProbe } from "./git-branch.ts";
 import { readGitWorktreeStatus, type GitWorktreeProbe } from "./git-worktree.ts";
 import type { OrchestratorEngine, OrchestratorEngineContext } from "./orchestrator-engine.ts";
@@ -12,6 +12,7 @@ import {
   createInitialWorkflowState,
   type WorkflowState,
   type WorkflowStepDefinition,
+  type WorkflowStepId,
 } from "./workflow/types.ts";
 import { OPEN_SPEC_WORKFLOW_STEPS } from "./workflow/steps/index.ts";
 
@@ -19,6 +20,7 @@ export interface OpenSpecOrchestratorEngineOptions {
   branchProbe?: GitBranchProbe;
   worktreeProbe?: GitWorktreeProbe;
   steps?: readonly WorkflowStepDefinition[];
+  startStepId?: WorkflowStepId;
   now?: () => Date;
 }
 
@@ -27,13 +29,14 @@ interface WorkspaceRuntime {
   generation: number;
   pauseRequested: boolean;
   active: boolean;
-  nextStep: number;
+  currentStepId: WorkflowStepId | null;
   state: WorkflowState;
   currentHandle: ActionHandle | null;
   abortController: AbortController | null;
 }
 
 const ACTIVE_LIFECYCLE_STATUSES = ["starting", "running", "pausing", "paused"] as const;
+const MAX_STEP_LABEL_LENGTH = ORCHESTRATOR_LIMITS.actionText;
 
 function isActiveLifecycleStatus(status: string): boolean {
   return (ACTIVE_LIFECYCLE_STATUSES as readonly string[]).includes(status);
@@ -43,7 +46,8 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
   readonly #ledger: OrchestratorLedger;
   readonly #branchProbe: GitBranchProbe;
   readonly #worktreeProbe: GitWorktreeProbe;
-  readonly #steps: readonly WorkflowStepDefinition[];
+  readonly #steps: ReadonlyMap<WorkflowStepId, WorkflowStepDefinition>;
+  readonly #startStepId: WorkflowStepId;
   readonly #now: () => Date;
   readonly #runtime = new Map<string, WorkspaceRuntime>();
   #disposed = false;
@@ -56,9 +60,27 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
     this.#worktreeProbe =
       options.worktreeProbe ??
       ((workspaceDirectory, signal) => readGitWorktreeStatus(workspaceDirectory, { signal }));
-    this.#steps = Object.freeze([...(options.steps ?? OPEN_SPEC_WORKFLOW_STEPS)]);
-    if (this.#steps.length === 0) {
+    const configuredSteps = [...(options.steps ?? OPEN_SPEC_WORKFLOW_STEPS)];
+    if (configuredSteps.length === 0) {
       throw new Error("Workflow должен содержать хотя бы один шаг");
+    }
+    const steps = new Map<WorkflowStepId, WorkflowStepDefinition>();
+    for (const step of configuredSteps) {
+      if (step.id.trim().length === 0) {
+        throw new Error("Workflow не может содержать шаг без id");
+      }
+      if (step.label.trim().length === 0 || step.label.length > MAX_STEP_LABEL_LENGTH) {
+        throw new Error(`Недопустимое название шага workflow: ${step.id}`);
+      }
+      if (steps.has(step.id)) {
+        throw new Error(`Workflow содержит повторяющийся id шага: ${step.id}`);
+      }
+      steps.set(step.id, step);
+    }
+    this.#steps = steps;
+    this.#startStepId = options.startStepId ?? configuredSteps[0].id;
+    if (!this.#steps.has(this.#startStepId)) {
+      throw new Error(`Начальный шаг workflow не найден: ${this.#startStepId}`);
     }
     this.#now = options.now ?? (() => new Date());
   }
@@ -71,7 +93,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       generation: 0,
       pauseRequested: false,
       active: false,
-      nextStep: 0,
+      currentStepId: null,
       state: createInitialWorkflowState(),
       currentHandle: null,
       abortController: null,
@@ -141,7 +163,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
     runtime.generation += 1;
     runtime.pauseRequested = false;
     runtime.active = true;
-    runtime.nextStep = 0;
+    runtime.currentStepId = this.#startStepId;
     runtime.state = createInitialWorkflowState();
     runtime.currentHandle = null;
     runtime.abortController?.abort();
@@ -179,9 +201,18 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
         return;
       }
 
-      const step = this.#steps[runtime.nextStep];
-      if (!step) {
+      const currentStepId = runtime.currentStepId;
+      if (currentStepId === null) {
         this.#complete(reporter, runtime);
+        return;
+      }
+      const step = this.#steps.get(currentStepId);
+      if (!step) {
+        this.#fail(
+          reporter,
+          runtime,
+          `Шаг «${currentStepId}» не найден; проверьте конфигурацию workflow и нажмите «Повторить»`,
+        );
         return;
       }
 
@@ -211,17 +242,34 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
 
         runtime.state = { ...runtime.state, ...(result.state ?? {}) };
         handle.update({ text: result.summary ?? step.label });
-        if (result.kind === "halt") {
-          this.#fail(reporter, runtime, result.message);
-          return;
-        }
 
-        handle.succeed();
-        runtime.currentHandle = null;
-        runtime.nextStep += 1;
-        if (runtime.pauseRequested) {
-          this.#reachPause(reporter, runtime);
-          return;
+        switch (result.kind) {
+          case "halt":
+            this.#fail(reporter, runtime, result.message);
+            return;
+          case "complete":
+            handle.succeed();
+            runtime.currentHandle = null;
+            runtime.currentStepId = null;
+            this.#complete(reporter, runtime);
+            return;
+          case "continue":
+            if (!this.#steps.has(result.next)) {
+              this.#fail(
+                reporter,
+                runtime,
+                `Следующий шаг «${result.next}» не найден; проверьте конфигурацию workflow и нажмите «Повторить»`,
+              );
+              return;
+            }
+            handle.succeed();
+            runtime.currentHandle = null;
+            runtime.currentStepId = result.next;
+            if (runtime.pauseRequested) {
+              this.#reachPause(reporter, runtime);
+              return;
+            }
+            break;
         }
       } catch (error) {
         if (this.#disposed || runtime.generation !== generation) return;

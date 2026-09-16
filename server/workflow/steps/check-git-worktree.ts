@@ -49,7 +49,7 @@ export async function checkGitWorktreeStep(
   }
 
   return {
-    kind: "continue",
+    kind: "complete",
     summary: worktreeSummary(decision),
   };
 }

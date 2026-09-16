@@ -152,7 +152,7 @@ test("изменения рабочего дерева блокируют workfl
   await ledger.close();
 });
 
-test("workflow выполняет отдельные шаги по порядку и передаёт состояние дальше", async (context) => {
+test("workflow выполняет отдельные шаги и передаёт состояние дальше", async (context) => {
   const paseoHome = await temporaryHome(context);
   const ledger = new OrchestratorLedger({ paseoHome });
   await ledger.open("workspace-steps");
@@ -164,6 +164,7 @@ test("workflow выполняет отдельные шаги по порядк�
         label: "Первый шаг",
         run: async () => ({
           kind: "continue",
+          next: "second-step",
           summary: "Первый шаг завершён",
           state: { branch: "feature/from-step" },
         }),
@@ -173,7 +174,7 @@ test("workflow выполняет отдельные шаги по порядк�
         label: "Второй шаг",
         run: async ({ state }) => {
           seenStates.push({ ...state });
-          return { kind: "continue", summary: "Второй шаг завершён" };
+          return { kind: "complete", summary: "Второй шаг завершён" };
         },
       },
     ],
@@ -194,6 +195,91 @@ test("workflow выполняет отдельные шаги по порядк�
   await ledger.close();
 });
 
+test("workflow следует явным переходам и может возвращаться к предыдущему шагу", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-graph");
+  let hasIssues = true;
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    steps: [
+      {
+        id: "execute-task",
+        label: "Выполняю задачу",
+        run: async () => ({
+          kind: "continue",
+          next: hasIssues ? "resolve-issues" : "review-result",
+          summary: hasIssues ? "Обнаружены проблемы" : "Задача выполнена",
+        }),
+      },
+      {
+        id: "resolve-issues",
+        label: "Разбираю проблемы",
+        run: async () => {
+          hasIssues = false;
+          return {
+            kind: "continue",
+            next: "execute-task",
+            summary: "Проблемы разобраны",
+          };
+        },
+      },
+      {
+        id: "review-result",
+        label: "Проверяю результат",
+        run: async () => ({ kind: "complete", summary: "Review завершён" }),
+      },
+    ],
+  });
+  engine.initialize("workspace-graph", { workspaceDirectory: "/workspace/project" });
+
+  engine.command("workspace-graph", "start");
+  await settleWorkflow();
+
+  const snapshot = ledger.get("workspace-graph");
+  assert.equal(snapshot.lifecycle.status, "completed");
+  assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
+    ["Обнаружены проблемы", "succeeded"],
+    ["Проблемы разобраны", "succeeded"],
+    ["Задача выполнена", "succeeded"],
+    ["Review завершён", "succeeded"],
+  ]);
+  engine.dispose();
+  await ledger.close();
+});
+
+test("неизвестный переход останавливает workflow с понятной ошибкой конфигурации", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-unknown-transition");
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    steps: [
+      {
+        id: "broken-transition",
+        label: "Проверяю переход",
+        run: async () => ({
+          kind: "continue",
+          next: "missing-step",
+          summary: "Готовлю неизвестный переход",
+        }),
+      },
+    ],
+  });
+  engine.initialize("workspace-unknown-transition", {
+    workspaceDirectory: "/workspace/project",
+  });
+
+  engine.command("workspace-unknown-transition", "start");
+  await settleWorkflow();
+
+  const snapshot = ledger.get("workspace-unknown-transition");
+  assert.equal(snapshot.lifecycle.status, "failed");
+  assert.equal(snapshot.lifecycle.availableCommand, "retry");
+  assert.match(snapshot.lifecycle.message, /Следующий шаг «missing-step» не найден/);
+  assert.equal(snapshot.history.at(-1)?.outcome, "failed");
+  engine.dispose();
+  await ledger.close();
+});
+
 test("engine отменяет активный шаг через AbortSignal при dispose", async (context) => {
   const paseoHome = await temporaryHome(context);
   const ledger = new OrchestratorLedger({ paseoHome });
@@ -207,7 +293,7 @@ test("engine отменяет активный шаг через AbortSignal п�
         run: async ({ signal }) => {
           stepSignal = signal;
           await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
-          return { kind: "continue", summary: "Шаг отменён" };
+          return { kind: "complete", summary: "Шаг отменён" };
         },
       },
     ],

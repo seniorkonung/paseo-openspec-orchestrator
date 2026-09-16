@@ -37,6 +37,7 @@ export async function inspectChangeStep(
 
   return {
     kind: "continue",
+    next: "review-change",
     summary: `Change: ${change.title}`,
   };
 }
@@ -53,7 +54,21 @@ export const inspectChange: WorkflowStepDefinition = {
 поле в `WorkflowState` в `types.ts`, затем верните его в `state`.
 Результат `continue` запускает следующий шаг, а `halt` завершает текущее выполнение
 со статусом `failed`; пользователь сможет исправить причину и выполнить `retry`.
-Порядок элементов в `OPEN_SPEC_WORKFLOW_STEPS` — порядок выполнения.
+Результат `complete` завершает workflow успешно. Массив
+`OPEN_SPEC_WORKFLOW_STEPS` теперь является реестром шагов: порядок элементов не
+определяет выполнение, переходы задаются через `next` по идентификатору шага.
+
+Переход может образовывать ветвление или цикл:
+
+```ts
+return {
+  kind: "continue",
+  next: state.issues.length > 0 ? "resolve-issues" : "review-result",
+};
+```
+
+Шаг `resolve-issues` может после исправления вернуть `next: "execute-task"`, а
+`review-result` — `kind: "complete"`.
 
 Для внешних вызовов используйте `context.signal`: engine отменяет его при retry,
 остановке плагина или уничтожении workflow. Не запускайте агент или MCP-сервер на

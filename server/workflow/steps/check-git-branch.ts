@@ -57,6 +57,7 @@ export async function checkGitBranchStep(
     case "non-main":
       return {
         kind: "continue",
+        next: "check-git-worktree",
         state: { branch: decision.name },
         summary: branchSummary(decision),
       };

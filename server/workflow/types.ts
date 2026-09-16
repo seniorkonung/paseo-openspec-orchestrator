@@ -10,6 +10,8 @@ export interface WorkflowServices {
   readonly gitWorktree: GitWorktreeProbe;
 }
 
+export type WorkflowStepId = string;
+
 export interface WorkflowStepContext {
   readonly workspaceDirectory: string;
   readonly signal: AbortSignal;
@@ -20,6 +22,12 @@ export interface WorkflowStepContext {
 export type WorkflowStepResult =
   | {
       kind: "continue";
+      next: WorkflowStepId;
+      state?: Partial<WorkflowState>;
+      summary?: string;
+    }
+  | {
+      kind: "complete";
       state?: Partial<WorkflowState>;
       summary?: string;
     }
@@ -35,7 +43,7 @@ export type WorkflowStepFunction = (
 ) => Promise<WorkflowStepResult>;
 
 export interface WorkflowStepDefinition {
-  readonly id: string;
+  readonly id: WorkflowStepId;
   readonly label: string;
   readonly run: WorkflowStepFunction;
 }
