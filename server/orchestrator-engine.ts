@@ -1,9 +1,10 @@
 import type { ControlCommand } from "../shared/orchestrator.ts";
+import type { OrchestratorWorkspaceDisplay } from "../shared/orchestrator-notifications.ts";
 
 export interface OrchestratorEngineContext {
   readonly workspaceDirectory: string;
-  readonly projectName: string | null;
-  readonly workspaceName: string | null;
+  readonly workspaceDisplay: OrchestratorWorkspaceDisplay;
+  readonly refreshWorkspaceDisplay: () => Promise<OrchestratorWorkspaceDisplay>;
 }
 
 export interface OrchestratorEngine {

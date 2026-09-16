@@ -28,6 +28,15 @@ async function settleWorkflow() {
   await new Promise((resolve) => setTimeout(resolve, 50));
 }
 
+function engineContext(workspaceDirectory = "/workspace/project") {
+  const workspaceDisplay = { projectName: null, workspaceName: null };
+  return {
+    workspaceDirectory,
+    workspaceDisplay,
+    refreshWorkspaceDisplay: async () => workspaceDisplay,
+  };
+}
+
 test("определяет реальную Git-ветку в директории workspace", async (context) => {
   const workspaceDirectory = await temporaryHome(context, "openspec-git-");
   await execFileAsync("git", ["init"], { cwd: workspaceDirectory });
@@ -100,7 +109,7 @@ test("на non-main ветке workflow завершает инициализа�
     },
     worktreeProbe: async () => ({ kind: "clean" }),
   });
-  engine.initialize("workspace-1", { workspaceDirectory: "/workspace/project" });
+  engine.initialize("workspace-1", engineContext());
 
   engine.command("workspace-1", "start");
   await settleWorkflow();
@@ -125,7 +134,7 @@ test("изменения рабочего дерева блокируют workfl
     branchProbe: async () => ({ kind: "non-main", name: "feature/clean-check" }),
     worktreeProbe: async () => worktree,
   });
-  engine.initialize("workspace-dirty", { workspaceDirectory: "/workspace/project" });
+  engine.initialize("workspace-dirty", engineContext());
 
   engine.command("workspace-dirty", "start");
   await settleWorkflow();
@@ -180,7 +189,7 @@ test("workflow выполняет отдельные шаги и передаё�
       },
     ],
   });
-  engine.initialize("workspace-steps", { workspaceDirectory: "/workspace/project" });
+  engine.initialize("workspace-steps", engineContext());
 
   engine.command("workspace-steps", "start");
   await settleWorkflow();
@@ -231,7 +240,7 @@ test("workflow следует явным переходам и может воз
       },
     ],
   });
-  engine.initialize("workspace-graph", { workspaceDirectory: "/workspace/project" });
+  engine.initialize("workspace-graph", engineContext());
 
   engine.command("workspace-graph", "start");
   await settleWorkflow();
@@ -286,7 +295,7 @@ test("после перезапуска workflow продолжает работ
     },
   ];
   const engine = new OpenSpecOrchestratorEngine(ledger, { steps });
-  engine.initialize("workspace-resume", { workspaceDirectory: "/workspace/project" });
+  engine.initialize("workspace-resume", engineContext());
   engine.command("workspace-resume", "start");
   await secondStartedPromise;
   await ledger.flush();
@@ -321,7 +330,7 @@ test("после перезапуска workflow продолжает работ
       },
     ],
   });
-  resumedEngine.initialize("workspace-resume", { workspaceDirectory: "/workspace/project" });
+  resumedEngine.initialize("workspace-resume", engineContext());
   assert.equal(restoredLedger.get("workspace-resume").lifecycle.status, "idle");
   assert.equal(restoredLedger.get("workspace-resume").history.at(-1)?.outcome, "cancelled");
 
@@ -358,7 +367,7 @@ test("clear отменяет активный шаг и удаляет исто�
       },
     ],
   });
-  engine.initialize("workspace-clear", { workspaceDirectory: "/workspace/project" });
+  engine.initialize("workspace-clear", engineContext());
   engine.command("workspace-clear", "start");
   await nextEventLoop();
   engine.command("workspace-clear", "clear");
@@ -392,9 +401,7 @@ test("неизвестный переход останавливает workflow 
       },
     ],
   });
-  engine.initialize("workspace-unknown-transition", {
-    workspaceDirectory: "/workspace/project",
-  });
+  engine.initialize("workspace-unknown-transition", engineContext());
 
   engine.command("workspace-unknown-transition", "start");
   await settleWorkflow();
@@ -426,7 +433,7 @@ test("engine отменяет активный шаг через AbortSignal п�
       },
     ],
   });
-  engine.initialize("workspace-cancellation", { workspaceDirectory: "/workspace/project" });
+  engine.initialize("workspace-cancellation", engineContext());
 
   engine.command("workspace-cancellation", "start");
   await nextEventLoop();
@@ -456,7 +463,7 @@ test("неожиданная ошибка шага переводит workflow �
       },
     ],
   });
-  engine.initialize("workspace-error", { workspaceDirectory: "/workspace/project" });
+  engine.initialize("workspace-error", engineContext());
 
   engine.command("workspace-error", "start");
   await settleWorkflow();
@@ -480,7 +487,7 @@ test("на main ветке workflow останавливается, а retry п�
     branchProbe: async () => decision,
     worktreeProbe: async () => ({ kind: "clean" }),
   });
-  engine.initialize("workspace-1", { workspaceDirectory: "/workspace/project" });
+  engine.initialize("workspace-1", engineContext());
 
   engine.command("workspace-1", "start");
   await settleWorkflow();
@@ -513,7 +520,7 @@ test("detached HEAD и ошибка Git требуют retry", async (context) =
   const engine = new OpenSpecOrchestratorEngine(ledger, {
     branchProbe: async () => ({ kind: "detached" }),
   });
-  engine.initialize("workspace-1", { workspaceDirectory: "/workspace/project" });
+  engine.initialize("workspace-1", engineContext());
 
   engine.command("workspace-1", "start");
   await settleWorkflow();
@@ -527,7 +534,7 @@ test("detached HEAD и ошибка Git требуют retry", async (context) =
     },
   });
   await ledger.open("workspace-2");
-  failingEngine.initialize("workspace-2", { workspaceDirectory: "/workspace/project" });
+  failingEngine.initialize("workspace-2", engineContext());
   failingEngine.command("workspace-2", "start");
   await settleWorkflow();
   snapshot = ledger.get("workspace-2");
@@ -554,7 +561,7 @@ test("пауза во время проверки ветки применяет�
     },
     worktreeProbe: async () => ({ kind: "clean" }),
   });
-  engine.initialize("workspace-1", { workspaceDirectory: "/workspace/project" });
+  engine.initialize("workspace-1", engineContext());
 
   engine.command("workspace-1", "start");
   await nextEventLoop();
@@ -583,7 +590,7 @@ test("после reload незавершённая проверка ветки �
   const restoredLedger = new OrchestratorLedger({ paseoHome });
   await restoredLedger.open("workspace-1");
   const engine = new OpenSpecOrchestratorEngine(restoredLedger);
-  engine.initialize("workspace-1", { workspaceDirectory: "/workspace/project" });
+  engine.initialize("workspace-1", engineContext());
 
   const snapshot = restoredLedger.get("workspace-1");
   assert.equal(snapshot.lifecycle.status, "idle");
@@ -612,16 +619,17 @@ test("контроллер передаёт engine директорию и на�
     ledger,
     createEngine: () => engine,
   });
+  let workspaceSnapshot = {
+    projectCustomName: "Платёжный сервис",
+    projectDisplayName: "payments",
+    title: "Проверка авторизации",
+    name: "feature/auth",
+  };
   const paseo = {
     workspaces: {
       ref: () => ({
         directory: "/tmp/workspace-1",
-        refresh: async () => ({
-          projectCustomName: "Платёжный сервис",
-          projectDisplayName: "payments",
-          title: "Проверка авторизации",
-          name: "feature/auth",
-        }),
+        refresh: async () => workspaceSnapshot,
       }),
     },
   };
@@ -629,16 +637,25 @@ test("контроллер передаёт engine директорию и на�
   const initial = await controller.get("workspace-1", paseo);
   const started = await controller.control("workspace-1", initial.revision, "start", paseo);
   assert.equal(started.status, "accepted");
-  assert.deepEqual(calls[0], [
-    "initialize",
-    "workspace-1",
-    {
-      workspaceDirectory: "/tmp/workspace-1",
-      projectName: "Платёжный сервис",
-      workspaceName: "Проверка авторизации",
-    },
-  ]);
+  const [initializeCall, initializedWorkspaceId, initializedContext] = calls[0];
+  assert.equal(initializeCall, "initialize");
+  assert.equal(initializedWorkspaceId, "workspace-1");
+  assert.equal(initializedContext.workspaceDirectory, "/tmp/workspace-1");
+  assert.deepEqual(initializedContext.workspaceDisplay, {
+    projectName: "Платёжный сервис",
+    workspaceName: "Проверка авторизации",
+  });
+  assert.equal(typeof initializedContext.refreshWorkspaceDisplay, "function");
   assert.deepEqual(calls[1], ["command", "workspace-1", "start"]);
+
+  workspaceSnapshot = {
+    ...workspaceSnapshot,
+    title: "Ручное название после переименования",
+  };
+  assert.deepEqual(await initializedContext.refreshWorkspaceDisplay(), {
+    projectName: "Платёжный сервис",
+    workspaceName: "Ручное название после переименования",
+  });
 
   const cleared = await controller.control("workspace-1", initial.revision, "clear", paseo);
   assert.equal(cleared.status, "accepted");

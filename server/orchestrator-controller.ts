@@ -1,4 +1,5 @@
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
+import type { OrchestratorWorkspaceDisplay } from "../shared/orchestrator-notifications.ts";
 import type { ControlCommand, OrchestratorSnapshot } from "../shared/orchestrator.ts";
 import { OpenSpecOrchestratorEngine } from "./openspec-orchestrator-engine.ts";
 import type { OrchestratorEngine } from "./orchestrator-engine.ts";
@@ -122,12 +123,36 @@ export class OrchestratorController {
     }
 
     await this.#ledger.open(workspaceId);
+    const workspaceDisplay = workspaceDisplayFromSnapshot(snapshot);
     this.#engine.initialize(workspaceId, {
       workspaceDirectory: workspace.directory,
-      projectName: preferredName(snapshot?.projectCustomName, snapshot?.projectDisplayName),
-      workspaceName: preferredName(snapshot?.title, snapshot?.name),
+      workspaceDisplay,
+      refreshWorkspaceDisplay: async () => {
+        const refreshed = await workspace.refresh();
+        if (!refreshed) {
+          throw new Error("Рабочая область больше недоступна");
+        }
+        return workspaceDisplayFromSnapshot(refreshed);
+      },
     });
   }
+}
+
+function workspaceDisplayFromSnapshot(
+  snapshot:
+    | {
+        projectCustomName?: string | null;
+        projectDisplayName?: string | null;
+        title?: string | null;
+        name?: string | null;
+      }
+    | null
+    | undefined,
+): OrchestratorWorkspaceDisplay {
+  return {
+    projectName: preferredName(snapshot?.projectCustomName, snapshot?.projectDisplayName),
+    workspaceName: preferredName(snapshot?.title, snapshot?.name),
+  };
 }
 
 function preferredName(

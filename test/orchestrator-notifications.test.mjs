@@ -23,6 +23,15 @@ async function temporaryDirectory(context, prefix = "openspec-notifications-") {
   return directory;
 }
 
+function engineContext(workspaceDirectory = "/workspace/project") {
+  const workspaceDisplay = { projectName: null, workspaceName: null };
+  return {
+    workspaceDirectory,
+    workspaceDisplay,
+    refreshWorkspaceDisplay: async () => workspaceDisplay,
+  };
+}
+
 test("настройки уведомлений нормализуют URL и отклоняют небезопасные значения", () => {
   const values = normalizeOrchestratorNotificationSettings({
     ...DEFAULT_ORCHESTRATOR_NOTIFICATION_SETTINGS,
@@ -225,8 +234,14 @@ test("engine уведомляет о retry, прогрессе шага и за�
   });
   engine.initialize("workspace-notifications", {
     workspaceDirectory: "/workspace/project",
-    projectName: "Платёжный сервис",
-    workspaceName: "Проверка авторизации",
+    workspaceDisplay: {
+      projectName: "Платёжный сервис",
+      workspaceName: "Проверка авторизации",
+    },
+    refreshWorkspaceDisplay: async () => ({
+      projectName: "Платёжный сервис",
+      workspaceName: "Проверка авторизации",
+    }),
   });
   engine.command("workspace-notifications", "start");
   await new Promise((resolve) => setTimeout(resolve, 60));
@@ -251,6 +266,84 @@ test("engine уведомляет о retry, прогрессе шага и за�
       },
     },
   ]);
+
+  engine.dispose();
+  await ledger.close();
+});
+
+test("engine обновляет имя workspace перед уведомлением и сохраняет последнее при ошибке", async (context) => {
+  const warn = context.mock.method(console, "warn", () => undefined);
+  const directory = await temporaryDirectory(context);
+  const ledger = new OrchestratorLedger({ paseoHome: directory });
+  await ledger.open("workspace-renamed-notifications");
+  const events = [];
+  let workspaceName = "Автоматическое название";
+  let refreshFails = false;
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    notifications: {
+      async notify(_workspaceId, notification, workspace) {
+        events.push({ ...notification, workspace });
+        return true;
+      },
+    },
+    steps: [
+      {
+        id: "announce-before-and-after-rename",
+        label: "Проверяю обновление названия",
+        async run({ services }) {
+          await services.notify({ kind: "progress", message: "До переименования" });
+          workspaceName = "Проверка авторизации";
+          await services.notify({ kind: "progress", message: "После переименования" });
+          refreshFails = true;
+          return { kind: "complete" };
+        },
+      },
+    ],
+  });
+  engine.initialize("workspace-renamed-notifications", {
+    workspaceDirectory: "/workspace/project",
+    workspaceDisplay: {
+      projectName: "Платёжный сервис",
+      workspaceName,
+    },
+    refreshWorkspaceDisplay: async () => {
+      if (refreshFails) throw new Error("Paseo временно недоступен");
+      return {
+        projectName: "Платёжный сервис",
+        workspaceName,
+      };
+    },
+  });
+  engine.command("workspace-renamed-notifications", "start");
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  assert.deepEqual(events, [
+    {
+      kind: "progress",
+      message: "До переименования",
+      workspace: {
+        projectName: "Платёжный сервис",
+        workspaceName: "Автоматическое название",
+      },
+    },
+    {
+      kind: "progress",
+      message: "После переименования",
+      workspace: {
+        projectName: "Платёжный сервис",
+        workspaceName: "Проверка авторизации",
+      },
+    },
+    {
+      kind: "completed",
+      message: "Все действия текущего запуска завершены",
+      workspace: {
+        projectName: "Платёжный сервис",
+        workspaceName: "Проверка авторизации",
+      },
+    },
+  ]);
+  assert.equal(warn.mock.callCount(), 1);
 
   engine.dispose();
   await ledger.close();
@@ -282,7 +375,7 @@ test("engine уведомляет о необходимости retry при hal
       },
     ],
   });
-  engine.initialize("workspace-retry-notification", { workspaceDirectory: "/workspace/project" });
+  engine.initialize("workspace-retry-notification", engineContext());
   engine.command("workspace-retry-notification", "start");
   await new Promise((resolve) => setTimeout(resolve, 60));
 
