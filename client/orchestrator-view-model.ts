@@ -21,6 +21,7 @@ export const commandLabels: Record<ControlCommand, string> = {
   pause: "Пауза",
   resume: "Продолжить",
   retry: "Повторить",
+  clear: "Очистить состояние",
 };
 
 export const outcomeSigns: Record<CompletedAction["outcome"], string> = {

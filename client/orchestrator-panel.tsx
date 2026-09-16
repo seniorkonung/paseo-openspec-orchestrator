@@ -6,6 +6,7 @@ import { FlatList } from "@getpaseo/plugin/client/react-native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   type FlatList as NativeFlatList,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -137,6 +138,21 @@ export function OrchestratorPanel({
     setAtBottom(true);
     setNewActionCount(0);
   }, []);
+
+  const requestClear = useCallback(() => {
+    Alert.alert(
+      "Очистить состояние?",
+      "История действий, выбранный change и checkpoint workflow будут удалены. Следующий запуск начнётся с первого шага.",
+      [
+        { text: "Отмена", style: "cancel" },
+        {
+          text: "Очистить",
+          style: "destructive",
+          onPress: () => void orchestrator.execute("clear"),
+        },
+      ],
+    );
+  }, [orchestrator.execute]);
 
   const renderAction = useCallback(
     ({ item }: { item: CompletedAction }) => {
@@ -282,6 +298,7 @@ export function OrchestratorPanel({
         commandPending={orchestrator.commandPending}
         navigation={navigation}
         onCommand={orchestrator.execute}
+        onClear={requestClear}
         styles={styles}
         colors={theme.colors}
       />
@@ -295,6 +312,7 @@ function CurrentStatePanel({
   commandPending,
   navigation,
   onCommand,
+  onClear,
   styles,
   colors,
 }: {
@@ -304,6 +322,7 @@ function CurrentStatePanel({
   navigation: Navigation;
   onCommand: (command: NonNullable<OrchestratorSnapshot["lifecycle"]["availableCommand"]>) =>
     Promise<void>;
+  onClear: () => void;
   styles: ReturnType<typeof createStyles>;
   colors: PluginWorkspacePanelProps["theme"]["colors"];
 }) {
@@ -344,24 +363,42 @@ function CurrentStatePanel({
               />
             ) : null}
           </View>
-          {command ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityState={{ disabled: commandPending, busy: commandPending }}
-              disabled={commandPending}
-              onPress={() => void onCommand(command)}
-              style={({ pressed }) => [
-                styles.controlButton,
-                commandPending && styles.controlButtonDisabled,
-                pressed && sharedStyles.pressed,
-              ]}
-            >
-              {commandPending ? (
-                <ActivityIndicator color={colors.accentForeground} size="small" />
-              ) : null}
-              <Text style={styles.controlButtonText}>{commandLabels[command]}</Text>
-            </Pressable>
-          ) : null}
+          <View style={styles.currentActions}>
+            {command ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ disabled: commandPending, busy: commandPending }}
+                disabled={commandPending}
+                onPress={() => void onCommand(command)}
+                style={({ pressed }) => [
+                  styles.controlButton,
+                  commandPending && styles.controlButtonDisabled,
+                  pressed && sharedStyles.pressed,
+                ]}
+              >
+                {commandPending ? (
+                  <ActivityIndicator color={colors.accentForeground} size="small" />
+                ) : null}
+                <Text style={styles.controlButtonText}>{commandLabels[command]}</Text>
+              </Pressable>
+            ) : null}
+            {snapshot ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Полностью очистить состояние оркестратора"
+                accessibilityState={{ disabled: commandPending }}
+                disabled={commandPending}
+                onPress={onClear}
+                style={({ pressed }) => [
+                  styles.clearButton,
+                  commandPending && styles.controlButtonDisabled,
+                  pressed && sharedStyles.pressed,
+                ]}
+              >
+                <Text style={styles.clearButtonText}>{commandLabels.clear}</Text>
+              </Pressable>
+            ) : null}
+          </View>
         </View>
         {commandError ? <Text style={styles.commandError}>{commandError}</Text> : null}
       </View>
@@ -661,6 +698,10 @@ function createStyles(
       minWidth: 0,
       gap: 3,
     },
+    currentActions: {
+      alignItems: "flex-end",
+      gap: 6,
+    },
     currentStatus: {
       color: colors.foregroundMuted,
       fontSize: 11,
@@ -693,6 +734,20 @@ function createStyles(
       color: colors.accentForeground,
       fontSize: compact ? 12 : 13,
       fontWeight: "700",
+    },
+    clearButton: {
+      minHeight: compact ? 30 : 32,
+      justifyContent: "center",
+      borderWidth: 1,
+      borderColor: colors.statusDanger,
+      borderRadius: 8,
+      paddingHorizontal: compact ? 9 : 11,
+      paddingVertical: 5,
+    },
+    clearButtonText: {
+      color: colors.statusDanger,
+      fontSize: 11,
+      fontWeight: "600",
     },
     commandError: {
       color: colors.statusDanger,

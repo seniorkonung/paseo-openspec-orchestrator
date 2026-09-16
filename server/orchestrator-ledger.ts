@@ -20,6 +20,10 @@ import {
   type OrchestratorSnapshot,
   workspaceIdSchema,
 } from "../shared/orchestrator.ts";
+import {
+  workflowCheckpointSchema,
+  type WorkflowCheckpoint,
+} from "./workflow/types.ts";
 
 const LEDGER_VERSION = 1;
 const MAX_LEDGER_BYTES = 64 * 1024 * 1024;
@@ -36,6 +40,7 @@ const persistedLedgerSchema = z
     lifecycle: lifecycleSchema,
     currentAction: orchestratorSnapshotSchema.shape.currentAction,
     history: orchestratorSnapshotSchema.shape.history,
+    checkpoint: workflowCheckpointSchema.nullable().default(null),
   })
   .strict();
 
@@ -60,6 +65,9 @@ interface WorkspaceLedger {
   workspaceId: string;
   revision: number;
   projection: OrchestratorProjection;
+  checkpoint: WorkflowCheckpoint | null;
+  checkpointDirty: boolean;
+  clearDirty: boolean;
   persistence: OrchestratorSnapshot["persistence"];
   writesBlocked: boolean;
   readRecoveryPending: boolean;
@@ -129,6 +137,13 @@ function cloneProjection(projection: OrchestratorProjection): OrchestratorProjec
   };
 }
 
+function cloneCheckpoint(checkpoint: WorkflowCheckpoint): WorkflowCheckpoint {
+  return workflowCheckpointSchema.parse({
+    ...checkpoint,
+    state: { ...checkpoint.state },
+  });
+}
+
 function snapshotOf(ledger: WorkspaceLedger): OrchestratorSnapshot {
   return orchestratorSnapshotSchema.parse({
     workspaceId: ledger.workspaceId,
@@ -144,26 +159,37 @@ function persistedOf(ledger: WorkspaceLedger): PersistedLedger {
     workspaceId: ledger.workspaceId,
     revision: ledger.revision,
     ...cloneProjection(ledger.projection),
+    checkpoint: ledger.checkpoint,
   });
 }
 
 function parsePersistedLedger(
   source: string,
   workspaceId: string,
-): { revision: number; projection: OrchestratorProjection } {
+): { revision: number; projection: OrchestratorProjection; checkpoint: WorkflowCheckpoint | null } {
   const persisted = persistedLedgerSchema.parse(JSON.parse(source) as unknown);
   if (persisted.workspaceId !== workspaceId) {
     throw new Error("Ledger принадлежит другой рабочей области");
   }
 
-  const { version: _version, workspaceId: _workspaceId, revision, ...projection } = persisted;
+  const {
+    version: _version,
+    workspaceId: _workspaceId,
+    revision,
+    checkpoint,
+    ...projection
+  } = persisted;
   const validatedSnapshot = orchestratorSnapshotSchema.parse({
     workspaceId,
     revision: String(revision),
     ...projection,
     persistence: { status: "ready" },
   });
-  return { revision, projection: cloneProjection(validatedSnapshot) };
+  return {
+    revision,
+    projection: cloneProjection(validatedSnapshot),
+    checkpoint: checkpoint ? cloneCheckpoint(checkpoint) : null,
+  };
 }
 
 function createWorkspaceLedger(
@@ -171,6 +197,7 @@ function createWorkspaceLedger(
   options: {
     revision?: number;
     projection?: OrchestratorProjection;
+    checkpoint?: WorkflowCheckpoint | null;
     persistence?: OrchestratorSnapshot["persistence"];
     writesBlocked?: boolean;
     readRecoveryPending?: boolean;
@@ -180,6 +207,9 @@ function createWorkspaceLedger(
     workspaceId,
     revision: options.revision ?? 0,
     projection: options.projection ?? initialProjection(),
+    checkpoint: options.checkpoint ? cloneCheckpoint(options.checkpoint) : null,
+    checkpointDirty: false,
+    clearDirty: false,
     persistence: options.persistence ?? { status: "ready" },
     writesBlocked: options.writesBlocked ?? false,
     readRecoveryPending: options.readRecoveryPending ?? false,
@@ -296,6 +326,62 @@ export class OrchestratorLedger {
 
   get(workspaceId: string): OrchestratorSnapshot {
     const ledger = this.#require(workspaceId);
+    return snapshotOf(ledger);
+  }
+
+  getWorkflowCheckpoint(workspaceId: string): WorkflowCheckpoint | null {
+    const ledger = this.#require(workspaceId);
+    return ledger.checkpoint ? cloneCheckpoint(ledger.checkpoint) : null;
+  }
+
+  /**
+   * Сохраняет checkpoint отдельно от публичной проекции.
+   * Revision UI не меняется: checkpoint — внутренний курс workflow, а не новое
+   * пользовательское событие. Вызывающий код должен дождаться flush().
+   */
+  setWorkflowCheckpoint(workspaceId: string, checkpoint: WorkflowCheckpoint | null): void {
+    const ledger = this.#require(workspaceId);
+    ledger.checkpoint = checkpoint ? cloneCheckpoint(checkpoint) : null;
+    ledger.checkpointDirty = true;
+    this.#schedulePersistence(ledger);
+  }
+
+  async saveWorkflowCheckpoint(
+    workspaceId: string,
+    checkpoint: WorkflowCheckpoint | null,
+  ): Promise<void> {
+    this.setWorkflowCheckpoint(workspaceId, checkpoint);
+    await this.flush(workspaceId);
+    const persistence = this.#require(workspaceId).persistence;
+    if (persistence.status === "degraded") {
+      throw new Error("Не удалось надёжно сохранить checkpoint workflow");
+    }
+  }
+
+  /** Полностью удаляет пользовательскую историю и внутренний checkpoint. */
+  clear(workspaceId: string): OrchestratorSnapshot {
+    const ledger = this.#require(workspaceId);
+    // Явный reset — единственная операция, которая может заменить
+    // повреждённый ledger. Обычные обновления по-прежнему оставляют такой
+    // файл без изменений до решения пользователя.
+    ledger.writesBlocked = false;
+    ledger.readRecoveryPending = false;
+    ledger.persistence = { status: "ready" };
+
+    const nextRevision = ledger.revision + 1;
+    const nextSnapshot = orchestratorSnapshotSchema.parse({
+      workspaceId: ledger.workspaceId,
+      revision: String(nextRevision),
+      ...initialProjection(),
+      persistence: ledger.persistence,
+    });
+    ledger.revision = nextRevision;
+    ledger.projection = cloneProjection(nextSnapshot);
+    ledger.checkpoint = null;
+    ledger.checkpointDirty = true;
+    ledger.clearDirty = true;
+    this.#notify(ledger);
+    this.#schedulePersistence(ledger);
     return snapshotOf(ledger);
   }
 
@@ -504,11 +590,9 @@ export class OrchestratorLedger {
     let loaded: ReturnType<typeof parsePersistedLedger>;
     try {
       loaded = parsePersistedLedger(source, ledger.workspaceId);
-      const history = mergeRecoveredHistory(
-        loaded.projection,
-        ledger.projection,
-        new Date(),
-      );
+      const history = ledger.clearDirty
+        ? ledger.projection.history
+        : mergeRecoveredHistory(loaded.projection, ledger.projection, new Date());
       const revision = Math.max(loaded.revision, ledger.revision) + 1;
       const recovered = orchestratorSnapshotSchema.parse({
         workspaceId: ledger.workspaceId,
@@ -519,6 +603,11 @@ export class OrchestratorLedger {
       });
       ledger.revision = revision;
       ledger.projection = cloneProjection(recovered);
+      if (!ledger.checkpointDirty) {
+        ledger.checkpoint = loaded.checkpoint;
+      }
+      ledger.checkpointDirty = true;
+      ledger.clearDirty = false;
       ledger.readRecoveryPending = false;
       this.#notify(ledger);
       return true;

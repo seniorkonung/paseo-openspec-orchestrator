@@ -111,6 +111,41 @@ test("ledger атомарно сохраняется и восстанавлив
   await restored.close();
 });
 
+test("ledger сохраняет checkpoint workflow и полностью очищает его вместе с историей", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-checkpoint");
+
+  ledger.update("workspace-checkpoint", (projection) => ({
+    ...projection,
+    change: { id: "change-a" },
+  }));
+  await ledger.saveWorkflowCheckpoint("workspace-checkpoint", {
+    version: 1,
+    nextStepId: "review-change",
+    state: { branch: "feature/checkpoint" },
+  });
+  assert.deepEqual(ledger.getWorkflowCheckpoint("workspace-checkpoint"), {
+    version: 1,
+    nextStepId: "review-change",
+    state: { branch: "feature/checkpoint" },
+  });
+
+  const cleared = ledger.clear("workspace-checkpoint");
+  assert.equal(cleared.change, null);
+  assert.deepEqual(cleared.history, []);
+  assert.equal(ledger.getWorkflowCheckpoint("workspace-checkpoint"), null);
+  await ledger.flush();
+  await ledger.close();
+
+  const restored = new OrchestratorLedger({ paseoHome });
+  const snapshot = await restored.open("workspace-checkpoint");
+  assert.equal(snapshot.change, null);
+  assert.deepEqual(snapshot.history, []);
+  assert.equal(restored.getWorkflowCheckpoint("workspace-checkpoint"), null);
+  await restored.close();
+});
+
 test("PASEO_HOME поддерживает переменную окружения и домашний префикс", () => {
   assert.equal(resolvePaseoHome({ PASEO_HOME: "/var/tmp/custom-paseo" }), "/var/tmp/custom-paseo");
   assert.equal(resolvePaseoHome({ PASEO_HOME: "~/.custom-paseo" }).endsWith("/.custom-paseo"), true);
@@ -130,6 +165,27 @@ test("повреждённый ledger не перезаписывается ав
   await ledger.close();
 
   assert.equal(await readFile(path, "utf8"), "{ повреждённый json\n");
+});
+
+test("явная очистка восстанавливает повреждённый ledger", async (context) => {
+  context.mock.method(console, "error", () => undefined);
+  const paseoHome = await temporaryHome(context);
+  const path = getLedgerPath("workspace-1", paseoHome);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, "{ повреждённый json\n", "utf8");
+
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-1");
+  const cleared = ledger.clear("workspace-1");
+  assert.equal(cleared.persistence.status, "ready");
+  await ledger.flush();
+  await ledger.close();
+
+  const restored = new OrchestratorLedger({ paseoHome });
+  const snapshot = await restored.open("workspace-1");
+  assert.equal(snapshot.persistence.status, "ready");
+  assert.deepEqual(snapshot.history, []);
+  await restored.close();
 });
 
 test("семантически несовместимый ledger переходит в read-only degraded", async (context) => {

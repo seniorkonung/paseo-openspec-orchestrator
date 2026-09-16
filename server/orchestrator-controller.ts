@@ -57,7 +57,7 @@ export class OrchestratorController {
       };
     }
 
-    if (current.lifecycle.availableCommand !== command) {
+    if (command !== "clear" && current.lifecycle.availableCommand !== command) {
       return {
         status: "rejected",
         reason: "not_allowed",
@@ -68,6 +68,21 @@ export class OrchestratorController {
 
     try {
       this.#engine.command(workspaceId, command);
+      if (command === "clear") {
+        // Для destructive-команды подтверждаем запись до ответа UI: после
+        // этого ответ означает, что очистка переживёт немедленное завершение
+        // процесса, а не только что изменила in-memory проекцию.
+        await this.#ledger.flush(workspaceId);
+        const persisted = this.#ledger.get(workspaceId).persistence;
+        if (persisted.status === "degraded") {
+          return {
+            status: "rejected",
+            reason: "unavailable",
+            message: "Состояние очищено в памяти, но не сохранено на диске",
+            snapshot: this.#ledger.get(workspaceId),
+          };
+        }
+      }
       return { status: "accepted", snapshot: this.#ledger.get(workspaceId) };
     } catch (error) {
       console.error("[OpenSpec] Не удалось выполнить команду оркестратора", {

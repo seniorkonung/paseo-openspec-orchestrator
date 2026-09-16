@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   ORCHESTRATOR_LIMITS,
   agentLinkSchema,
+  controlCommandSchema,
   currentActionSchema,
   lifecycleSchema,
   orchestratorSnapshotSchema,
@@ -44,6 +45,10 @@ test("контракт отклоняет команду, несовместим
     lifecycleSchema.safeParse({ status: "paused", availableCommand: "start" }).success,
     false,
   );
+});
+
+test("контракт принимает destructive-команду полной очистки", () => {
+  assert.equal(controlCommandSchema.parse("clear"), "clear");
 });
 
 test("контракт отклоняет текущее действие в неактивном состоянии", () => {

@@ -23,8 +23,9 @@ async function temporaryHome(context, prefix = "openspec-workflow-") {
 const nextEventLoop = () => new Promise((resolve) => setImmediate(resolve));
 
 async function settleWorkflow() {
-  await nextEventLoop();
-  await nextEventLoop();
+  // Workflow теперь дожидается атомарной записи checkpoint после каждого шага.
+  // Небольшая пауза оставляет время завершить fsync без привязки к диску.
+  await new Promise((resolve) => setTimeout(resolve, 50));
 }
 
 test("определяет реальную Git-ветку в директории workspace", async (context) => {
@@ -243,6 +244,133 @@ test("workflow следует явным переходам и может воз
     ["Задача выполнена", "succeeded"],
     ["Review завершён", "succeeded"],
   ]);
+  engine.dispose();
+  await ledger.close();
+});
+
+test("после перезапуска workflow продолжает работу с сохранённого checkpoint", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-resume");
+
+  let secondStarted;
+  const secondStartedPromise = new Promise((resolve) => {
+    secondStarted = resolve;
+  });
+  const steps = [
+    {
+      id: "first",
+      label: "Первый шаг",
+      async run() {
+        return {
+          kind: "continue",
+          next: "second",
+          state: { branch: "feature/resume" },
+        };
+      },
+    },
+    {
+      id: "second",
+      label: "Второй шаг",
+      async run({ signal }) {
+        secondStarted();
+        await new Promise((resolve) => {
+          if (signal.aborted) {
+            resolve();
+            return;
+          }
+          signal.addEventListener("abort", resolve, { once: true });
+        });
+        return { kind: "complete" };
+      },
+    },
+  ];
+  const engine = new OpenSpecOrchestratorEngine(ledger, { steps });
+  engine.initialize("workspace-resume", { workspaceDirectory: "/workspace/project" });
+  engine.command("workspace-resume", "start");
+  await secondStartedPromise;
+  await ledger.flush();
+  assert.deepEqual(ledger.getWorkflowCheckpoint("workspace-resume"), {
+    version: 1,
+    nextStepId: "second",
+    state: { branch: "feature/resume" },
+  });
+
+  engine.dispose();
+  await ledger.close();
+
+  const restoredLedger = new OrchestratorLedger({ paseoHome });
+  await restoredLedger.open("workspace-resume");
+  const resumedContexts = [];
+  const resumedEngine = new OpenSpecOrchestratorEngine(restoredLedger, {
+    steps: [
+      {
+        id: "first",
+        label: "Первый шаг",
+        async run() {
+          throw new Error("Первый шаг не должен быть повторён");
+        },
+      },
+      {
+        id: "second",
+        label: "Второй шаг",
+        async run(context) {
+          resumedContexts.push(context);
+          return { kind: "complete" };
+        },
+      },
+    ],
+  });
+  resumedEngine.initialize("workspace-resume", { workspaceDirectory: "/workspace/project" });
+  assert.equal(restoredLedger.get("workspace-resume").lifecycle.status, "idle");
+  assert.equal(restoredLedger.get("workspace-resume").history.at(-1)?.outcome, "cancelled");
+
+  resumedEngine.command("workspace-resume", "start");
+  await settleWorkflow();
+  assert.equal(resumedContexts.length, 1);
+  assert.equal(resumedContexts[0].state.branch, "feature/resume");
+  assert.equal(restoredLedger.get("workspace-resume").lifecycle.status, "completed");
+  assert.equal(restoredLedger.getWorkflowCheckpoint("workspace-resume"), null);
+  resumedEngine.dispose();
+  await restoredLedger.close();
+});
+
+test("clear отменяет активный шаг и удаляет историю и checkpoint", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-clear");
+  let release;
+  const waiting = new Promise((resolve) => {
+    release = resolve;
+  });
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    steps: [
+      {
+        id: "long-step",
+        label: "Долгий шаг",
+        async run({ signal }) {
+          await Promise.race([
+            waiting,
+            new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true })),
+          ]);
+          return { kind: "complete" };
+        },
+      },
+    ],
+  });
+  engine.initialize("workspace-clear", { workspaceDirectory: "/workspace/project" });
+  engine.command("workspace-clear", "start");
+  await nextEventLoop();
+  engine.command("workspace-clear", "clear");
+  release();
+  await settleWorkflow();
+
+  const cleared = ledger.get("workspace-clear");
+  assert.equal(cleared.lifecycle.status, "idle");
+  assert.equal(cleared.currentAction, null);
+  assert.deepEqual(cleared.history, []);
+  assert.equal(ledger.getWorkflowCheckpoint("workspace-clear"), null);
+  await ledger.flush();
   engine.dispose();
   await ledger.close();
 });
@@ -502,6 +630,10 @@ test("контроллер передаёт engine директорию workspac
     { workspaceDirectory: "/tmp/workspace-1" },
   ]);
   assert.deepEqual(calls[1], ["command", "workspace-1", "start"]);
+
+  const cleared = await controller.control("workspace-1", initial.revision, "clear", paseo);
+  assert.equal(cleared.status, "accepted");
+  assert.deepEqual(calls[2], ["command", "workspace-1", "clear"]);
 
   ledger.update("workspace-1", (projection) => projection);
   const stale = await controller.control("workspace-1", initial.revision, "start", paseo);

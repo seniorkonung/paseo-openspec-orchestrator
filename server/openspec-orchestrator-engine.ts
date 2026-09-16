@@ -31,6 +31,7 @@ interface WorkspaceRuntime {
   active: boolean;
   currentStepId: WorkflowStepId | null;
   state: WorkflowState;
+  resumeFromCheckpoint: boolean;
   currentHandle: ActionHandle | null;
   abortController: AbortController | null;
 }
@@ -88,13 +89,15 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
   initialize(workspaceId: string, context: OrchestratorEngineContext): void {
     if (this.#runtime.has(workspaceId)) return;
     this.#recoverInterruptedRun(workspaceId);
+    const checkpoint = this.#ledger.getWorkflowCheckpoint(workspaceId);
     this.#runtime.set(workspaceId, {
       workspaceDirectory: context.workspaceDirectory,
       generation: 0,
       pauseRequested: false,
       active: false,
-      currentStepId: null,
-      state: createInitialWorkflowState(),
+      currentStepId: checkpoint?.nextStepId ?? null,
+      state: checkpoint?.state ?? createInitialWorkflowState(),
+      resumeFromCheckpoint: checkpoint !== null,
       currentHandle: null,
       abortController: null,
     });
@@ -107,8 +110,10 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
 
     switch (command) {
       case "start":
+        this.#start(workspaceId, runtime, reporter, false);
+        break;
       case "retry":
-        this.#start(workspaceId, runtime, reporter);
+        this.#start(workspaceId, runtime, reporter, true);
         break;
       case "pause":
         runtime.pauseRequested = true;
@@ -121,6 +126,9 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
         runtime.abortController = new AbortController();
         reporter.setLifecycle({ status: "running", availableCommand: "pause" });
         this.#enqueueRun(workspaceId, runtime, reporter);
+        break;
+      case "clear":
+        this.#clear(workspaceId, runtime);
         break;
     }
   }
@@ -159,22 +167,45 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
     workspaceId: string,
     runtime: WorkspaceRuntime,
     reporter: OrchestratorReporter,
+    restart: boolean,
   ): void {
     runtime.generation += 1;
     runtime.pauseRequested = false;
     runtime.active = true;
-    runtime.currentStepId = this.#startStepId;
-    runtime.state = createInitialWorkflowState();
+    const useCheckpoint = !restart && runtime.resumeFromCheckpoint;
+    runtime.resumeFromCheckpoint = false;
+    if (!useCheckpoint) {
+      runtime.currentStepId = this.#startStepId;
+      runtime.state = createInitialWorkflowState();
+    }
     runtime.currentHandle = null;
     runtime.abortController?.abort();
     runtime.abortController = new AbortController();
     reporter.setLifecycle({ status: "starting", availableCommand: null });
     const generation = runtime.generation;
+    const checkpointReset = restart
+      ? Promise.resolve().then(() => this.#ledger.saveWorkflowCheckpoint(workspaceId, null))
+      : Promise.resolve();
 
     queueMicrotask(() => {
-      if (this.#disposed || runtime.generation !== generation) return;
-      reporter.setLifecycle({ status: "running", availableCommand: "pause" });
-      void this.#run(workspaceId, runtime, reporter, generation);
+      void checkpointReset
+        .then(() => {
+          if (this.#disposed || runtime.generation !== generation) return;
+          reporter.setLifecycle({ status: "running", availableCommand: "pause" });
+          void this.#run(workspaceId, runtime, reporter, generation);
+        })
+        .catch((error) => {
+          if (this.#disposed || runtime.generation !== generation) return;
+          console.error("[OpenSpec] Не удалось подготовить повторный запуск workflow", {
+            workspaceId,
+            error,
+          });
+          this.#fail(
+            reporter,
+            runtime,
+            "Не удалось очистить предыдущий checkpoint; проверьте диск и нажмите «Повторить»",
+          );
+        });
     });
   }
 
@@ -251,6 +282,8 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
             handle.succeed();
             runtime.currentHandle = null;
             runtime.currentStepId = null;
+            if (!(await this.#saveCheckpoint(workspaceId, runtime, reporter, generation, null))) return;
+            if (this.#disposed || runtime.generation !== generation) return;
             this.#complete(reporter, runtime);
             return;
           case "continue":
@@ -265,6 +298,16 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
             handle.succeed();
             runtime.currentHandle = null;
             runtime.currentStepId = result.next;
+            if (
+              !(await this.#saveCheckpoint(workspaceId, runtime, reporter, generation, {
+                version: 1,
+                nextStepId: result.next,
+                state: runtime.state,
+              }))
+            ) {
+              return;
+            }
+            if (this.#disposed || runtime.generation !== generation) return;
             if (runtime.pauseRequested) {
               this.#reachPause(reporter, runtime);
               return;
@@ -290,6 +333,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
   #complete(reporter: OrchestratorReporter, runtime: WorkspaceRuntime): void {
     runtime.active = false;
     runtime.abortController = null;
+    runtime.resumeFromCheckpoint = false;
     reporter.setLifecycle({ status: "completed", availableCommand: "start" });
   }
 
@@ -311,6 +355,55 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
     runtime.active = false;
     runtime.abortController = null;
     reporter.setLifecycle({ status: "paused", availableCommand: "resume" });
+  }
+
+  #clear(workspaceId: string, runtime: WorkspaceRuntime): void {
+    runtime.generation += 1;
+    runtime.pauseRequested = false;
+    runtime.active = false;
+    runtime.abortController?.abort();
+    runtime.abortController = null;
+    if (runtime.currentHandle) {
+      try {
+        runtime.currentHandle.cancel();
+      } catch {
+        // Сброс должен завершиться даже если действие уже успело закрыться.
+      }
+      runtime.currentHandle = null;
+    }
+    runtime.currentStepId = null;
+    runtime.state = createInitialWorkflowState();
+    runtime.resumeFromCheckpoint = false;
+    this.#ledger.clear(workspaceId);
+  }
+
+  async #saveCheckpoint(
+    workspaceId: string,
+    runtime: WorkspaceRuntime,
+    reporter: OrchestratorReporter,
+    generation: number,
+    checkpoint: {
+      version: 1;
+      nextStepId: WorkflowStepId;
+      state: WorkflowState;
+    } | null,
+  ): Promise<boolean> {
+    try {
+      await this.#ledger.saveWorkflowCheckpoint(workspaceId, checkpoint);
+      return true;
+    } catch (error) {
+      if (this.#disposed || runtime.generation !== generation) return false;
+      console.error("[OpenSpec] Не удалось сохранить checkpoint workflow", {
+        workspaceId,
+        error,
+      });
+      this.#fail(
+        reporter,
+        runtime,
+        "Не удалось сохранить состояние workflow; проверьте диск и нажмите «Повторить»",
+      );
+      return false;
+    }
   }
 
   #recoverInterruptedRun(workspaceId: string): void {

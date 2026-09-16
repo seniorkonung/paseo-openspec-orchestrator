@@ -69,7 +69,7 @@ export const completedActionSchema = currentActionSchema
     }
   });
 
-export const controlCommandSchema = z.enum(["start", "pause", "resume", "retry"]);
+export const controlCommandSchema = z.enum(["start", "pause", "resume", "retry", "clear"]);
 
 export const lifecycleSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("idle"), availableCommand: z.literal("start") }).strict(),
