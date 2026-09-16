@@ -2,5 +2,8 @@
   "id": "paseo-openspec-orchestrator",
   "requirements": {
     "paseo": ">=0.8.0"
-  }
+  },
+  "build": [
+    ["npm", "ci", "--omit=dev"]
+  ]
 }
