@@ -1,6 +1,7 @@
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { OrchestratorWorkspaceDisplay } from "../shared/orchestrator-notifications.ts";
 import type { ControlCommand, OrchestratorSnapshot } from "../shared/orchestrator.ts";
+import { createChangeSelectionService } from "./change-selection.ts";
 import { OpenSpecOrchestratorEngine } from "./openspec-orchestrator-engine.ts";
 import type { OrchestratorEngine } from "./orchestrator-engine.ts";
 import { OrchestratorLedger, type WaitResult } from "./orchestrator-ledger.ts";
@@ -109,7 +110,7 @@ export class OrchestratorController {
   }
 
   async close(): Promise<void> {
-    this.#engine.dispose();
+    await this.#engine.dispose();
     await this.#ledger.close();
   }
 
@@ -137,6 +138,9 @@ export class OrchestratorController {
       // Публичный SDK возвращает сохранённые профили через config.get().
       // Источник: https://paseo.sh/docs/sdk/reference#clientconfig
       readAgentProfiles: async () => (await paseo.config.get()).config.agentProfiles ?? [],
+      changeSelection: createChangeSelectionService({
+        createAgent: (options) => paseo.agents.create(options),
+      }),
     });
   }
 }

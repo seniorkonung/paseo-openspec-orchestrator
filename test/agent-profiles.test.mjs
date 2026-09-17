@@ -11,6 +11,8 @@ function profile(name, suffix = name) {
     name,
     provider: "codex",
     model: "gpt-5.5",
+    modeId: "default",
+    thinkingOptionId: "medium",
   };
 }
 
@@ -42,6 +44,7 @@ test("возвращает все отсутствующие профили и �
     kind: "invalid",
     missing: ["Low", "Ultra Sandbox"],
     ambiguous: [],
+    incomplete: [],
   });
 });
 
@@ -56,5 +59,60 @@ test("считает совпадающие обязательные имена 
     kind: "invalid",
     missing: [],
     ambiguous: ["High"],
+    incomplete: [],
   });
+});
+
+test("отклоняет отсутствующие и пробельные обязательные настройки профиля", () => {
+  const profiles = REQUIRED_AGENT_PROFILE_NAMES.map((name) => profile(name));
+  Object.assign(profiles.find(({ name }) => name === "Ultra"), { provider: "   " });
+  Object.assign(profiles.find(({ name }) => name === "High"), { model: undefined });
+  Object.assign(profiles.find(({ name }) => name === "Medium"), { modeId: "\t" });
+  Object.assign(profiles.find(({ name }) => name === "Low"), {
+    thinkingOptionId: undefined,
+  });
+
+  const result = resolveRequiredAgentProfiles(profiles);
+
+  assert.deepEqual(result, {
+    kind: "invalid",
+    missing: [],
+    ambiguous: [],
+    incomplete: [
+      { name: "Ultra", missingFields: ["provider"] },
+      { name: "High", missingFields: ["model"] },
+      { name: "Medium", missingFields: ["modeId"] },
+      { name: "Low", missingFields: ["thinkingOptionId"] },
+    ],
+  });
+});
+
+test("нормализует обязательные настройки и не требует featureValues", () => {
+  const profiles = REQUIRED_AGENT_PROFILE_NAMES.map((name) => ({
+    ...profile(name),
+    provider: " codex ",
+    model: " gpt-5.5 ",
+    modeId: " default ",
+    thinkingOptionId: " medium ",
+  }));
+
+  const result = resolveRequiredAgentProfiles(profiles);
+
+  assert.equal(result.kind, "available");
+  assert.deepEqual(
+    {
+      provider: result.profiles["Medium Sandbox"].provider,
+      model: result.profiles["Medium Sandbox"].model,
+      modeId: result.profiles["Medium Sandbox"].modeId,
+      thinkingOptionId: result.profiles["Medium Sandbox"].thinkingOptionId,
+      featureValues: result.profiles["Medium Sandbox"].featureValues,
+    },
+    {
+      provider: "codex",
+      model: "gpt-5.5",
+      modeId: "default",
+      thinkingOptionId: "medium",
+      featureValues: undefined,
+    },
+  );
 });

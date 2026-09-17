@@ -123,12 +123,12 @@ test("ledger сохраняет checkpoint workflow и полностью очи
   await ledger.saveWorkflowCheckpoint("workspace-checkpoint", {
     version: 1,
     nextStepId: "review-change",
-    state: { branch: "feature/checkpoint" },
+    state: { branch: "feature/checkpoint", change: null },
   });
   assert.deepEqual(ledger.getWorkflowCheckpoint("workspace-checkpoint"), {
     version: 1,
     nextStepId: "review-change",
-    state: { branch: "feature/checkpoint" },
+    state: { branch: "feature/checkpoint", change: null },
   });
 
   const cleared = ledger.clear("workspace-checkpoint");

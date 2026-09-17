@@ -35,12 +35,29 @@ function requiredAgentProfiles() {
     name,
     provider: "codex",
     model: "gpt-5.5",
+    modeId: "default",
+    thinkingOptionId: "medium",
   }));
+}
+
+function immediateChangeSelection(changeId = "selected-change") {
+  return {
+    async verify(_workspaceDirectory, selectedId) {
+      return { id: selectedId };
+    },
+    async select({ onAgentCreated, onChangeSelected }) {
+      onAgentCreated("agent-change-selection");
+      const change = { id: changeId };
+      await onChangeSelected(change);
+      return change;
+    },
+  };
 }
 
 function engineContext(
   workspaceDirectory = "/workspace/project",
   readAgentProfiles = async () => requiredAgentProfiles(),
+  changeSelection = immediateChangeSelection(),
 ) {
   const workspaceDisplay = { projectName: null, workspaceName: null };
   return {
@@ -48,6 +65,7 @@ function engineContext(
     workspaceDisplay,
     refreshWorkspaceDisplay: async () => workspaceDisplay,
     readAgentProfiles,
+    changeSelection,
   };
 }
 
@@ -131,10 +149,19 @@ test("на non-main ветке workflow завершает инициализа�
   const snapshot = ledger.get("workspace-1");
   assert.deepEqual(directories, ["/workspace/project"]);
   assert.equal(snapshot.lifecycle.status, "completed");
+  assert.equal(snapshot.change?.id, "selected-change");
   assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
     ["Все обязательные профили агентов доступны", "succeeded"],
     ["Git-ветка: feature/orchestrator", "succeeded"],
     ["Рабочее дерево Git чистое", "succeeded"],
+    ["Выбран OpenSpec change: selected-change", "succeeded"],
+  ]);
+  assert.deepEqual(snapshot.history.at(-1)?.links, [
+    {
+      kind: "agent",
+      agentId: "agent-change-selection",
+      label: "Выбор OpenSpec change",
+    },
   ]);
   engine.dispose();
   await ledger.close();
@@ -175,6 +202,7 @@ test("изменения рабочего дерева блокируют workfl
     ["Все обязательные профили агентов доступны", "succeeded"],
     ["Git-ветка: feature/clean-check", "succeeded"],
     ["Рабочее дерево Git чистое", "succeeded"],
+    ["Выбран OpenSpec change: selected-change", "succeeded"],
   ]);
   engine.dispose();
   await ledger.close();
@@ -215,13 +243,14 @@ test("отсутствующие профили блокируют Git-пров�
   await settleWorkflow();
   snapshot = ledger.get("workspace-profiles");
   assert.equal(snapshot.lifecycle.status, "completed");
-  assert.equal(profileReads, 2);
+  assert.equal(profileReads, 3);
   assert.equal(branchReads, 1);
   assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
     ["Отсутствуют профили агентов: Orchestrator", "failed"],
     ["Все обязательные профили агентов доступны", "succeeded"],
     ["Git-ветка: feature/profile-check", "succeeded"],
     ["Рабочее дерево Git чистое", "succeeded"],
+    ["Выбран OpenSpec change: selected-change", "succeeded"],
   ]);
   engine.dispose();
   await ledger.close();
@@ -255,6 +284,79 @@ test("ошибка чтения профилей останавливает work
   assert.doesNotMatch(snapshot.lifecycle.message, /секретная/);
   assert.equal(branchReads, 0);
   engine.dispose();
+  await ledger.close();
+});
+
+test("неполный профиль останавливает workflow до Git и называет поле", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-incomplete-profile");
+  let branchReads = 0;
+  const profiles = requiredAgentProfiles();
+  profiles.find(({ name }) => name === "Medium Sandbox").model = "   ";
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    branchProbe: async () => {
+      branchReads += 1;
+      return { kind: "non-main", name: "feature/should-not-run" };
+    },
+  });
+  engine.initialize(
+    "workspace-incomplete-profile",
+    engineContext("/workspace/project", async () => profiles),
+  );
+
+  engine.command("workspace-incomplete-profile", "start");
+  await settleWorkflow();
+
+  const snapshot = ledger.get("workspace-incomplete-profile");
+  assert.equal(snapshot.lifecycle.status, "failed");
+  assert.match(snapshot.lifecycle.message, /Medium Sandbox \(model\)/);
+  assert.equal(branchReads, 0);
+  await engine.dispose();
+  await ledger.close();
+});
+
+test("перед запуском агента повторно проверяет изменившийся профиль", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-profile-changed");
+  let profileReads = 0;
+  let selectCalls = 0;
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    branchProbe: async () => ({ kind: "non-main", name: "feature/profile-changed" }),
+    worktreeProbe: async () => ({ kind: "clean" }),
+  });
+  engine.initialize(
+    "workspace-profile-changed",
+    engineContext(
+      "/workspace/project",
+      async () => {
+        profileReads += 1;
+        const profiles = requiredAgentProfiles();
+        if (profileReads === 2) {
+          profiles.find(({ name }) => name === "Medium Sandbox").thinkingOptionId = " ";
+        }
+        return profiles;
+      },
+      {
+        verify: async (_workspace, changeId) => ({ id: changeId }),
+        async select() {
+          selectCalls += 1;
+          throw new Error("Агент не должен быть создан");
+        },
+      },
+    ),
+  );
+
+  engine.command("workspace-profile-changed", "start");
+  await settleWorkflow();
+
+  const snapshot = ledger.get("workspace-profile-changed");
+  assert.equal(snapshot.lifecycle.status, "failed");
+  assert.match(snapshot.lifecycle.message, /Medium Sandbox \(thinkingOptionId\)/);
+  assert.equal(profileReads, 2);
+  assert.equal(selectCalls, 0);
+  await engine.dispose();
   await ledger.close();
 });
 
@@ -292,7 +394,7 @@ test("workflow выполняет отдельные шаги и передаё�
 
   const snapshot = ledger.get("workspace-steps");
   assert.equal(snapshot.lifecycle.status, "completed");
-  assert.deepEqual(seenStates, [{ branch: "feature/from-step" }]);
+  assert.deepEqual(seenStates, [{ branch: "feature/from-step", change: null }]);
   assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
     ["Первый шаг завершён", "succeeded"],
     ["Второй шаг завершён", "succeeded"],
@@ -398,7 +500,7 @@ test("после перезапуска workflow продолжает работ
   assert.deepEqual(ledger.getWorkflowCheckpoint("workspace-resume"), {
     version: 1,
     nextStepId: "second",
-    state: { branch: "feature/resume" },
+    state: { branch: "feature/resume", change: null },
   });
 
   engine.dispose();
@@ -434,10 +536,97 @@ test("после перезапуска workflow продолжает работ
   await settleWorkflow();
   assert.equal(resumedContexts.length, 1);
   assert.equal(resumedContexts[0].state.branch, "feature/resume");
+  assert.equal(resumedContexts[0].state.change, null);
   assert.equal(restoredLedger.get("workspace-resume").lifecycle.status, "completed");
   assert.equal(restoredLedger.getWorkflowCheckpoint("workspace-resume"), null);
   resumedEngine.dispose();
   await restoredLedger.close();
+});
+
+test("сохранённый change после reload проверяется без запуска нового агента", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-selected-resume");
+  createOrchestratorReporter(ledger, "workspace-selected-resume").setChange({
+    id: "selected-change",
+  });
+  await ledger.saveWorkflowCheckpoint("workspace-selected-resume", {
+    version: 1,
+    nextStepId: "select-change",
+    state: { branch: "feature/resume-change", change: { id: "selected-change" } },
+  });
+  let verifyCalls = 0;
+  let selectCalls = 0;
+  const changeSelection = {
+    async verify(_workspaceDirectory, changeId) {
+      verifyCalls += 1;
+      return { id: changeId };
+    },
+    async select() {
+      selectCalls += 1;
+      throw new Error("Новый агент не должен запускаться");
+    },
+  };
+  const engine = new OpenSpecOrchestratorEngine(ledger);
+  engine.initialize(
+    "workspace-selected-resume",
+    engineContext("/workspace/project", async () => requiredAgentProfiles(), changeSelection),
+  );
+
+  engine.command("workspace-selected-resume", "start");
+  await settleWorkflow();
+
+  assert.equal(ledger.get("workspace-selected-resume").lifecycle.status, "completed");
+  assert.equal(ledger.get("workspace-selected-resume").change?.id, "selected-change");
+  assert.equal(verifyCalls, 1);
+  assert.equal(selectCalls, 0);
+  await engine.dispose();
+  await ledger.close();
+});
+
+test("ошибка записи выбранного change откатывает проекцию и checkpoint", async (context) => {
+  context.mock.method(console, "error", () => undefined);
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({
+    paseoHome,
+    async writer(_path, value) {
+      if (value.change?.id === "selected-change") {
+        throw new Error("диск временно недоступен");
+      }
+    },
+  });
+  await ledger.open("workspace-selection-write-error");
+  let persistenceRejected = false;
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    steps: [
+      {
+        id: "persist-change",
+        label: "Сохраняю change",
+        async run({ persistChange }) {
+          try {
+            await persistChange({ id: "selected-change" });
+          } catch {
+            persistenceRejected = true;
+          }
+          return {
+            kind: "halt",
+            summary: "Change не сохранён",
+            message: "Повторите сохранение",
+          };
+        },
+      },
+    ],
+  });
+  engine.initialize("workspace-selection-write-error", engineContext());
+
+  engine.command("workspace-selection-write-error", "start");
+  await settleWorkflow();
+
+  assert.equal(persistenceRejected, true);
+  assert.equal(ledger.get("workspace-selection-write-error").change, null);
+  assert.equal(ledger.getWorkflowCheckpoint("workspace-selection-write-error"), null);
+  await engine.dispose();
+  await ledger.close();
 });
 
 test("clear отменяет активный шаг и удаляет историю и checkpoint", async (context) => {
@@ -606,6 +795,7 @@ test("на main ветке workflow останавливается, а retry п�
     ["Все обязательные профили агентов доступны", "succeeded"],
     ["Git-ветка: feature/after-switch", "succeeded"],
     ["Рабочее дерево Git чистое", "succeeded"],
+    ["Выбран OpenSpec change: selected-change", "succeeded"],
   ]);
   engine.dispose();
   await ledger.close();
@@ -679,6 +869,51 @@ test("пауза во время проверки ветки применяет�
   assert.equal(ledger.get("workspace-1").lifecycle.status, "completed");
   assert.equal(calls, 1);
   engine.dispose();
+  await ledger.close();
+});
+
+test("пауза не прерывает диалог выбора, а terminal completion имеет приоритет", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-selection-pause");
+  let finishSelection;
+  let selectionStarted;
+  const started = new Promise((resolve) => {
+    selectionStarted = resolve;
+  });
+  const changeSelection = {
+    verify: async (_workspace, changeId) => ({ id: changeId }),
+    async select({ onAgentCreated, onChangeSelected }) {
+      onAgentCreated("agent-selection-pause");
+      selectionStarted();
+      return new Promise((resolve) => {
+        finishSelection = async () => {
+          const change = { id: "selected-change" };
+          await onChangeSelected(change);
+          resolve(change);
+        };
+      });
+    },
+  };
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    branchProbe: async () => ({ kind: "non-main", name: "feature/selection-pause" }),
+    worktreeProbe: async () => ({ kind: "clean" }),
+  });
+  engine.initialize(
+    "workspace-selection-pause",
+    engineContext("/workspace/project", async () => requiredAgentProfiles(), changeSelection),
+  );
+
+  engine.command("workspace-selection-pause", "start");
+  await started;
+  engine.command("workspace-selection-pause", "pause");
+  assert.equal(ledger.get("workspace-selection-pause").lifecycle.status, "pausing");
+  await finishSelection();
+  await settleWorkflow();
+
+  assert.equal(ledger.get("workspace-selection-pause").lifecycle.status, "completed");
+  assert.equal(ledger.get("workspace-selection-pause").change?.id, "selected-change");
+  await engine.dispose();
   await ledger.close();
 });
 

@@ -23,9 +23,11 @@ The plugin is responsible for:
 - recording the current action and completed action history for each workspace;
 - persisting workflow state and checkpoints so execution can recover after a
   restart;
+- guiding the user through an explicit choice of the active OpenSpec change and
+  persisting that choice only after the change exists in Git history;
 - delivering optional workflow notifications through ntfy;
-- providing infrastructure for future workflow steps that delegate work to
-  Paseo agents through scoped MCP tools.
+- delegating interactive workflow steps to Paseo agents through scoped MCP
+  tools.
 
 A workspace is considered OpenSpec-enabled when it contains
 `openspec/config.yaml` at its root. The plugin uses that check to decide where
@@ -84,12 +86,26 @@ The main boundaries are:
   delivery outside step business logic. Notification failures are logged but do
   not fail the workflow itself.
 - `server/orchestrator-mcp-tool-host.ts` provides the scoped local MCP server
-  used to attach orchestrator-owned tools to Paseo agents. It is infrastructure
-  for agent-driven workflow steps and is not yet part of the default workflow.
+  used to attach orchestrator-owned tools to Paseo agents. The default workflow
+  uses it to expose only `set_change` to its change-selection agent.
 
 The shared Zod schemas are runtime boundaries as well as TypeScript contracts.
 Persisted data, RPC payloads, workflow state, and tool results must be validated
 before they enter trusted orchestration code.
+
+## Default workflow
+
+The workflow first verifies all required Paseo agent profiles, the Git branch,
+and a clean worktree. Each required profile must explicitly define a provider,
+model, mode, and thinking option; the orchestrator does not discover or infer
+missing launch settings.
+
+After the checks, a `Medium Sandbox` agent lists the active repo-local OpenSpec
+changes and asks the user to select one or create a new scaffold. A newly
+created change must be committed before the agent can select it. The scoped
+`set_change` tool validates the OpenSpec location, repository cleanliness, and
+presence in `HEAD` before recording the choice. Creating planning artifacts or
+performing implementation work is outside this step.
 
 ## Extending the workflow
 

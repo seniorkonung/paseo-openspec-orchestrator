@@ -1,4 +1,7 @@
-import { resolveRequiredAgentProfiles } from "../../agent-profiles.ts";
+import {
+  describeRequiredAgentProfileProblems,
+  resolveRequiredAgentProfiles,
+} from "../../agent-profiles.ts";
 import type {
   WorkflowStepContext,
   WorkflowStepDefinition,
@@ -32,14 +35,7 @@ export async function checkAgentProfilesStep(
 
   const resolution = resolveRequiredAgentProfiles(profiles);
   if (resolution.kind === "invalid") {
-    const problems: string[] = [];
-    if (resolution.missing.length > 0) {
-      problems.push(`Отсутствуют профили агентов: ${resolution.missing.join(", ")}`);
-    }
-    if (resolution.ambiguous.length > 0) {
-      problems.push(`Неоднозначные профили агентов: ${resolution.ambiguous.join(", ")}`);
-    }
-    const summary = problems.join("; ");
+    const summary = describeRequiredAgentProfileProblems(resolution);
     return {
       kind: "halt",
       summary,

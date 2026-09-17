@@ -1,5 +1,10 @@
-import { ORCHESTRATOR_LIMITS, type ControlCommand } from "../shared/orchestrator.ts";
+import {
+  ORCHESTRATOR_LIMITS,
+  type ControlCommand,
+  type OrchestratorChange,
+} from "../shared/orchestrator.ts";
 import type { AgentProfileReader } from "./agent-profiles.ts";
+import type { ChangeSelectionService } from "./change-selection.ts";
 import {
   normalizeOrchestratorWorkspaceDisplay,
   type OrchestratorNotificationRequest,
@@ -40,6 +45,7 @@ interface WorkspaceRuntime {
   workspaceDisplay: OrchestratorWorkspaceDisplay;
   refreshWorkspaceDisplay: () => Promise<OrchestratorWorkspaceDisplay>;
   readAgentProfiles: AgentProfileReader;
+  changeSelection: ChangeSelectionService;
   generation: number;
   pauseRequested: boolean;
   active: boolean;
@@ -66,7 +72,9 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
   readonly #startStepId: WorkflowStepId;
   readonly #now: () => Date;
   readonly #runtime = new Map<string, WorkspaceRuntime>();
+  readonly #activeRuns = new Set<Promise<void>>();
   #disposed = false;
+  #disposePromise: Promise<void> | null = null;
 
   constructor(ledger: OrchestratorLedger, options: OpenSpecOrchestratorEngineOptions = {}) {
     this.#ledger = ledger;
@@ -111,6 +119,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       workspaceDisplay: normalizeOrchestratorWorkspaceDisplay(context.workspaceDisplay),
       refreshWorkspaceDisplay: context.refreshWorkspaceDisplay,
       readAgentProfiles: context.readAgentProfiles,
+      changeSelection: context.changeSelection,
       generation: 0,
       pauseRequested: false,
       active: false,
@@ -152,8 +161,8 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
     }
   }
 
-  dispose(): void {
-    if (this.#disposed) return;
+  dispose(): Promise<void> {
+    if (this.#disposePromise) return this.#disposePromise;
     this.#disposed = true;
 
     for (const [workspaceId, runtime] of this.#runtime) {
@@ -180,6 +189,17 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
         });
       }
     }
+    this.#disposePromise = Promise.allSettled([...this.#activeRuns]).then((results) => {
+      const failures = results
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .map((result) => result.reason);
+      if (failures.length > 0) {
+        console.error("[OpenSpec] Ошибка при остановке активных workflow", {
+          failures,
+        });
+      }
+    });
+    return this.#disposePromise;
   }
 
   #start(
@@ -196,6 +216,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
     if (!useCheckpoint) {
       runtime.currentStepId = this.#startStepId;
       runtime.state = createInitialWorkflowState();
+      reporter.setChange(null);
     }
     runtime.currentHandle = null;
     runtime.abortController?.abort();
@@ -211,7 +232,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
         .then(() => {
           if (this.#disposed || runtime.generation !== generation) return;
           reporter.setLifecycle({ status: "running", availableCommand: "pause" });
-          void this.#run(workspaceId, runtime, reporter, generation);
+          this.#trackRun(this.#run(workspaceId, runtime, reporter, generation));
         })
         .catch((error) => {
           if (this.#disposed || runtime.generation !== generation) return;
@@ -236,7 +257,8 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
   ): void {
     const generation = runtime.generation;
     queueMicrotask(() => {
-      void this.#run(workspaceId, runtime, reporter, generation);
+      if (this.#disposed || runtime.generation !== generation) return;
+      this.#trackRun(this.#run(workspaceId, runtime, reporter, generation));
     });
   }
 
@@ -290,8 +312,24 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
             readAgentProfiles: runtime.readAgentProfiles,
             gitBranch: this.#branchProbe,
             gitWorktree: this.#worktreeProbe,
+            changeSelection: runtime.changeSelection,
             notify: (notification) => this.#notify(workspaceId, notification, runtime),
           },
+          updateActionLinks: (links) => {
+            if (this.#disposed || runtime.generation !== generation) {
+              throw new Error("Workflow больше не принимает ссылки действий");
+            }
+            handle.update({ links: [...links] });
+          },
+          persistChange: (change) =>
+            this.#persistChange(
+              workspaceId,
+              runtime,
+              reporter,
+              generation,
+              currentStepId,
+              change,
+            ),
         });
         if (this.#disposed || runtime.generation !== generation) return;
 
@@ -453,6 +491,50 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       );
       return false;
     }
+  }
+
+  async #persistChange(
+    workspaceId: string,
+    runtime: WorkspaceRuntime,
+    reporter: OrchestratorReporter,
+    generation: number,
+    stepId: WorkflowStepId,
+    change: OrchestratorChange,
+  ): Promise<void> {
+    if (
+      this.#disposed ||
+      runtime.generation !== generation ||
+      runtime.currentStepId !== stepId ||
+      runtime.abortController?.signal.aborted
+    ) {
+      throw new Error("Workflow больше не принимает выбранный change");
+    }
+
+    const previousState = runtime.state;
+    const previousChange = this.#ledger.get(workspaceId).change;
+    const previousCheckpoint = this.#ledger.getWorkflowCheckpoint(workspaceId);
+    const nextState: WorkflowState = { ...runtime.state, change };
+    runtime.state = nextState;
+    reporter.setChange(change);
+    try {
+      await this.#ledger.saveWorkflowCheckpoint(workspaceId, {
+        version: 1,
+        nextStepId: stepId,
+        state: nextState,
+      });
+    } catch (error) {
+      runtime.state = previousState;
+      reporter.setChange(previousChange);
+      this.#ledger.setWorkflowCheckpoint(workspaceId, previousCheckpoint);
+      throw error;
+    }
+  }
+
+  #trackRun(run: Promise<void>): void {
+    this.#activeRuns.add(run);
+    void run.finally(() => this.#activeRuns.delete(run)).catch((error) => {
+      console.error("[OpenSpec] Непредвиденная ошибка выполнения workflow", { error });
+    });
   }
 
   async #notify(

@@ -1,6 +1,7 @@
 import { checkAgentProfiles } from "./check-agent-profiles.ts";
 import { checkGitBranch } from "./check-git-branch.ts";
 import { checkGitWorktree } from "./check-git-worktree.ts";
+import { selectChange } from "./select-change.ts";
 import type { WorkflowStepDefinition } from "../types.ts";
 
 /**
@@ -11,4 +12,5 @@ export const OPEN_SPEC_WORKFLOW_STEPS: readonly WorkflowStepDefinition[] = Objec
   checkAgentProfiles,
   checkGitBranch,
   checkGitWorktree,
+  selectChange,
 ]);

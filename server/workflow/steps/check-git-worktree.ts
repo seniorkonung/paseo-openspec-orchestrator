@@ -49,7 +49,8 @@ export async function checkGitWorktreeStep(
   }
 
   return {
-    kind: "complete",
+    kind: "continue",
+    next: "select-change",
     summary: worktreeSummary(decision),
   };
 }

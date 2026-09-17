@@ -1,17 +1,25 @@
 import type { GitBranchDecision, GitBranchProbe } from "../git-branch.ts";
 import type { GitWorktreeProbe } from "../git-worktree.ts";
 import type { AgentProfileReader } from "../agent-profiles.ts";
+import type { ChangeSelectionService } from "../change-selection.ts";
 import type { OrchestratorNotificationRequest } from "../../shared/orchestrator-notifications.ts";
+import {
+  orchestratorChangeSchema,
+  type AgentLink,
+  type OrchestratorChange,
+} from "../../shared/orchestrator.ts";
 import { z } from "zod";
 
 export interface WorkflowState {
   readonly branch: Extract<GitBranchDecision, { kind: "non-main" }>["name"] | null;
+  readonly change: OrchestratorChange | null;
 }
 
 export interface WorkflowServices {
   readonly readAgentProfiles: AgentProfileReader;
   readonly gitBranch: GitBranchProbe;
   readonly gitWorktree: GitWorktreeProbe;
+  readonly changeSelection: ChangeSelectionService;
   /** Не блокирует и не ломает шаг при ошибке доставки уведомления. */
   readonly notify: (notification: OrchestratorNotificationRequest) => Promise<boolean>;
 }
@@ -26,6 +34,7 @@ export type WorkflowStepId = string;
 export const workflowStateSchema = z
   .object({
     branch: z.string().trim().max(512).nullable(),
+    change: orchestratorChangeSchema.nullable().default(null),
   })
   .strict();
 
@@ -44,6 +53,8 @@ export interface WorkflowStepContext {
   readonly signal: AbortSignal;
   readonly state: Readonly<WorkflowState>;
   readonly services: WorkflowServices;
+  readonly updateActionLinks: (links: readonly AgentLink[]) => void;
+  readonly persistChange: (change: OrchestratorChange) => Promise<void>;
 }
 
 export type WorkflowStepResult =
@@ -76,5 +87,5 @@ export interface WorkflowStepDefinition {
 }
 
 export function createInitialWorkflowState(): WorkflowState {
-  return { branch: null };
+  return { branch: null, change: null };
 }
