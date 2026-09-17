@@ -125,7 +125,7 @@ set contains an active, installed `npm:@fission-ai/openspec` entry declared by
 a mise configuration inside the workspace. It checks availability rather than
 a specific tool version and never installs a missing tool automatically.
 
-After the checks, a `Medium Sandbox` agent is added to the same Paseo workspace,
+After the checks, a `Low Sandbox` agent is added to the same Paseo workspace,
 where it lists the active repo-local OpenSpec changes and asks the user to select
 one or create a new scaffold. The agent and the scoped `set_change` tool run
 OpenSpec as `mise exec --no-deps -- openspec ...` from that workspace. A newly

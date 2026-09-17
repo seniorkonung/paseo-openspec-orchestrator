@@ -47,7 +47,8 @@ function immediateChangeSelection(changeId = "selected-change") {
     async verify(_workspaceDirectory, selectedId) {
       return { id: selectedId };
     },
-    async select({ onAgentCreated, onChangeSelected }) {
+    async select({ profile, onAgentCreated, onChangeSelected }) {
+      assert.equal(profile.name, "Low Sandbox");
       onAgentCreated("agent-change-selection");
       const change = { id: changeId };
       await onChangeSelected(change);
@@ -695,7 +696,7 @@ test("перед запуском агента повторно проверяе
         profileReads += 1;
         const profiles = requiredAgentProfiles();
         if (profileReads === 2) {
-          profiles.find(({ name }) => name === "Medium Sandbox").thinkingOptionId = " ";
+          profiles.find(({ name }) => name === "Low Sandbox").thinkingOptionId = " ";
         }
         return profiles;
       },
@@ -714,7 +715,7 @@ test("перед запуском агента повторно проверяе
 
   const snapshot = ledger.get("workspace-profile-changed");
   assert.equal(snapshot.lifecycle.status, "failed");
-  assert.match(snapshot.lifecycle.message, /Medium Sandbox \(thinkingOptionId\)/);
+  assert.match(snapshot.lifecycle.message, /Low Sandbox \(thinkingOptionId\)/);
   assert.equal(profileReads, 2);
   assert.equal(selectCalls, 0);
   await engine.dispose();
@@ -2067,13 +2068,13 @@ test("контроллер передаёт контекст и создаёт �
     workspaceName: "Ручное название после переименования",
   });
 
-  const mediumSandbox = requiredAgentProfiles().find(
-    ({ name }) => name === "Medium Sandbox",
+  const lowSandbox = requiredAgentProfiles().find(
+    ({ name }) => name === "Low Sandbox",
   );
   await assert.rejects(
     initializedContext.changeSelection.select({
       workspaceDirectory: "/tmp/workspace-1",
-      profile: mediumSandbox,
+      profile: lowSandbox,
       signal: new AbortController().signal,
       onAgentCreated() {},
       async onChangeSelected() {},

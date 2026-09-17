@@ -70,7 +70,7 @@ export async function selectChangeStep(
     try {
       change = await context.services.changeSelection.select({
         workspaceDirectory: context.workspaceDirectory,
-        profile: resolution.profiles["Medium Sandbox"],
+        profile: resolution.profiles["Low Sandbox"],
         signal: context.signal,
         onAgentCreated: (agentId) => {
           context.updateActionLinks([

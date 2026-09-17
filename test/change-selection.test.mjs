@@ -21,8 +21,8 @@ function firstText(result) {
 
 function profile() {
   return {
-    id: "profile-medium-sandbox",
-    name: "Medium Sandbox",
+    id: "profile-low-sandbox",
+    name: "Low Sandbox",
     provider: "codex",
     model: "gpt-5.5",
     modeId: "sandbox",
@@ -31,7 +31,7 @@ function profile() {
   };
 }
 
-test("агент получает Medium Sandbox, ntfy и единственный scoped set_change", async () => {
+test("агент получает Low Sandbox, ntfy и единственный scoped set_change", async () => {
   const created = [];
   const labels = [];
   const persisted = [];

@@ -113,7 +113,7 @@ checkpoint: перечитывайте конфигурацию Paseo непос
 агента.
 
 Paseo не принимает `profileId` в `agents.create`: шаг разворачивает поля
-`Medium Sandbox` или `Ultra Sandbox` в конфигурацию агента согласно
+`Low Sandbox`, `Medium Sandbox` или `Ultra Sandbox` в конфигурацию агента согласно
 [официальной документации Paseo](https://paseo.sh/docs/mcp#agent-profiles).
 
 ## Выбор change
@@ -127,7 +127,7 @@ mise внутри текущего workspace, уже скачаны и разр�
 tool только настроен, пользователь должен выполнить `mise install` в workspace
 и нажать «Повторить».
 
-Шаг `select-change` создаёт агента `Medium Sandbox` в текущем Paseo
+Шаг `select-change` создаёт агента `Low Sandbox` в текущем Paseo
 workspace через `workspace.agents.create`, устанавливает метку `ntfy=true` и
 добавляет ссылку на него в текущее действие. Оркестратор не включает
 автоархивирование и не архивирует агента или workspace после завершения шага:
