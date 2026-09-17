@@ -433,11 +433,13 @@ test("Ultra Sandbox создаёт один артефакт и завершае
   assert.equal(created[0].config.thinkingOptionId, "ultra");
   assert.deepEqual(created[0].config.featureValues, { web: false });
   assert.deepEqual(created[0].labels, { ntfy: "true" });
+  assert.equal("autoArchive" in created[0], false);
   assert.equal("cwd" in created[0], false);
   assert.equal("prompt" in created[0], false);
   assert.match(prompts[0], /openspec-continue-change.*exactly once/);
   assert.match(prompts[0], /expected artifact is `risk-map`/);
   assert.match(prompts[0], /explicitly approve/);
+  assert.match(prompts[0], /Do not archive agents or workspaces/);
   assert.match(prompts[0], /complete_artifact/);
   assert.equal(toolResults[0].isError, true);
   assert.match(firstText(toolResults[0]), /ещё не создан/);

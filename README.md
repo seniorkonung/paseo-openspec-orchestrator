@@ -139,6 +139,10 @@ to the user, and waits for explicit approval. This follows the skill's
 After approval, the agent commits only the concrete paths reported by OpenSpec
 and calls `complete_artifact`.
 
+The orchestrator does not enable automatic archiving or call an archive API.
+Completing, canceling, or failing a workflow step leaves the agent and its
+workspace available until the user closes them in Paseo.
+
 The completion tool independently requires a clean worktree, exactly one commit
 after the saved baseline, and no changed paths outside the expected artifact.
 It disables the agent's final ntfy notification and clears the pending session

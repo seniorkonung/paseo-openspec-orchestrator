@@ -797,7 +797,7 @@ ${creationInstruction}
 
 After the artifact exists, show it to the user and ask whether they explicitly approve finishing this artifact stage. If they request changes, modify only this artifact and ask again. Do not proceed until the user clearly approves the artifact.
 
-After approval, run \`mise exec --no-deps -- openspec status --change ${input.changeId} --json\`, take the concrete files from \`artifactPaths.${input.artifactId}.existingOutputPaths\`, stage only those files, and create exactly one commit with subject \`${commitSubject}\`. Do not amend unrelated files, create another artifact, implement tasks, archive the change, spawn agents, or invoke another workflow.
+After approval, run \`mise exec --no-deps -- openspec status --change ${input.changeId} --json\`, take the concrete files from \`artifactPaths.${input.artifactId}.existingOutputPaths\`, stage only those files, and create exactly one commit with subject \`${commitSubject}\`. Do not amend unrelated files, create another artifact, implement tasks, archive the change, spawn agents, or invoke another workflow. Do not archive agents or workspaces.
 
 Only after the approved artifact is committed, call the orchestrator MCP tool \`complete_artifact\` with an empty object. If it reports an error, fix only the expected artifact or its commit and retry the tool. Your task ends after \`complete_artifact\` succeeds.`;
 }
