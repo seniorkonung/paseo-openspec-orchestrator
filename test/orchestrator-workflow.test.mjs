@@ -71,12 +71,26 @@ function completedChangeArtifacts() {
   };
 }
 
+function completedChangePublication() {
+  return {
+    async publish(request) {
+      request.onAgentCreated("agent-change-publication");
+      return {
+        number: 42,
+        url: "https://github.com/example/project/pull/42",
+        title: "Опубликовать выбранный change",
+      };
+    },
+  };
+}
+
 function engineContext(
   workspaceDirectory = "/workspace/project",
   readAgentProfiles = async () => requiredAgentProfiles(),
   changeSelection = immediateChangeSelection(),
   miseToolchain = async () => ({ kind: "available" }),
   changeArtifacts = completedChangeArtifacts(),
+  changePublication = completedChangePublication(),
 ) {
   const workspaceDisplay = { projectName: null, workspaceName: null };
   return {
@@ -87,6 +101,7 @@ function engineContext(
     miseToolchain,
     changeSelection,
     changeArtifacts,
+    changePublication,
   };
 }
 
@@ -168,7 +183,7 @@ test("на non-main ветке workflow завершает инициализа�
   await settleWorkflow();
 
   const snapshot = ledger.get("workspace-1");
-  assert.deepEqual(directories, ["/workspace/project"]);
+  assert.deepEqual(directories, ["/workspace/project", "/workspace/project"]);
   assert.equal(snapshot.lifecycle.status, "completed");
   assert.equal(snapshot.change?.id, "selected-change");
   assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
@@ -177,12 +192,20 @@ test("на non-main ветке workflow завершает инициализа�
     ["Рабочее дерево Git чистое", "succeeded"],
     ["Mise toolchain доступен", "succeeded"],
     ["OpenSpec change готов к apply: selected-change", "succeeded"],
+    ["Pull request #42 опубликован: https://github.com/example/project/pull/42", "succeeded"],
   ]);
-  assert.deepEqual(snapshot.history.at(-1)?.links, [
+  assert.deepEqual(snapshot.history.at(-2)?.links, [
     {
       kind: "agent",
       agentId: "agent-change-selection",
       label: "Выбор OpenSpec change",
+    },
+  ]);
+  assert.deepEqual(snapshot.history.at(-1)?.links, [
+    {
+      kind: "agent",
+      agentId: "agent-change-publication",
+      label: "Публикация change selected-change",
     },
   ]);
   await engine.dispose();
@@ -262,11 +285,11 @@ test("незавершённый change создаёт по одному арт�
 
   const snapshot = ledger.get("workspace-artifact-loop");
   assert.equal(snapshot.lifecycle.status, "completed");
-  assert.equal(profileReads, 4);
-  assert.equal(inspectCalls, 3);
+  assert.equal(profileReads, 5);
+  assert.equal(inspectCalls, 4);
   assert.equal(prepareCalls, 2);
   assert.equal(createCalls, 2);
-  assert.equal(verifyApplyCalls, 1);
+  assert.equal(verifyApplyCalls, 2);
   assert.deepEqual(profiles, ["Ultra Sandbox", "Ultra Sandbox"]);
   assert.deepEqual(
     sessions.map(({ artifactId }) => artifactId),
@@ -280,19 +303,27 @@ test("незавершённый change создаёт по одному арт�
     ["Выбран OpenSpec change: selected-change", "succeeded"],
     ["Создан OpenSpec-артефакт: artifact-1", "succeeded"],
     ["OpenSpec change готов к apply: selected-change", "succeeded"],
+    ["Pull request #42 опубликован: https://github.com/example/project/pull/42", "succeeded"],
   ]);
-  assert.deepEqual(snapshot.history.at(-2)?.links, [
+  assert.deepEqual(snapshot.history.at(-3)?.links, [
     {
       kind: "agent",
       agentId: "agent-artifact-1",
       label: "Артефакт artifact-1",
     },
   ]);
-  assert.deepEqual(snapshot.history.at(-1)?.links, [
+  assert.deepEqual(snapshot.history.at(-2)?.links, [
     {
       kind: "agent",
       agentId: "agent-artifact-2",
       label: "Артефакт artifact-2",
+    },
+  ]);
+  assert.deepEqual(snapshot.history.at(-1)?.links, [
+    {
+      kind: "agent",
+      agentId: "agent-change-publication",
+      label: "Публикация change selected-change",
     },
   ]);
   await engine.dispose();
@@ -336,7 +367,96 @@ test("изменения рабочего дерева блокируют workfl
     ["Рабочее дерево Git чистое", "succeeded"],
     ["Mise toolchain доступен", "succeeded"],
     ["OpenSpec change готов к apply: selected-change", "succeeded"],
+    ["Pull request #42 опубликован: https://github.com/example/project/pull/42", "succeeded"],
   ]);
+  await engine.dispose();
+  await ledger.close();
+});
+
+test("новые изменения рабочего дерева блокируют публикацию до запуска агента", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-dirty-publication");
+  let worktreeReads = 0;
+  let publishCalls = 0;
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    branchProbe: async () => ({ kind: "non-main", name: "feature/dirty-publication" }),
+    worktreeProbe: async () => {
+      worktreeReads += 1;
+      return worktreeReads === 1 ? { kind: "clean" } : { kind: "dirty" };
+    },
+  });
+  engine.initialize(
+    "workspace-dirty-publication",
+    engineContext(
+      "/workspace/project",
+      async () => requiredAgentProfiles(),
+      immediateChangeSelection(),
+      async () => ({ kind: "available" }),
+      completedChangeArtifacts(),
+      {
+        async publish() {
+          publishCalls += 1;
+          throw new Error("Агент публикации не должен запускаться");
+        },
+      },
+    ),
+  );
+
+  engine.command("workspace-dirty-publication", "start");
+  await settleWorkflow();
+
+  const snapshot = ledger.get("workspace-dirty-publication");
+  assert.equal(snapshot.lifecycle.status, "failed");
+  assert.match(snapshot.lifecycle.message, /незакоммиченные или неотслеживаемые/);
+  assert.equal(worktreeReads, 2);
+  assert.equal(publishCalls, 0);
+  assert.equal(snapshot.history.at(-1)?.text, "Рабочее дерево Git содержит изменения");
+  await engine.dispose();
+  await ledger.close();
+});
+
+test("смена Git-ветки после planning блокирует публикацию", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-branch-drift");
+  let branchReads = 0;
+  let publishCalls = 0;
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    branchProbe: async () => {
+      branchReads += 1;
+      return {
+        kind: "non-main",
+        name: branchReads === 1 ? "feature/original" : "feature/other",
+      };
+    },
+    worktreeProbe: async () => ({ kind: "clean" }),
+  });
+  engine.initialize(
+    "workspace-branch-drift",
+    engineContext(
+      "/workspace/project",
+      async () => requiredAgentProfiles(),
+      immediateChangeSelection(),
+      async () => ({ kind: "available" }),
+      completedChangeArtifacts(),
+      {
+        async publish() {
+          publishCalls += 1;
+          throw new Error("Агент публикации не должен запускаться");
+        },
+      },
+    ),
+  );
+
+  engine.command("workspace-branch-drift", "start");
+  await settleWorkflow();
+
+  const snapshot = ledger.get("workspace-branch-drift");
+  assert.equal(snapshot.lifecycle.status, "failed");
+  assert.match(snapshot.lifecycle.message, /Вернитесь в ветку «feature\/original»/);
+  assert.equal(branchReads, 2);
+  assert.equal(publishCalls, 0);
   await engine.dispose();
   await ledger.close();
 });
@@ -428,8 +548,8 @@ test("отсутствующие профили блокируют Git-пров�
   await settleWorkflow();
   snapshot = ledger.get("workspace-profiles");
   assert.equal(snapshot.lifecycle.status, "completed");
-  assert.equal(profileReads, 3);
-  assert.equal(branchReads, 1);
+  assert.equal(profileReads, 4);
+  assert.equal(branchReads, 2);
   assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
     ["Отсутствуют профили агентов: Orchestrator", "failed"],
     ["Все обязательные профили агентов доступны", "succeeded"],
@@ -437,6 +557,7 @@ test("отсутствующие профили блокируют Git-пров�
     ["Рабочее дерево Git чистое", "succeeded"],
     ["Mise toolchain доступен", "succeeded"],
     ["OpenSpec change готов к apply: selected-change", "succeeded"],
+    ["Pull request #42 опубликован: https://github.com/example/project/pull/42", "succeeded"],
   ]);
   await engine.dispose();
   await ledger.close();
@@ -542,6 +663,52 @@ test("перед запуском агента повторно проверяе
   assert.match(snapshot.lifecycle.message, /Medium Sandbox \(thinkingOptionId\)/);
   assert.equal(profileReads, 2);
   assert.equal(selectCalls, 0);
+  await engine.dispose();
+  await ledger.close();
+});
+
+test("перед публикацией повторно проверяет профиль Medium Sandbox", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-publication-profile-changed");
+  let profileReads = 0;
+  let publishCalls = 0;
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    branchProbe: async () => ({ kind: "non-main", name: "feature/publication-profile" }),
+    worktreeProbe: async () => ({ kind: "clean" }),
+  });
+  engine.initialize(
+    "workspace-publication-profile-changed",
+    engineContext(
+      "/workspace/project",
+      async () => {
+        profileReads += 1;
+        const profiles = requiredAgentProfiles();
+        if (profileReads === 3) {
+          profiles.find(({ name }) => name === "Medium Sandbox").model = " ";
+        }
+        return profiles;
+      },
+      immediateChangeSelection(),
+      async () => ({ kind: "available" }),
+      completedChangeArtifacts(),
+      {
+        async publish() {
+          publishCalls += 1;
+          throw new Error("Агент публикации не должен запускаться");
+        },
+      },
+    ),
+  );
+
+  engine.command("workspace-publication-profile-changed", "start");
+  await settleWorkflow();
+
+  const snapshot = ledger.get("workspace-publication-profile-changed");
+  assert.equal(snapshot.lifecycle.status, "failed");
+  assert.match(snapshot.lifecycle.message, /Medium Sandbox \(model\)/);
+  assert.equal(profileReads, 3);
+  assert.equal(publishCalls, 0);
   await engine.dispose();
   await ledger.close();
 });
@@ -755,7 +922,10 @@ test("сохранённый change после reload проверяется б�
       throw new Error("Новый агент не должен запускаться");
     },
   };
-  const engine = new OpenSpecOrchestratorEngine(ledger);
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    branchProbe: async () => ({ kind: "non-main", name: "feature/resume-change" }),
+    worktreeProbe: async () => ({ kind: "clean" }),
+  });
   engine.initialize(
     "workspace-selected-resume",
     engineContext("/workspace/project", async () => requiredAgentProfiles(), changeSelection),
@@ -766,7 +936,7 @@ test("сохранённый change после reload проверяется б�
 
   assert.equal(ledger.get("workspace-selected-resume").lifecycle.status, "completed");
   assert.equal(ledger.get("workspace-selected-resume").change?.id, "selected-change");
-  assert.equal(verifyCalls, 1);
+  assert.equal(verifyCalls, 2);
   assert.equal(selectCalls, 0);
   await engine.dispose();
   await ledger.close();
@@ -815,7 +985,10 @@ test("после reload pending-сессия продолжает тот же а
     },
     async verifyApply() {},
   };
-  const engine = new OpenSpecOrchestratorEngine(ledger);
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    branchProbe: async () => ({ kind: "non-main", name: "feature/recover-artifact" }),
+    worktreeProbe: async () => ({ kind: "clean" }),
+  });
   engine.initialize(
     "workspace-pending-artifact",
     engineContext(
@@ -839,11 +1012,79 @@ test("после reload pending-сессия продолжает тот же а
   await settleWorkflow();
 
   assert.equal(ledger.get("workspace-pending-artifact").lifecycle.status, "completed");
-  assert.equal(inspectCalls, 0);
+  assert.equal(inspectCalls, 1);
   assert.equal(prepareCalls, 0);
   assert.equal(selectCalls, 0);
   assert.deepEqual(resumedSessions, [pendingArtifactSession]);
   assert.equal(ledger.getWorkflowCheckpoint("workspace-pending-artifact"), null);
+  await engine.dispose();
+  await ledger.close();
+});
+
+test("после reload шаг публикации повторно согласует существующий PR", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-publication-resume");
+  createOrchestratorReporter(ledger, "workspace-publication-resume").setChange({
+    id: "selected-change",
+  });
+  await ledger.saveWorkflowCheckpoint("workspace-publication-resume", {
+    version: 1,
+    nextStepId: "publish-change",
+    state: {
+      branch: "feature/publication-resume",
+      change: { id: "selected-change" },
+      pendingArtifactSession: null,
+    },
+  });
+  let selectCalls = 0;
+  let publishCalls = 0;
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    branchProbe: async () => ({
+      kind: "non-main",
+      name: "feature/publication-resume",
+    }),
+    worktreeProbe: async () => ({ kind: "clean" }),
+  });
+  engine.initialize(
+    "workspace-publication-resume",
+    engineContext(
+      "/workspace/project",
+      async () => requiredAgentProfiles(),
+      {
+        async verify(_workspace, selectedChangeId) {
+          return { id: selectedChangeId };
+        },
+        async select() {
+          selectCalls += 1;
+          throw new Error("Выбор change не должен повторяться");
+        },
+      },
+      async () => ({ kind: "available" }),
+      completedChangeArtifacts(),
+      {
+        async publish(request) {
+          publishCalls += 1;
+          request.onAgentCreated("agent-publication-resume");
+          return {
+            number: 77,
+            url: "https://github.com/example/project/pull/77",
+            title: "Продолжить публикацию change",
+          };
+        },
+      },
+    ),
+  );
+
+  engine.command("workspace-publication-resume", "start");
+  await settleWorkflow();
+
+  const snapshot = ledger.get("workspace-publication-resume");
+  assert.equal(snapshot.lifecycle.status, "completed");
+  assert.equal(selectCalls, 0);
+  assert.equal(publishCalls, 1);
+  assert.equal(snapshot.history.at(-1)?.text, "Pull request #77 опубликован: https://github.com/example/project/pull/77");
+  assert.equal(ledger.getWorkflowCheckpoint("workspace-publication-resume"), null);
   await engine.dispose();
   await ledger.close();
 });
@@ -1069,6 +1310,7 @@ test("на main ветке workflow останавливается, а retry п�
     ["Рабочее дерево Git чистое", "succeeded"],
     ["Mise toolchain доступен", "succeeded"],
     ["OpenSpec change готов к apply: selected-change", "succeeded"],
+    ["Pull request #42 опубликован: https://github.com/example/project/pull/42", "succeeded"],
   ]);
   await engine.dispose();
   await ledger.close();
@@ -1121,6 +1363,9 @@ test("пауза во время проверки ветки применяет�
   const engine = new OpenSpecOrchestratorEngine(ledger, {
     branchProbe: async () => {
       calls += 1;
+      if (calls > 1) {
+        return { kind: "non-main", name: "feature/paused" };
+      }
       return new Promise((resolve) => {
         resolveBranch = resolve;
         markBranchStarted();
@@ -1140,12 +1385,12 @@ test("пауза во время проверки ветки применяет�
   engine.command("workspace-1", "resume");
   await settleWorkflow();
   assert.equal(ledger.get("workspace-1").lifecycle.status, "completed");
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
   await engine.dispose();
   await ledger.close();
 });
 
-test("пауза не прерывает диалог выбора, а terminal completion имеет приоритет", async (context) => {
+test("пауза не прерывает диалог выбора и применяется перед публикацией", async (context) => {
   const paseoHome = await temporaryHome(context);
   const ledger = new OrchestratorLedger({ paseoHome });
   await ledger.open("workspace-selection-pause");
@@ -1184,8 +1429,11 @@ test("пауза не прерывает диалог выбора, а terminal 
   await finishSelection();
   await settleWorkflow();
 
-  assert.equal(ledger.get("workspace-selection-pause").lifecycle.status, "completed");
+  assert.equal(ledger.get("workspace-selection-pause").lifecycle.status, "paused");
   assert.equal(ledger.get("workspace-selection-pause").change?.id, "selected-change");
+  engine.command("workspace-selection-pause", "resume");
+  await settleWorkflow();
+  assert.equal(ledger.get("workspace-selection-pause").lifecycle.status, "completed");
   await engine.dispose();
   await ledger.close();
 });
@@ -1284,6 +1532,7 @@ test("контроллер передаёт контекст и создаёт �
   assert.equal(typeof initializedContext.miseToolchain, "function");
   assert.equal(typeof initializedContext.changeArtifacts.inspect, "function");
   assert.equal(typeof initializedContext.changeArtifacts.create, "function");
+  assert.equal(typeof initializedContext.changePublication.publish, "function");
   assert.deepEqual(await initializedContext.readAgentProfiles(), configuredProfiles);
   configuredProfiles = undefined;
   assert.deepEqual(await initializedContext.readAgentProfiles(), []);

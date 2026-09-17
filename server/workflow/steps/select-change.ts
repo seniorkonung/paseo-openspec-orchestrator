@@ -126,7 +126,8 @@ export async function selectChangeStep(
       context.signal,
     );
     return {
-      kind: "complete",
+      kind: "continue",
+      next: "publish-change",
       state: { change, pendingArtifactSession: null },
       summary: `OpenSpec change готов к apply: ${change.id}`,
     };

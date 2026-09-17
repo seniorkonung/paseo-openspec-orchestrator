@@ -50,7 +50,8 @@ export async function createChangeArtifactsStep(
           context.signal,
         );
         return {
-          kind: "complete",
+          kind: "continue",
+          next: "publish-change",
           state: { pendingArtifactSession: null },
           summary: `OpenSpec change готов к apply: ${change.id}`,
         };
@@ -134,7 +135,8 @@ export async function createChangeArtifactsStep(
         context.signal,
       );
       return {
-        kind: "complete",
+        kind: "continue",
+        next: "publish-change",
         state: { pendingArtifactSession: null },
         summary: `OpenSpec change готов к apply: ${change.id}`,
       };

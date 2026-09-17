@@ -28,6 +28,8 @@ The plugin is responsible for:
 - inspecting the selected change's schema-defined planning graph and creating
   one approved, separately committed artifact per agent session until planning
   is complete;
+- publishing the completed planning branch to `origin` and creating or
+  reconciling one change-owned integration pull request into `main`;
 - delivering optional workflow notifications through ntfy;
 - delegating interactive workflow steps to Paseo agents through scoped MCP
   tools.
@@ -91,11 +93,15 @@ The main boundaries are:
 - `server/orchestrator-mcp-tool-host.ts` provides the scoped local MCP server
   used to attach orchestrator-owned tools to Paseo agents. The default workflow
   exposes only `set_change` to a change-selection agent and only
-  `complete_artifact` to each artifact-creation agent. A tool from one session
-  is not shared with another session.
+  `complete_artifact` to each artifact-creation agent, then only
+  `complete_change_publication` to the publication agent. A tool from one
+  session is not shared with another session.
 - `server/change-artifact-creation.ts` is the boundary around OpenSpec planning
   status, repository path validation, per-artifact Git verification, agent
   sessions, and the `complete_artifact` MCP contract.
+- `server/change-publication.ts` owns the GitHub publication seam: it validates
+  `origin`, GitHub CLI access, the remote commit and pull-request metadata while
+  a workspace-local agent performs the push and PR create/edit operations.
 
 The shared Zod schemas are runtime boundaries as well as TypeScript contracts.
 Persisted data, RPC payloads, workflow state, and tool results must be validated
@@ -123,9 +129,10 @@ before recording the choice.
 
 The selection step then reads the schema-defined artifact graph from
 `openspec status --json`. If planning is already complete, the workflow checks
-`openspec instructions apply --json` and finishes. Otherwise it enters the
-`create-change-artifacts` step. That step loops back to itself, always choosing
-the first `ready` artifact in OpenSpec's dependency order; it does not assume
+`openspec instructions apply --json` and advances directly to publication.
+Otherwise it enters the `create-change-artifacts` step. That step loops back to
+itself, always choosing the first `ready` artifact in OpenSpec's dependency
+order, and advances to publication after the final artifact; it does not assume
 that an artifact is named `tasks` or that the repository uses the default
 schema. The OpenSpec JSON contracts and ordering rules come from the
 [OpenSpec agent contract](https://github.com/Fission-AI/OpenSpec/blob/main/docs/agent-contract.md).
@@ -151,7 +158,28 @@ resumes the same artifact; a restart after it advances from the durable cleared
 checkpoint. Agent placement and live command discovery use the documented
 [Paseo workspace agent](https://paseo.sh/docs/sdk/workspaces#start-an-agent-in-a-workspace)
 and [agent command catalog](https://paseo.sh/docs/sdk/agents#list-the-commands-a-session-loaded)
-APIs. Implementation work remains outside the current workflow endpoint.
+APIs.
+
+Once planning is complete, both the already-complete selection path and the
+artifact loop enter `publish-change`. The step revalidates the selected change,
+the saved non-`main` branch, apply readiness, and a clean worktree before it
+starts a fresh `Medium Sandbox` agent. The workspace must have an `origin`
+GitHub remote with a `main` branch, and `gh` must be installed and authenticated
+for that host; `gh` is a host prerequisite like Git and is not managed by the
+workspace mise toolchain.
+
+The agent reads every completed planning artifact, pushes the current branch to
+`origin` without force, and owns exactly one open integration pull request for
+that branch. It fully regenerates the stable Russian title and body from the
+change artifacts. An existing open PR is retargeted to `main` and keeps its
+Draft/Ready state; otherwise the agent creates a new Draft PR, ignoring closed
+or merged history. The scoped `complete_change_publication` tool independently
+checks the clean worktree, local and remote HEADs, repository, base/head refs,
+Draft policy, title, and body before the workflow completes. A restart safely
+reconciles the already pushed branch or PR instead of creating a duplicate.
+
+Implementation of the selected change remains outside the current workflow
+endpoint.
 
 ## Extending the workflow
 

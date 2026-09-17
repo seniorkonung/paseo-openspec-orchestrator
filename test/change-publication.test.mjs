@@ -1,0 +1,657 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import {
+  ChangePublicationError,
+  changePublicationPrompt,
+  createChangePublicationService,
+} from "../server/change-publication.ts";
+
+const branch = "feature/integration-pr";
+const changeId = "selected-change";
+const head = "a".repeat(40);
+const mainHead = "b".repeat(40);
+const repository = "example/project";
+const repositoryUrl = "https://github.com/example/project";
+const originUrl = "git@github.com:example/project.git";
+const title = "Добавить публикацию интеграционного pull request";
+const body = `## Суть
+
+Change получает единый интеграционный pull request.
+
+## Ожидаемый результат
+
+Ветка и описание публикуются согласованно.
+
+## Границы change
+
+Только публикация выбранного change.
+
+## OpenSpec change
+
+\`${changeId}\``;
+
+function profile() {
+  return {
+    id: "profile-medium-sandbox",
+    name: "Medium Sandbox",
+    provider: "codex",
+    model: "gpt-5.5",
+    modeId: "sandbox",
+    thinkingOptionId: "medium",
+    featureValues: { fast: true },
+  };
+}
+
+function pullRequest(overrides = {}) {
+  return {
+    number: 42,
+    url: `${repositoryUrl}/pull/42`,
+    state: "OPEN",
+    isDraft: true,
+    isCrossRepository: false,
+    baseRefName: "main",
+    headRefName: branch,
+    headRefOid: head,
+    title,
+    body,
+    ...overrides,
+  };
+}
+
+function openPullRequest(value) {
+  return {
+    number: value.number,
+    url: value.url,
+    isDraft: value.isDraft,
+    isCrossRepository: value.isCrossRepository,
+    headRefName: value.headRefName,
+  };
+}
+
+async function connectClient(url) {
+  const client = new Client({ name: "change-publication-test", version: "1.0.0" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(url)));
+  return client;
+}
+
+function startPublicationAttempt(command, completionArguments = { pullRequestNumber: 42, title, body }) {
+  let startTool;
+  const toolStarted = new Promise((resolve) => {
+    startTool = resolve;
+  });
+  let toolFlow;
+  const service = createChangePublicationService({
+    command,
+    async createAgent(options) {
+      const [{ url }] = Object.values(options.config.mcpServers);
+      toolFlow = (async () => {
+        const client = await connectClient(url);
+        try {
+          return await client.callTool({
+            name: "complete_change_publication",
+            arguments: completionArguments,
+          });
+        } finally {
+          await client.close();
+        }
+      })();
+      startTool();
+      return {
+        id: "agent-verification",
+        waitForFinish: async () => {
+          await toolFlow;
+          return { status: "idle" };
+        },
+      };
+    },
+    updateNotificationLabel: async () => {},
+    logger: { error() {}, warn() {} },
+  });
+  const publication = service.publish({
+    workspaceDirectory: "/workspace/project",
+    changeId,
+    branch,
+    profile: profile(),
+    signal: new AbortController().signal,
+    onAgentCreated() {},
+  });
+  return {
+    publication,
+    async toolResult() {
+      await toolStarted;
+      return toolFlow;
+    },
+  };
+}
+
+function firstText(result) {
+  const content = result.content[0];
+  assert.equal(content?.type, "text");
+  return content.text;
+}
+
+function publicationCommand({
+  existing = null,
+  verified = pullRequest(),
+  dirtyAtCompletion = false,
+  dirtyInitially = false,
+  remoteHead = head,
+  localHeads = [head],
+} = {}) {
+  let listCalls = 0;
+  let statusCalls = 0;
+  let headCalls = 0;
+  const calls = [];
+  const command = async (executable, arguments_, options) => {
+    calls.push({ executable, arguments: [...arguments_], options });
+    const key = `${executable} ${arguments_.join(" ")}`;
+    if (key === "git remote get-url origin") return { stdout: `${originUrl}\n`, stderr: "" };
+    if (key === "gh auth status --hostname github.com") {
+      return { stdout: "", stderr: "" };
+    }
+    if (key === `gh repo view ${repository} --json nameWithOwner,url`) {
+      return {
+        stdout: JSON.stringify({ nameWithOwner: repository, url: repositoryUrl }),
+        stderr: "",
+      };
+    }
+    if (
+      key === "git ls-remote --exit-code --heads origin refs/heads/main"
+    ) {
+      return { stdout: `${mainHead}\trefs/heads/main\n`, stderr: "" };
+    }
+    if (key.startsWith("gh pr list ")) {
+      listCalls += 1;
+      const values = listCalls === 1 ? (existing ? [existing] : []) : [verified];
+      return { stdout: JSON.stringify(values.map(openPullRequest)), stderr: "" };
+    }
+    if (key === "git status --porcelain=v1 --untracked-files=all") {
+      statusCalls += 1;
+      return {
+        stdout:
+          dirtyInitially || (dirtyAtCompletion && statusCalls > 1)
+            ? "?? unexpected.txt\n"
+            : "",
+        stderr: "",
+      };
+    }
+    if (key === "git branch --show-current") {
+      return { stdout: `${branch}\n`, stderr: "" };
+    }
+    if (key === "git rev-parse HEAD") {
+      const value = localHeads[Math.min(headCalls, localHeads.length - 1)];
+      headCalls += 1;
+      return { stdout: `${value}\n`, stderr: "" };
+    }
+    if (key === `git ls-remote --exit-code --heads origin refs/heads/${branch}`) {
+      return { stdout: `${remoteHead}\trefs/heads/${branch}\n`, stderr: "" };
+    }
+    if (key === `gh pr view 42 --repo ${repository} --json number,url,state,isDraft,isCrossRepository,baseRefName,headRefName,headRefOid,title,body`) {
+      return { stdout: JSON.stringify(verified), stderr: "" };
+    }
+    throw new Error(`Неожиданная команда: ${key}`);
+  };
+  return { command, calls };
+}
+
+test("Medium Sandbox публикует новый Draft PR и подтверждает его через scoped MCP", async () => {
+  const created = [];
+  const labels = [];
+  const links = [];
+  const toolResults = [];
+  const { command, calls } = publicationCommand();
+  let toolFlow;
+  const service = createChangePublicationService({
+    command,
+    async createAgent(options) {
+      created.push(options);
+      const [{ url }] = Object.values(options.config.mcpServers);
+      toolFlow = (async () => {
+        const client = await connectClient(url);
+        try {
+          const tools = await client.listTools();
+          assert.deepEqual(tools.tools.map(({ name }) => name), [
+            "complete_change_publication",
+          ]);
+          toolResults.push(
+            await client.callTool({
+              name: "complete_change_publication",
+              arguments: { pullRequestNumber: 42, title, body },
+            }),
+          );
+        } finally {
+          await client.close();
+        }
+      })();
+      return {
+        id: "agent-publication",
+        waitForFinish: async () => {
+          await toolFlow;
+          return { status: "idle", lastMessage: null };
+        },
+      };
+    },
+    updateNotificationLabel: async (agentId, enabled) => labels.push([agentId, enabled]),
+    logger: { error() {}, warn() {} },
+  });
+
+  const result = await service.publish({
+    workspaceDirectory: "/workspace/project",
+    changeId,
+    branch,
+    profile: profile(),
+    signal: new AbortController().signal,
+    onAgentCreated: (agentId) => links.push(agentId),
+  });
+
+  assert.deepEqual(result, {
+    number: 42,
+    url: `${repositoryUrl}/pull/42`,
+    title,
+  });
+  assert.equal(created.length, 1);
+  assert.equal(created[0].config.provider, "codex/gpt-5.5");
+  assert.equal(created[0].config.modeId, "sandbox");
+  assert.equal(created[0].config.thinkingOptionId, "medium");
+  assert.deepEqual(created[0].config.featureValues, { fast: true });
+  assert.deepEqual(created[0].labels, { ntfy: "true" });
+  assert.equal("autoArchive" in created[0], false);
+  assert.equal("cwd" in created[0], false);
+  assert.match(created[0].prompt, /openspec status --change selected-change --json/);
+  assert.match(created[0].prompt, /git push --set-upstream origin feature\/integration-pr/);
+  assert.match(created[0].prompt, /create a new Draft PR/);
+  assert.match(created[0].prompt, /Do not archive agents or workspaces/);
+  assert.deepEqual(links, ["agent-publication"]);
+  assert.deepEqual(labels, [["agent-publication", false]]);
+  assert.equal(toolResults[0].isError, undefined);
+  assert.deepEqual(toolResults[0].structuredContent, {
+    pullRequestNumber: 42,
+    url: `${repositoryUrl}/pull/42`,
+    title,
+  });
+  assert.ok(
+    calls.every(({ options }) => options.cwd === "/workspace/project"),
+    "все команды должны выполняться из workspace",
+  );
+});
+
+test("актуализирует существующий Ready PR и сохраняет его статус", async () => {
+  const existing = pullRequest({ isDraft: false, baseRefName: "develop", title: "Старое", body: "Старое" });
+  const verified = pullRequest({ isDraft: false });
+  const { command } = publicationCommand({ existing, verified });
+  let toolFlow;
+  const service = createChangePublicationService({
+    command,
+    async createAgent(options) {
+      assert.match(options.prompt, /"existingOpenPullRequest":42/);
+      const [{ url }] = Object.values(options.config.mcpServers);
+      toolFlow = (async () => {
+        const client = await connectClient(url);
+        try {
+          return await client.callTool({
+            name: "complete_change_publication",
+            arguments: { pullRequestNumber: 42, title, body },
+          });
+        } finally {
+          await client.close();
+        }
+      })();
+      return {
+        id: "agent-existing-pr",
+        waitForFinish: async () => {
+          await toolFlow;
+          return { status: "idle" };
+        },
+      };
+    },
+    updateNotificationLabel: async () => {},
+    logger: { error() {}, warn() {} },
+  });
+
+  const result = await service.publish({
+    workspaceDirectory: "/workspace/project",
+    changeId,
+    branch,
+    profile: profile(),
+    signal: new AbortController().signal,
+    onAgentCreated() {},
+  });
+  assert.equal(result.number, 42);
+  assert.equal((await toolFlow).isError, undefined);
+});
+
+test("отклоняет несколько открытых PR до создания агента", async () => {
+  let created = false;
+  const first = pullRequest();
+  const { command } = publicationCommand();
+  const ambiguousCommand = async (executable, arguments_, options) => {
+    if (executable === "gh" && arguments_[0] === "pr" && arguments_[1] === "list") {
+      return {
+        stdout: JSON.stringify([
+          openPullRequest(first),
+          openPullRequest({ ...first, number: 43 }),
+        ]),
+        stderr: "",
+      };
+    }
+    return command(executable, arguments_, options);
+  };
+  const service = createChangePublicationService({
+    command: ambiguousCommand,
+    async createAgent() {
+      created = true;
+      throw new Error("не должен быть вызван");
+    },
+  });
+
+  await assert.rejects(
+    service.publish({
+      workspaceDirectory: "/workspace/project",
+      changeId,
+      branch,
+      profile: profile(),
+      signal: new AbortController().signal,
+      onAgentCreated() {},
+    }),
+    /несколько открытых pull request/,
+  );
+  assert.equal(created, false);
+});
+
+test("отклоняет PR из fork до создания агента", async () => {
+  let created = false;
+  const { command } = publicationCommand({
+    existing: pullRequest({ isCrossRepository: true }),
+  });
+  const service = createChangePublicationService({
+    command,
+    async createAgent() {
+      created = true;
+      throw new Error("не должен быть вызван");
+    },
+  });
+
+  await assert.rejects(
+    service.publish({
+      workspaceDirectory: "/workspace/project",
+      changeId,
+      branch,
+      profile: profile(),
+      signal: new AbortController().signal,
+      onAgentCreated() {},
+    }),
+    /использует fork вместо origin/,
+  );
+  assert.equal(created, false);
+});
+
+test("останавливается до агента при грязном рабочем дереве", async () => {
+  let created = false;
+  const { command } = publicationCommand({ dirtyInitially: true });
+  const service = createChangePublicationService({
+    command,
+    async createAgent() {
+      created = true;
+      throw new Error("не должен быть вызван");
+    },
+  });
+
+  await assert.rejects(
+    service.publish({
+      workspaceDirectory: "/workspace/project",
+      changeId,
+      branch,
+      profile: profile(),
+      signal: new AbortController().signal,
+      onAgentCreated() {},
+    }),
+    /незакоммиченные или неотслеживаемые/,
+  );
+  assert.equal(created, false);
+});
+
+test("не подтверждает PR, если после работы агента дерево стало грязным", async () => {
+  const { command } = publicationCommand({ dirtyAtCompletion: true });
+  const toolResults = [];
+  let toolFlow;
+  const service = createChangePublicationService({
+    command,
+    async createAgent(options) {
+      const [{ url }] = Object.values(options.config.mcpServers);
+      toolFlow = (async () => {
+        const client = await connectClient(url);
+        try {
+          toolResults.push(
+            await client.callTool({
+              name: "complete_change_publication",
+              arguments: { pullRequestNumber: 42, title, body },
+            }),
+          );
+        } finally {
+          await client.close();
+        }
+      })();
+      return {
+        id: "agent-dirty",
+        waitForFinish: async () => {
+          await toolFlow;
+          return { status: "idle" };
+        },
+      };
+    },
+    updateNotificationLabel: async () => {},
+    logger: { error() {}, warn() {} },
+  });
+
+  await assert.rejects(
+    service.publish({
+      workspaceDirectory: "/workspace/project",
+      changeId,
+      branch,
+      profile: profile(),
+      signal: new AbortController().signal,
+      onAgentCreated() {},
+    }),
+    ChangePublicationError,
+  );
+  assert.equal(toolResults[0].isError, true);
+  assert.match(firstText(toolResults[0]), /незакоммиченные или неотслеживаемые/);
+});
+
+test("не подтверждает публикацию, если агент изменил локальный HEAD", async () => {
+  const changedHead = "c".repeat(40);
+  const { command } = publicationCommand({
+    localHeads: [head, changedHead],
+    remoteHead: changedHead,
+    verified: pullRequest({ headRefOid: changedHead }),
+  });
+  const attempt = startPublicationAttempt(command);
+
+  await assert.rejects(attempt.publication, ChangePublicationError);
+  const toolResult = await attempt.toolResult();
+  assert.equal(toolResult.isError, true);
+  assert.match(firstText(toolResult), /HEAD изменился/);
+});
+
+test("не подтверждает публикацию при несовпадении remote SHA", async () => {
+  const { command } = publicationCommand({ remoteHead: "c".repeat(40) });
+  const attempt = startPublicationAttempt(command);
+
+  await assert.rejects(attempt.publication, ChangePublicationError);
+  const toolResult = await attempt.toolResult();
+  assert.equal(toolResult.isError, true);
+  assert.match(firstText(toolResult), /origin не содержит текущий HEAD/);
+});
+
+test("не подтверждает PR с отличающейся base-веткой", async () => {
+  const { command } = publicationCommand({
+    verified: pullRequest({ baseRefName: "develop" }),
+  });
+  const attempt = startPublicationAttempt(command);
+
+  await assert.rejects(attempt.publication, ChangePublicationError);
+  const toolResult = await attempt.toolResult();
+  assert.equal(toolResult.isError, true);
+  assert.match(firstText(toolResult), /направлен в ветку main/);
+});
+
+test("не подтверждает несовпадающее название или описание PR", async () => {
+  const { command } = publicationCommand({
+    verified: pullRequest({ body: `${body}\nЛишний текст` }),
+  });
+  const attempt = startPublicationAttempt(command);
+
+  await assert.rejects(attempt.publication, ChangePublicationError);
+  const toolResult = await attempt.toolResult();
+  assert.equal(toolResult.isError, true);
+  assert.match(firstText(toolResult), /не совпадает с подтверждаемым содержимым/);
+});
+
+test("останавливается до агента, если gh не авторизован для origin", async () => {
+  let created = false;
+  const { command } = publicationCommand();
+  const unauthorizedCommand = async (executable, arguments_, options) => {
+    if (executable === "gh" && arguments_[0] === "auth") {
+      throw Object.assign(new Error("not logged in"), { stderr: "secret output" });
+    }
+    return command(executable, arguments_, options);
+  };
+  const service = createChangePublicationService({
+    command: unauthorizedCommand,
+    async createAgent() {
+      created = true;
+      throw new Error("не должен быть вызван");
+    },
+  });
+
+  await assert.rejects(
+    service.publish({
+      workspaceDirectory: "/workspace/project",
+      changeId,
+      branch,
+      profile: profile(),
+      signal: new AbortController().signal,
+      onAgentCreated() {},
+    }),
+    /GitHub CLI недоступен или не авторизован/,
+  );
+  assert.equal(created, false);
+});
+
+test("останавливается до агента, если origin отсутствует", async () => {
+  let created = false;
+  const service = createChangePublicationService({
+    async command(executable, arguments_) {
+      const key = `${executable} ${arguments_.join(" ")}`;
+      if (key === "git status --porcelain=v1 --untracked-files=all") {
+        return { stdout: "", stderr: "" };
+      }
+      if (key === "git branch --show-current") {
+        return { stdout: `${branch}\n`, stderr: "" };
+      }
+      if (key === "git rev-parse HEAD") {
+        return { stdout: `${head}\n`, stderr: "" };
+      }
+      if (key === "git remote get-url origin") {
+        throw new Error("No such remote");
+      }
+      throw new Error(`Неожиданная команда: ${key}`);
+    },
+    async createAgent() {
+      created = true;
+      throw new Error("не должен быть вызван");
+    },
+  });
+
+  await assert.rejects(
+    service.publish({
+      workspaceDirectory: "/workspace/project",
+      changeId,
+      branch,
+      profile: profile(),
+      signal: new AbortController().signal,
+      onAgentCreated() {},
+    }),
+    /remote origin отсутствует/,
+  );
+  assert.equal(created, false);
+});
+
+test("завершает шаг ошибкой, если агент не вызвал completion tool", async () => {
+  const { command } = publicationCommand();
+  const labels = [];
+  const service = createChangePublicationService({
+    command,
+    async createAgent() {
+      return {
+        id: "agent-without-tool",
+        waitForFinish: async () => ({ status: "idle" }),
+      };
+    },
+    updateNotificationLabel: async (agentId, enabled) => labels.push([agentId, enabled]),
+    logger: { error() {}, warn() {} },
+  });
+
+  await assert.rejects(
+    service.publish({
+      workspaceDirectory: "/workspace/project",
+      changeId,
+      branch,
+      profile: profile(),
+      signal: new AbortController().signal,
+      onAgentCreated() {},
+    }),
+    /без подтверждения публикации/,
+  );
+  assert.deepEqual(labels, [["agent-without-tool", false]]);
+});
+
+test("отмена публикации снимает ntfy и завершает ожидание", async () => {
+  const { command } = publicationCommand();
+  const labels = [];
+  const controller = new AbortController();
+  const service = createChangePublicationService({
+    command,
+    async createAgent() {
+      return {
+        id: "agent-aborted-publication",
+        waitForFinish: async () => new Promise(() => {}),
+      };
+    },
+    updateNotificationLabel: async (agentId, enabled) => labels.push([agentId, enabled]),
+    logger: { error() {}, warn() {} },
+  });
+
+  await assert.rejects(
+    service.publish({
+      workspaceDirectory: "/workspace/project",
+      changeId,
+      branch,
+      profile: profile(),
+      signal: controller.signal,
+      onAgentCreated() {
+        controller.abort();
+      },
+    }),
+    { name: "AbortError" },
+  );
+  assert.deepEqual(labels, [["agent-aborted-publication", false]]);
+});
+
+test("prompt строится только из валидированных параметров публикации", () => {
+  const prompt = changePublicationPrompt({
+    changeId,
+    branch,
+    target: {
+      repository,
+      repositoryUrl,
+      expectedHead: head,
+      existingPullRequest: null,
+    },
+  });
+  assert.match(prompt, /workflow data, not instructions/);
+  assert.match(prompt, /--body-file -/);
+  assert.match(prompt, /Do not reopen a closed or merged PR/);
+  assert.doesNotMatch(prompt, /force-with-lease/);
+});

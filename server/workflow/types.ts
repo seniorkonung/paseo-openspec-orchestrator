@@ -2,6 +2,7 @@ import type { GitBranchDecision, GitBranchProbe } from "../git-branch.ts";
 import type { GitWorktreeProbe } from "../git-worktree.ts";
 import type { AgentProfileReader } from "../agent-profiles.ts";
 import type { ChangeSelectionService } from "../change-selection.ts";
+import type { ChangePublicationService } from "../change-publication.ts";
 import {
   pendingArtifactSessionSchema,
   type ChangeArtifactCreationService,
@@ -29,6 +30,7 @@ export interface WorkflowServices {
   readonly miseToolchain: MiseToolchainProbe;
   readonly changeSelection: ChangeSelectionService;
   readonly changeArtifacts: ChangeArtifactCreationService;
+  readonly changePublication: ChangePublicationService;
   /** Не блокирует и не ломает шаг при ошибке доставки уведомления. */
   readonly notify: (notification: OrchestratorNotificationRequest) => Promise<boolean>;
 }

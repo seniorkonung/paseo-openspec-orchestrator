@@ -3,6 +3,7 @@ import type { OrchestratorWorkspaceDisplay } from "../shared/orchestrator-notifi
 import type { AgentProfileReader } from "./agent-profiles.ts";
 import type { ChangeArtifactCreationService } from "./change-artifact-creation.ts";
 import type { ChangeSelectionService } from "./change-selection.ts";
+import type { ChangePublicationService } from "./change-publication.ts";
 import type { MiseToolchainProbe } from "./mise-toolchain.ts";
 
 export interface OrchestratorEngineContext {
@@ -13,6 +14,7 @@ export interface OrchestratorEngineContext {
   readonly miseToolchain: MiseToolchainProbe;
   readonly changeSelection: ChangeSelectionService;
   readonly changeArtifacts: ChangeArtifactCreationService;
+  readonly changePublication: ChangePublicationService;
 }
 
 export interface OrchestratorEngine {
