@@ -160,8 +160,12 @@ export async function publishChangeStep(
       },
     });
     return {
-      kind: "complete",
-      state: { pendingArtifactSession: null },
+      kind: "continue",
+      next: "review-change",
+      state: {
+        pendingArtifactSession: null,
+        pendingReviewSession: null,
+      },
       summary: `Pull request #${publication.number} опубликован: ${publication.url}`.slice(
         0,
         500,

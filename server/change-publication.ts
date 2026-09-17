@@ -2,6 +2,14 @@ import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import type { CompleteRequiredAgentProfile } from "./agent-profiles.ts";
 import {
+  abortError,
+  combineAbortSignals,
+  createDeferred,
+  createSerializedExecutor,
+  throwIfSignalAborted,
+  waitForPromise,
+} from "./agent-session-control.ts";
+import {
   runBoundedCommand,
   type BoundedCommandRunner,
 } from "./bounded-command.ts";
@@ -258,15 +266,7 @@ export function createChangePublicationService(
       const abortPublication = () => completion.reject(abortError());
       request.signal.addEventListener("abort", abortPublication, { once: true });
 
-      let toolQueue: Promise<void> = Promise.resolve();
-      const serialize = <T>(operation: () => Promise<T>): Promise<T> => {
-        const result = toolQueue.then(operation, operation);
-        toolQueue = result.then(
-          () => undefined,
-          () => undefined,
-        );
-        return result;
-      };
+      const serialize = createSerializedExecutor();
 
       const scope = host.expose({
         complete_change_publication: defineMcpTool({
@@ -934,66 +934,4 @@ function errorCode(error: unknown): string {
     return String(Reflect.get(error, "code"));
   }
   return "unknown";
-}
-
-function abortError(): Error {
-  const error = new Error("Операция отменена");
-  error.name = "AbortError";
-  return error;
-}
-
-function throwIfSignalAborted(signal: AbortSignal): void {
-  if (signal.aborted) throw abortError();
-}
-
-function waitForPromise<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(abortError());
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(abortError());
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(
-      (value) => {
-        signal.removeEventListener("abort", onAbort);
-        resolve(value);
-      },
-      (error) => {
-        signal.removeEventListener("abort", onAbort);
-        reject(error);
-      },
-    );
-  });
-}
-
-function createDeferred<T>(): {
-  readonly promise: Promise<T>;
-  readonly resolve: (value: T) => void;
-  readonly reject: (error: unknown) => void;
-} {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
-}
-
-function combineAbortSignals(
-  first: AbortSignal,
-  second: AbortSignal,
-): { readonly signal: AbortSignal; readonly dispose: () => void } {
-  const controller = new AbortController();
-  const abort = () => controller.abort();
-  if (first.aborted || second.aborted) controller.abort();
-  else {
-    first.addEventListener("abort", abort, { once: true });
-    second.addEventListener("abort", abort, { once: true });
-  }
-  return {
-    signal: controller.signal,
-    dispose: () => {
-      first.removeEventListener("abort", abort);
-      second.removeEventListener("abort", abort);
-    },
-  };
 }

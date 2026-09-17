@@ -4,6 +4,11 @@ import type { AgentProfileReader } from "../agent-profiles.ts";
 import type { ChangeSelectionService } from "../change-selection.ts";
 import type { ChangePublicationService } from "../change-publication.ts";
 import {
+  pendingReviewSessionSchema,
+  type ChangeReviewService,
+  type PendingReviewSession,
+} from "../change-review.ts";
+import {
   pendingArtifactSessionSchema,
   type ChangeArtifactCreationService,
   type PendingArtifactSession,
@@ -21,6 +26,7 @@ export interface WorkflowState {
   readonly branch: Extract<GitBranchDecision, { kind: "non-main" }>["name"] | null;
   readonly change: OrchestratorChange | null;
   readonly pendingArtifactSession: PendingArtifactSession | null;
+  readonly pendingReviewSession: PendingReviewSession | null;
 }
 
 export interface WorkflowServices {
@@ -31,6 +37,7 @@ export interface WorkflowServices {
   readonly changeSelection: ChangeSelectionService;
   readonly changeArtifacts: ChangeArtifactCreationService;
   readonly changePublication: ChangePublicationService;
+  readonly changeReview: ChangeReviewService;
   /** Не блокирует и не ломает шаг при ошибке доставки уведомления. */
   readonly notify: (notification: OrchestratorNotificationRequest) => Promise<boolean>;
 }
@@ -47,8 +54,18 @@ export const workflowStateSchema = z
     branch: z.string().trim().max(512).nullable(),
     change: orchestratorChangeSchema.nullable().default(null),
     pendingArtifactSession: pendingArtifactSessionSchema.nullable().default(null),
+    pendingReviewSession: pendingReviewSessionSchema.nullable().default(null),
   })
-  .strict();
+  .strict()
+  .superRefine((state, context) => {
+    if (state.pendingArtifactSession && state.pendingReviewSession) {
+      context.addIssue({
+        code: "custom",
+        path: ["pendingReviewSession"],
+        message: "Workflow не может одновременно восстанавливать artifact и review",
+      });
+    }
+  });
 
 export const workflowCheckpointSchema = z
   .object({
@@ -99,5 +116,10 @@ export interface WorkflowStepDefinition {
 }
 
 export function createInitialWorkflowState(): WorkflowState {
-  return { branch: null, change: null, pendingArtifactSession: null };
+  return {
+    branch: null,
+    change: null,
+    pendingArtifactSession: null,
+    pendingReviewSession: null,
+  };
 }

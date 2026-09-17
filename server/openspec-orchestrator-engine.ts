@@ -6,6 +6,7 @@ import type { AgentProfileReader } from "./agent-profiles.ts";
 import type { ChangeArtifactCreationService } from "./change-artifact-creation.ts";
 import type { ChangeSelectionService } from "./change-selection.ts";
 import type { ChangePublicationService } from "./change-publication.ts";
+import type { ChangeReviewService } from "./change-review.ts";
 import type { MiseToolchainProbe } from "./mise-toolchain.ts";
 import {
   normalizeOrchestratorWorkspaceDisplay,
@@ -52,6 +53,7 @@ interface WorkspaceRuntime {
   changeSelection: ChangeSelectionService;
   changeArtifacts: ChangeArtifactCreationService;
   changePublication: ChangePublicationService;
+  changeReview: ChangeReviewService;
   generation: number;
   pauseRequested: boolean;
   active: boolean;
@@ -129,6 +131,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       changeSelection: context.changeSelection,
       changeArtifacts: context.changeArtifacts,
       changePublication: context.changePublication,
+      changeReview: context.changeReview,
       generation: 0,
       pauseRequested: false,
       active: false,
@@ -325,6 +328,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
             changeSelection: runtime.changeSelection,
             changeArtifacts: runtime.changeArtifacts,
             changePublication: runtime.changePublication,
+            changeReview: runtime.changeReview,
             notify: (notification) => this.#notify(workspaceId, notification, runtime),
           },
           updateActionLinks: (links) => {

@@ -84,6 +84,30 @@ function completedChangePublication() {
   };
 }
 
+function completedChangeReview() {
+  return {
+    async plan(_workspaceDirectory, changeId, branch) {
+      return {
+        kind: "review-required",
+        session: {
+          changeId,
+          branch,
+          baselineCommit: "c".repeat(40),
+        },
+      };
+    },
+    async run(request) {
+      request.onAgentCreated("agent-change-review");
+      const review = {
+        changeId: request.changeId,
+        reviewPath: `openspec/changes/${request.changeId}/review.md`,
+      };
+      await request.onReviewCompleted(review);
+      return review;
+    },
+  };
+}
+
 function engineContext(
   workspaceDirectory = "/workspace/project",
   readAgentProfiles = async () => requiredAgentProfiles(),
@@ -91,6 +115,7 @@ function engineContext(
   miseToolchain = async () => ({ kind: "available" }),
   changeArtifacts = completedChangeArtifacts(),
   changePublication = completedChangePublication(),
+  changeReview = completedChangeReview(),
 ) {
   const workspaceDisplay = { projectName: null, workspaceName: null };
   return {
@@ -102,6 +127,7 @@ function engineContext(
     changeSelection,
     changeArtifacts,
     changePublication,
+    changeReview,
   };
 }
 
@@ -193,19 +219,30 @@ test("на non-main ветке workflow завершает инициализа�
     ["Mise toolchain доступен", "succeeded"],
     ["OpenSpec change готов к apply: selected-change", "succeeded"],
     ["Pull request #42 опубликован: https://github.com/example/project/pull/42", "succeeded"],
+    [
+      "Review OpenSpec change опубликован: openspec/changes/selected-change/review.md",
+      "succeeded",
+    ],
   ]);
-  assert.deepEqual(snapshot.history.at(-2)?.links, [
+  assert.deepEqual(snapshot.history.at(-3)?.links, [
     {
       kind: "agent",
       agentId: "agent-change-selection",
       label: "Выбор OpenSpec change",
     },
   ]);
-  assert.deepEqual(snapshot.history.at(-1)?.links, [
+  assert.deepEqual(snapshot.history.at(-2)?.links, [
     {
       kind: "agent",
       agentId: "agent-change-publication",
       label: "Публикация change selected-change",
+    },
+  ]);
+  assert.deepEqual(snapshot.history.at(-1)?.links, [
+    {
+      kind: "agent",
+      agentId: "agent-change-review",
+      label: "Review change selected-change",
     },
   ]);
   await engine.dispose();
@@ -285,7 +322,7 @@ test("незавершённый change создаёт по одному арт�
 
   const snapshot = ledger.get("workspace-artifact-loop");
   assert.equal(snapshot.lifecycle.status, "completed");
-  assert.equal(profileReads, 5);
+  assert.equal(profileReads, 6);
   assert.equal(inspectCalls, 4);
   assert.equal(prepareCalls, 2);
   assert.equal(createCalls, 2);
@@ -304,26 +341,37 @@ test("незавершённый change создаёт по одному арт�
     ["Создан OpenSpec-артефакт: artifact-1", "succeeded"],
     ["OpenSpec change готов к apply: selected-change", "succeeded"],
     ["Pull request #42 опубликован: https://github.com/example/project/pull/42", "succeeded"],
+    [
+      "Review OpenSpec change опубликован: openspec/changes/selected-change/review.md",
+      "succeeded",
+    ],
   ]);
-  assert.deepEqual(snapshot.history.at(-3)?.links, [
+  assert.deepEqual(snapshot.history.at(-4)?.links, [
     {
       kind: "agent",
       agentId: "agent-artifact-1",
       label: "Артефакт artifact-1",
     },
   ]);
-  assert.deepEqual(snapshot.history.at(-2)?.links, [
+  assert.deepEqual(snapshot.history.at(-3)?.links, [
     {
       kind: "agent",
       agentId: "agent-artifact-2",
       label: "Артефакт artifact-2",
     },
   ]);
-  assert.deepEqual(snapshot.history.at(-1)?.links, [
+  assert.deepEqual(snapshot.history.at(-2)?.links, [
     {
       kind: "agent",
       agentId: "agent-change-publication",
       label: "Публикация change selected-change",
+    },
+  ]);
+  assert.deepEqual(snapshot.history.at(-1)?.links, [
+    {
+      kind: "agent",
+      agentId: "agent-change-review",
+      label: "Review change selected-change",
     },
   ]);
   await engine.dispose();
@@ -368,6 +416,10 @@ test("изменения рабочего дерева блокируют workfl
     ["Mise toolchain доступен", "succeeded"],
     ["OpenSpec change готов к apply: selected-change", "succeeded"],
     ["Pull request #42 опубликован: https://github.com/example/project/pull/42", "succeeded"],
+    [
+      "Review OpenSpec change опубликован: openspec/changes/selected-change/review.md",
+      "succeeded",
+    ],
   ]);
   await engine.dispose();
   await ledger.close();
@@ -548,7 +600,7 @@ test("отсутствующие профили блокируют Git-пров�
   await settleWorkflow();
   snapshot = ledger.get("workspace-profiles");
   assert.equal(snapshot.lifecycle.status, "completed");
-  assert.equal(profileReads, 4);
+  assert.equal(profileReads, 5);
   assert.equal(branchReads, 2);
   assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
     ["Отсутствуют профили агентов: Orchestrator", "failed"],
@@ -558,6 +610,10 @@ test("отсутствующие профили блокируют Git-пров�
     ["Mise toolchain доступен", "succeeded"],
     ["OpenSpec change готов к apply: selected-change", "succeeded"],
     ["Pull request #42 опубликован: https://github.com/example/project/pull/42", "succeeded"],
+    [
+      "Review OpenSpec change опубликован: openspec/changes/selected-change/review.md",
+      "succeeded",
+    ],
   ]);
   await engine.dispose();
   await ledger.close();
@@ -748,7 +804,12 @@ test("workflow выполняет отдельные шаги и передаё�
   const snapshot = ledger.get("workspace-steps");
   assert.equal(snapshot.lifecycle.status, "completed");
   assert.deepEqual(seenStates, [
-    { branch: "feature/from-step", change: null, pendingArtifactSession: null },
+    {
+      branch: "feature/from-step",
+      change: null,
+      pendingArtifactSession: null,
+      pendingReviewSession: null,
+    },
   ]);
   assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
     ["Первый шаг завершён", "succeeded"],
@@ -855,7 +916,12 @@ test("после перезапуска workflow продолжает работ
   assert.deepEqual(ledger.getWorkflowCheckpoint("workspace-resume"), {
     version: 1,
     nextStepId: "second",
-    state: { branch: "feature/resume", change: null, pendingArtifactSession: null },
+    state: {
+      branch: "feature/resume",
+      change: null,
+      pendingArtifactSession: null,
+      pendingReviewSession: null,
+    },
   });
 
   await engine.dispose();
@@ -1083,8 +1149,142 @@ test("после reload шаг публикации повторно согла�
   assert.equal(snapshot.lifecycle.status, "completed");
   assert.equal(selectCalls, 0);
   assert.equal(publishCalls, 1);
-  assert.equal(snapshot.history.at(-1)?.text, "Pull request #77 опубликован: https://github.com/example/project/pull/77");
+  assert.equal(
+    snapshot.history.at(-2)?.text,
+    "Pull request #77 опубликован: https://github.com/example/project/pull/77",
+  );
+  assert.equal(
+    snapshot.history.at(-1)?.text,
+    "Review OpenSpec change опубликован: openspec/changes/selected-change/review.md",
+  );
   assert.equal(ledger.getWorkflowCheckpoint("workspace-publication-resume"), null);
+  await engine.dispose();
+  await ledger.close();
+});
+
+test("существующий опубликованный review пропускает создание агента", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-existing-review");
+  let reviewRuns = 0;
+  const changeReview = {
+    async plan(_workspaceDirectory, selectedChangeId, selectedBranch) {
+      assert.equal(selectedChangeId, "selected-change");
+      assert.equal(selectedBranch, "feature/existing-review");
+      return {
+        kind: "already-reviewed",
+        reviewPath: "openspec/changes/selected-change/review.md",
+      };
+    },
+    async run() {
+      reviewRuns += 1;
+      throw new Error("Агент review не должен запускаться повторно");
+    },
+  };
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    branchProbe: async () => ({ kind: "non-main", name: "feature/existing-review" }),
+    worktreeProbe: async () => ({ kind: "clean" }),
+  });
+  engine.initialize(
+    "workspace-existing-review",
+    engineContext(
+      "/workspace/project",
+      async () => requiredAgentProfiles(),
+      immediateChangeSelection(),
+      async () => ({ kind: "available" }),
+      completedChangeArtifacts(),
+      completedChangePublication(),
+      changeReview,
+    ),
+  );
+
+  engine.command("workspace-existing-review", "start");
+  await settleWorkflow();
+
+  const snapshot = ledger.get("workspace-existing-review");
+  assert.equal(snapshot.lifecycle.status, "completed");
+  assert.equal(reviewRuns, 0);
+  assert.equal(
+    snapshot.history.at(-1)?.text,
+    "Review OpenSpec change уже опубликован: openspec/changes/selected-change/review.md",
+  );
+  assert.deepEqual(snapshot.history.at(-1)?.links, []);
+  await engine.dispose();
+  await ledger.close();
+});
+
+test("после reload review продолжает сохранённую baseline-сессию", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-review-resume");
+  createOrchestratorReporter(ledger, "workspace-review-resume").setChange({
+    id: "selected-change",
+  });
+  const pendingReviewSession = {
+    changeId: "selected-change",
+    branch: "feature/review-resume",
+    baselineCommit: "d".repeat(40),
+  };
+  await ledger.saveWorkflowCheckpoint("workspace-review-resume", {
+    version: 1,
+    nextStepId: "review-change",
+    state: {
+      branch: "feature/review-resume",
+      change: { id: "selected-change" },
+      pendingArtifactSession: null,
+      pendingReviewSession,
+    },
+  });
+  let planCalls = 0;
+  const resumedSessions = [];
+  const changeReview = {
+    async plan() {
+      planCalls += 1;
+      throw new Error("Baseline не должен вычисляться повторно");
+    },
+    async run(request) {
+      resumedSessions.push(request.session);
+      request.onAgentCreated("agent-review-resume");
+      const review = {
+        changeId: request.changeId,
+        reviewPath: "openspec/changes/selected-change/review.md",
+      };
+      await request.onReviewCompleted(review);
+      return review;
+    },
+  };
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    branchProbe: async () => ({ kind: "non-main", name: "feature/review-resume" }),
+    worktreeProbe: async () => ({ kind: "clean" }),
+  });
+  engine.initialize(
+    "workspace-review-resume",
+    engineContext(
+      "/workspace/project",
+      async () => requiredAgentProfiles(),
+      immediateChangeSelection(),
+      async () => ({ kind: "available" }),
+      completedChangeArtifacts(),
+      completedChangePublication(),
+      changeReview,
+    ),
+  );
+
+  engine.command("workspace-review-resume", "start");
+  await settleWorkflow();
+
+  const snapshot = ledger.get("workspace-review-resume");
+  assert.equal(snapshot.lifecycle.status, "completed");
+  assert.equal(planCalls, 0);
+  assert.deepEqual(resumedSessions, [pendingReviewSession]);
+  assert.deepEqual(snapshot.history.at(-1)?.links, [
+    {
+      kind: "agent",
+      agentId: "agent-review-resume",
+      label: "Review change selected-change",
+    },
+  ]);
+  assert.equal(ledger.getWorkflowCheckpoint("workspace-review-resume"), null);
   await engine.dispose();
   await ledger.close();
 });
@@ -1311,6 +1511,10 @@ test("на main ветке workflow останавливается, а retry п�
     ["Mise toolchain доступен", "succeeded"],
     ["OpenSpec change готов к apply: selected-change", "succeeded"],
     ["Pull request #42 опубликован: https://github.com/example/project/pull/42", "succeeded"],
+    [
+      "Review OpenSpec change опубликован: openspec/changes/selected-change/review.md",
+      "succeeded",
+    ],
   ]);
   await engine.dispose();
   await ledger.close();

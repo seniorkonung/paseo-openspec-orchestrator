@@ -30,6 +30,9 @@ The plugin is responsible for:
   is complete;
 - publishing the completed planning branch to `origin` and creating or
   reconciling one change-owned integration pull request into `main`;
+- reviewing all artifacts of the published change, recording the findings in a
+  committed and pushed `review.md`, and preserving an interactive agent session
+  when the review needs user input;
 - delivering optional workflow notifications through ntfy;
 - delegating interactive workflow steps to Paseo agents through scoped MCP
   tools.
@@ -93,15 +96,19 @@ The main boundaries are:
 - `server/orchestrator-mcp-tool-host.ts` provides the scoped local MCP server
   used to attach orchestrator-owned tools to Paseo agents. The default workflow
   exposes only `set_change` to a change-selection agent and only
-  `complete_artifact` to each artifact-creation agent, then only
-  `complete_change_publication` to the publication agent. A tool from one
-  session is not shared with another session.
+  `complete_artifact` to each artifact-creation agent, only
+  `complete_change_publication` to the publication agent, and only
+  `complete_change_review` to the review agent. A tool from one session is not
+  shared with another session.
 - `server/change-artifact-creation.ts` is the boundary around OpenSpec planning
   status, repository path validation, per-artifact Git verification, agent
   sessions, and the `complete_artifact` MCP contract.
 - `server/change-publication.ts` owns the GitHub publication seam: it validates
   `origin`, GitHub CLI access, the remote commit and pull-request metadata while
   a workspace-local agent performs the push and PR create/edit operations.
+- `server/change-review.ts` owns review recovery, safe `review.md` detection,
+  the review agent session, and independent verification of the resulting Git
+  commit and remote branch.
 
 The shared Zod schemas are runtime boundaries as well as TypeScript contracts.
 Persisted data, RPC payloads, workflow state, and tool results must be validated
@@ -175,11 +182,34 @@ change artifacts. An existing open PR is retargeted to `main` and keeps its
 Draft/Ready state; otherwise the agent creates a new Draft PR, ignoring closed
 or merged history. The scoped `complete_change_publication` tool independently
 checks the clean worktree, local and remote HEADs, repository, base/head refs,
-Draft policy, title, and body before the workflow completes. A restart safely
-reconciles the already pushed branch or PR instead of creating a duplicate.
+Draft policy, title, and body before advancing to `review-change`. A restart
+safely reconciles the already pushed branch or PR instead of creating a
+duplicate.
+
+The terminal `review-change` step resolves `review.md` against the actual
+`changeRoot` reported by OpenSpec. A non-empty ordinary file can skip the agent
+only when it is tracked by the current `HEAD`, the worktree is clean, the saved
+branch is active, and `origin` contains that exact `HEAD`. Otherwise the step
+saves the branch and baseline commit, rereads the `Ultra Sandbox` profile, and
+immediately creates a workspace-local agent with `ntfy=true` and a prompt to
+invoke `openspec-review-change` for the complete change ID. The orchestrator
+does not inspect the agent's skill catalog; skill discovery belongs to the
+agent environment.
+
+The review session may span any number of agent turns and user replies. Ending
+one turn is not a workflow failure: the step waits for the scoped
+`complete_change_review` tool while `ntfy=true` keeps user intervention visible.
+Findings do not block completion and are not fixed in this step. The agent adds
+only new review files under the change root, creates exactly one review commit,
+and pushes the branch without force. The completion tool independently checks
+the file, worktree, saved branch and baseline, commit count and subject, changed
+paths, and remote `HEAD`. It then disables `ntfy` and atomically clears the
+pending review session. A restart reuses the saved baseline; if the review
+commit already exists, the recovery agent only finishes publication and the
+completion handshake instead of reviewing or committing again.
 
 Implementation of the selected change remains outside the current workflow
-endpoint.
+endpoint, as does correction of review findings.
 
 ## Extending the workflow
 

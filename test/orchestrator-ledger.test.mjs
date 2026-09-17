@@ -12,7 +12,10 @@ import {
   createOrchestratorReporter,
   runAction,
 } from "../server/orchestrator-reporter.ts";
-import { workflowCheckpointSchema } from "../server/workflow/types.ts";
+import {
+  workflowCheckpointSchema,
+  workflowStateSchema,
+} from "../server/workflow/types.ts";
 
 async function temporaryHome(context) {
   const directory = await mkdtemp(join(tmpdir(), "openspec-ledger-"));
@@ -34,8 +37,30 @@ test("checkpoint версии 1 без pending-сессии получает с�
         branch: "feature/legacy",
         change: { id: "legacy-change" },
         pendingArtifactSession: null,
+        pendingReviewSession: null,
       },
     },
+  );
+});
+
+test("workflow не принимает одновременно artifact- и review-сессии", () => {
+  assert.throws(
+    () =>
+      workflowStateSchema.parse({
+        branch: "feature/conflicting-sessions",
+        change: { id: "conflicting-sessions" },
+        pendingArtifactSession: {
+          artifactId: "proposal",
+          schemaName: "spec-driven",
+          baselineCommit: "a".repeat(40),
+        },
+        pendingReviewSession: {
+          changeId: "conflicting-sessions",
+          branch: "feature/conflicting-sessions",
+          baselineCommit: "b".repeat(40),
+        },
+      }),
+    /одновременно восстанавливать artifact и review/,
   );
 });
 
@@ -152,6 +177,7 @@ test("ledger сохраняет checkpoint workflow и полностью очи
       branch: "feature/checkpoint",
       change: null,
       pendingArtifactSession: null,
+      pendingReviewSession: null,
     },
   });
 

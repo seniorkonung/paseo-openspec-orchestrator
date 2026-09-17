@@ -82,6 +82,7 @@ export async function selectChangeStep(
             ...context.state,
             change: selectedChange,
             pendingArtifactSession: null,
+            pendingReviewSession: null,
           }),
       });
     } catch (error) {
@@ -128,7 +129,11 @@ export async function selectChangeStep(
     return {
       kind: "continue",
       next: "publish-change",
-      state: { change, pendingArtifactSession: null },
+      state: {
+        change,
+        pendingArtifactSession: null,
+        pendingReviewSession: null,
+      },
       summary: `OpenSpec change готов к apply: ${change.id}`,
     };
   } catch (error) {

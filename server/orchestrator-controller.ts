@@ -4,6 +4,7 @@ import type { ControlCommand, OrchestratorSnapshot } from "../shared/orchestrato
 import { createChangeArtifactCreationService } from "./change-artifact-creation.ts";
 import { createChangeSelectionService } from "./change-selection.ts";
 import { createChangePublicationService } from "./change-publication.ts";
+import { createChangeReviewService } from "./change-review.ts";
 import { OpenSpecOrchestratorEngine } from "./openspec-orchestrator-engine.ts";
 import { inspectMiseToolchain } from "./mise-toolchain.ts";
 import type { OrchestratorEngine } from "./orchestrator-engine.ts";
@@ -152,6 +153,9 @@ export class OrchestratorController {
         createAgent: (options) => workspace.agents.create(options),
       }),
       changePublication: createChangePublicationService({
+        createAgent: (options) => workspace.agents.create(options),
+      }),
+      changeReview: createChangeReviewService({
         createAgent: (options) => workspace.agents.create(options),
       }),
     });
