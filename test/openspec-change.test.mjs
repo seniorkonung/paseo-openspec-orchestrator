@@ -30,8 +30,8 @@ test("проверяет repo-local change, чистоту Git и присутс
   const calls = [];
   const verifier = createOpenSpecChangeVerifier({
     async command(executable, arguments_, options) {
-      calls.push({ executable, arguments_, cwd: options?.cwd });
-      if (executable === "openspec") return { stdout: status(changeRoot), stderr: "" };
+      calls.push({ executable, arguments_, options });
+      if (executable === "mise") return { stdout: status(changeRoot), stderr: "" };
       if (arguments_[0] === "rev-parse") return { stdout: `${root}\n`, stderr: "" };
       return { stdout: "", stderr: "" };
     },
@@ -41,12 +41,24 @@ test("проверяет repo-local change, чистоту Git и присутс
   assert.deepEqual(
     calls.map(({ executable, arguments_ }) => [executable, ...arguments_]),
     [
-      ["openspec", "status", "--change", "selected-change", "--json"],
+      [
+        "mise",
+        "exec",
+        "--no-deps",
+        "--",
+        "openspec",
+        "status",
+        "--change",
+        "selected-change",
+        "--json",
+      ],
       ["git", "rev-parse", "--show-toplevel"],
       ["git", "cat-file", "-e", "HEAD:openspec/changes/selected-change"],
       ["git", "status", "--porcelain=v1", "--untracked-files=all"],
     ],
   );
+  assert.equal(calls[0].options.cwd, root);
+  assert.equal(calls[0].options.env.MISE_EXEC_AUTO_INSTALL, "0");
 });
 
 test("отклоняет change вне workspace, грязное дерево и отсутствие в HEAD", async (context) => {
@@ -56,7 +68,7 @@ test("отклоняет change вне workspace, грязное дерево и
 
   const outsideVerifier = createOpenSpecChangeVerifier({
     command: async (executable) =>
-      executable === "openspec"
+      executable === "mise"
         ? { stdout: status(outside), stderr: "" }
         : { stdout: `${root}\n`, stderr: "" },
   });
@@ -67,7 +79,7 @@ test("отклоняет change вне workspace, грязное дерево и
 
   const dirtyVerifier = createOpenSpecChangeVerifier({
     async command(executable, arguments_) {
-      if (executable === "openspec") return { stdout: status(changeRoot), stderr: "" };
+      if (executable === "mise") return { stdout: status(changeRoot), stderr: "" };
       if (arguments_[0] === "rev-parse") return { stdout: `${root}\n`, stderr: "" };
       if (arguments_[0] === "cat-file") return { stdout: "", stderr: "" };
       if (arguments_[0] === "status") return { stdout: "?? new-file\n", stderr: "" };
@@ -78,7 +90,7 @@ test("отклоняет change вне workspace, грязное дерево и
 
   const uncommittedVerifier = createOpenSpecChangeVerifier({
     async command(executable, arguments_) {
-      if (executable === "openspec") return { stdout: status(changeRoot), stderr: "" };
+      if (executable === "mise") return { stdout: status(changeRoot), stderr: "" };
       if (arguments_[0] === "rev-parse") return { stdout: `${root}\n`, stderr: "" };
       if (arguments_[0] === "cat-file") throw new Error("missing from HEAD");
       return { stdout: "", stderr: "" };
@@ -87,21 +99,26 @@ test("отклоняет change вне workspace, грязное дерево и
   await assert.rejects(uncommittedVerifier(root, "selected-change"), /последний Git-коммит/);
 });
 
-test("возвращает безопасные ошибки для отсутствующего change и неверного ID", async () => {
+test("возвращает безопасные ошибки OpenSpec через mise и неверного ID", async (context) => {
+  const { root } = await workspaceFixture(context);
+  const calls = [];
   const verifier = createOpenSpecChangeVerifier({
-    command: async () => {
+    command: async (executable) => {
+      calls.push(executable);
       throw new Error("секретная внутренняя ошибка");
     },
   });
 
   await assert.rejects(
-    verifier("/workspace", "missing-change"),
+    verifier(root, "missing-change"),
     (error) =>
       error instanceof OpenSpecChangeError &&
-      /не подтвердил существование/.test(error.message) &&
+      /через mise не подтвердил существование/.test(error.message) &&
       !/секретная/.test(error.message),
   );
-  await assert.rejects(verifier("/workspace", "../escape"), /kebab-case/);
+  assert.deepEqual(calls, ["mise"]);
+  await assert.rejects(verifier(root, "../escape"), /kebab-case/);
+  assert.deepEqual(calls, ["mise"]);
 });
 
 test("обновляет ntfy через paseo CLI без shell-интерполяции", async () => {

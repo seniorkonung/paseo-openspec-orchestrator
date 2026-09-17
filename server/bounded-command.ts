@@ -8,6 +8,7 @@ export const DEFAULT_COMMAND_MAX_BUFFER = 1024 * 1024;
 
 export interface BoundedCommandOptions {
   readonly cwd?: string;
+  readonly env?: NodeJS.ProcessEnv;
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly maxBuffer?: number;
@@ -33,6 +34,7 @@ export const runBoundedCommand: BoundedCommandRunner = async (
   const result = await execFileAsync(executable, [...arguments_], {
     cwd: options.cwd,
     encoding: "utf8",
+    env: options.env,
     maxBuffer: options.maxBuffer ?? DEFAULT_COMMAND_MAX_BUFFER,
     signal: options.signal,
     shell: false,

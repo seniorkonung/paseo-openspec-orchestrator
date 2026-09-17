@@ -50,7 +50,7 @@ export async function checkGitWorktreeStep(
 
   return {
     kind: "continue",
-    next: "select-change",
+    next: "check-mise-toolchain",
     summary: worktreeSummary(decision),
   };
 }

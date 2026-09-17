@@ -2,6 +2,7 @@ import type { GitBranchDecision, GitBranchProbe } from "../git-branch.ts";
 import type { GitWorktreeProbe } from "../git-worktree.ts";
 import type { AgentProfileReader } from "../agent-profiles.ts";
 import type { ChangeSelectionService } from "../change-selection.ts";
+import type { MiseToolchainProbe } from "../mise-toolchain.ts";
 import type { OrchestratorNotificationRequest } from "../../shared/orchestrator-notifications.ts";
 import {
   orchestratorChangeSchema,
@@ -19,6 +20,7 @@ export interface WorkflowServices {
   readonly readAgentProfiles: AgentProfileReader;
   readonly gitBranch: GitBranchProbe;
   readonly gitWorktree: GitWorktreeProbe;
+  readonly miseToolchain: MiseToolchainProbe;
   readonly changeSelection: ChangeSelectionService;
   /** Не блокирует и не ломает шаг при ошибке доставки уведомления. */
   readonly notify: (notification: OrchestratorNotificationRequest) => Promise<boolean>;

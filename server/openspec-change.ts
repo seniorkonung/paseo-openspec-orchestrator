@@ -9,6 +9,7 @@ import {
   runBoundedCommand,
   type BoundedCommandRunner,
 } from "./bounded-command.ts";
+import { runWorkspaceMiseCommand } from "./mise-toolchain.ts";
 
 const MAX_PATH_LENGTH = 8_192;
 
@@ -64,15 +65,17 @@ export function createOpenSpecChangeVerifier(
     const normalizedChangeId = parsedChangeId.data;
     let statusOutput: string;
     try {
-      ({ stdout: statusOutput } = await command(
+      ({ stdout: statusOutput } = await runWorkspaceMiseCommand(
+        command,
+        workspaceDirectory,
         "openspec",
         ["status", "--change", normalizedChangeId, "--json"],
-        { cwd: workspaceDirectory, signal },
+        signal,
       ));
     } catch (error) {
       if (signal?.aborted) throw error;
       throw new OpenSpecChangeError(
-        `OpenSpec не подтвердил существование change «${normalizedChangeId}»`,
+        `OpenSpec через mise не подтвердил существование change «${normalizedChangeId}»`,
       );
     }
 

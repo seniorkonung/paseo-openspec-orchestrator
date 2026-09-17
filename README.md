@@ -96,17 +96,23 @@ before they enter trusted orchestration code.
 ## Default workflow
 
 The workflow first verifies all required Paseo agent profiles, the Git branch,
-and a clean worktree. Each required profile must explicitly define a provider,
-model, mode, and thinking option; the orchestrator does not discover or infer
-missing launch settings.
+a clean worktree, and the workspace mise toolchain. Each required profile
+must explicitly define a provider, model, mode, and thinking option; the
+orchestrator does not discover or infer missing launch settings. The toolchain
+check requires `mise` on the plugin process `PATH`; its current required-tool
+set contains an active, installed `npm:@fission-ai/openspec` entry declared by
+a mise configuration inside the workspace. It checks availability rather than
+a specific tool version and never installs a missing tool automatically.
 
 After the checks, a `Medium Sandbox` agent is added to the same Paseo workspace,
 where it lists the active repo-local OpenSpec changes and asks the user to select
-one or create a new scaffold. A newly created change must be committed before
-the agent can select it. The scoped `set_change` tool validates the OpenSpec
-location, repository cleanliness, and presence in `HEAD` before recording the
-choice. Creating planning artifacts or performing implementation work is
-outside this step.
+one or create a new scaffold. The agent and the scoped `set_change` tool run
+OpenSpec as `mise exec --no-deps -- openspec ...` from that workspace. A newly
+created change must be committed before the agent can select it. The tool reads
+the actual `changeRoot` from `openspec status --json`, validates its workspace
+and repository boundaries, repository cleanliness, and presence in `HEAD`
+before recording the choice. Creating planning artifacts or performing
+implementation work is outside this step.
 
 ## Extending the workflow
 

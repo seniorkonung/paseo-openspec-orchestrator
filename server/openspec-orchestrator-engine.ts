@@ -5,6 +5,7 @@ import {
 } from "../shared/orchestrator.ts";
 import type { AgentProfileReader } from "./agent-profiles.ts";
 import type { ChangeSelectionService } from "./change-selection.ts";
+import type { MiseToolchainProbe } from "./mise-toolchain.ts";
 import {
   normalizeOrchestratorWorkspaceDisplay,
   type OrchestratorNotificationRequest,
@@ -45,6 +46,7 @@ interface WorkspaceRuntime {
   workspaceDisplay: OrchestratorWorkspaceDisplay;
   refreshWorkspaceDisplay: () => Promise<OrchestratorWorkspaceDisplay>;
   readAgentProfiles: AgentProfileReader;
+  miseToolchain: MiseToolchainProbe;
   changeSelection: ChangeSelectionService;
   generation: number;
   pauseRequested: boolean;
@@ -119,6 +121,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       workspaceDisplay: normalizeOrchestratorWorkspaceDisplay(context.workspaceDisplay),
       refreshWorkspaceDisplay: context.refreshWorkspaceDisplay,
       readAgentProfiles: context.readAgentProfiles,
+      miseToolchain: context.miseToolchain,
       changeSelection: context.changeSelection,
       generation: 0,
       pauseRequested: false,
@@ -312,6 +315,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
             readAgentProfiles: runtime.readAgentProfiles,
             gitBranch: this.#branchProbe,
             gitWorktree: this.#worktreeProbe,
+            miseToolchain: runtime.miseToolchain,
             changeSelection: runtime.changeSelection,
             notify: (notification) => this.#notify(workspaceId, notification, runtime),
           },

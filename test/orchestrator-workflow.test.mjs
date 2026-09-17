@@ -9,6 +9,7 @@ import { REQUIRED_AGENT_PROFILE_NAMES } from "../server/agent-profiles.ts";
 import { OpenSpecOrchestratorEngine } from "../server/openspec-orchestrator-engine.ts";
 import { readGitBranch } from "../server/git-branch.ts";
 import { readGitWorktreeStatus } from "../server/git-worktree.ts";
+import { REQUIRED_MISE_TOOLS } from "../server/mise-toolchain.ts";
 import { OrchestratorController } from "../server/orchestrator-controller.ts";
 import { OrchestratorLedger } from "../server/orchestrator-ledger.ts";
 import { createOrchestratorReporter } from "../server/orchestrator-reporter.ts";
@@ -25,8 +26,9 @@ const nextEventLoop = () => new Promise((resolve) => setImmediate(resolve));
 
 async function settleWorkflow() {
   // Workflow теперь дожидается атомарной записи checkpoint после каждого шага.
-  // Небольшая пауза оставляет время завершить fsync без привязки к диску.
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // Пауза оставляет время завершить fsync без привязки к диску и не
+  // конкурирует с удалением временного каталога в context.after.
+  await new Promise((resolve) => setTimeout(resolve, 100));
 }
 
 function requiredAgentProfiles() {
@@ -58,6 +60,7 @@ function engineContext(
   workspaceDirectory = "/workspace/project",
   readAgentProfiles = async () => requiredAgentProfiles(),
   changeSelection = immediateChangeSelection(),
+  miseToolchain = async () => ({ kind: "available" }),
 ) {
   const workspaceDisplay = { projectName: null, workspaceName: null };
   return {
@@ -65,6 +68,7 @@ function engineContext(
     workspaceDisplay,
     refreshWorkspaceDisplay: async () => workspaceDisplay,
     readAgentProfiles,
+    miseToolchain,
     changeSelection,
   };
 }
@@ -154,6 +158,7 @@ test("на non-main ветке workflow завершает инициализа�
     ["Все обязательные профили агентов доступны", "succeeded"],
     ["Git-ветка: feature/orchestrator", "succeeded"],
     ["Рабочее дерево Git чистое", "succeeded"],
+    ["Mise toolchain доступен", "succeeded"],
     ["Выбран OpenSpec change: selected-change", "succeeded"],
   ]);
   assert.deepEqual(snapshot.history.at(-1)?.links, [
@@ -163,7 +168,7 @@ test("на non-main ветке workflow завершает инициализа�
       label: "Выбор OpenSpec change",
     },
   ]);
-  engine.dispose();
+  await engine.dispose();
   await ledger.close();
 });
 
@@ -202,9 +207,62 @@ test("изменения рабочего дерева блокируют workfl
     ["Все обязательные профили агентов доступны", "succeeded"],
     ["Git-ветка: feature/clean-check", "succeeded"],
     ["Рабочее дерево Git чистое", "succeeded"],
+    ["Mise toolchain доступен", "succeeded"],
     ["Выбран OpenSpec change: selected-change", "succeeded"],
   ]);
-  engine.dispose();
+  await engine.dispose();
+  await ledger.close();
+});
+
+test("preflight mise toolchain блокирует выбор change и повторяется после исправления", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-toolchain");
+  let decision = {
+    kind: "tool-unavailable",
+    reason: "not-configured",
+    tool: REQUIRED_MISE_TOOLS[0],
+  };
+  let selectCalls = 0;
+  const changeSelection = {
+    verify: async (_workspace, changeId) => ({ id: changeId }),
+    async select({ onAgentCreated, onChangeSelected }) {
+      selectCalls += 1;
+      onAgentCreated("agent-toolchain-selection");
+      const change = { id: "selected-change" };
+      await onChangeSelected(change);
+      return change;
+    },
+  };
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    branchProbe: async () => ({ kind: "non-main", name: "feature/toolchain" }),
+    worktreeProbe: async () => ({ kind: "clean" }),
+  });
+  engine.initialize(
+    "workspace-toolchain",
+    engineContext(
+      "/workspace/project",
+      async () => requiredAgentProfiles(),
+      changeSelection,
+      async () => decision,
+    ),
+  );
+
+  engine.command("workspace-toolchain", "start");
+  await settleWorkflow();
+  let snapshot = ledger.get("workspace-toolchain");
+  assert.equal(snapshot.lifecycle.status, "failed");
+  assert.match(snapshot.lifecycle.message, /npm:@fission-ai\/openspec/);
+  assert.equal(selectCalls, 0);
+
+  decision = { kind: "available" };
+  engine.command("workspace-toolchain", "retry");
+  await settleWorkflow();
+  snapshot = ledger.get("workspace-toolchain");
+  assert.equal(snapshot.lifecycle.status, "completed");
+  assert.equal(selectCalls, 1);
+  assert.equal(snapshot.change?.id, "selected-change");
+  await engine.dispose();
   await ledger.close();
 });
 
@@ -250,9 +308,10 @@ test("отсутствующие профили блокируют Git-пров�
     ["Все обязательные профили агентов доступны", "succeeded"],
     ["Git-ветка: feature/profile-check", "succeeded"],
     ["Рабочее дерево Git чистое", "succeeded"],
+    ["Mise toolchain доступен", "succeeded"],
     ["Выбран OpenSpec change: selected-change", "succeeded"],
   ]);
-  engine.dispose();
+  await engine.dispose();
   await ledger.close();
 });
 
@@ -283,7 +342,7 @@ test("ошибка чтения профилей останавливает work
   assert.match(snapshot.lifecycle.message, /Не удалось получить профили агентов из Paseo/);
   assert.doesNotMatch(snapshot.lifecycle.message, /секретная/);
   assert.equal(branchReads, 0);
-  engine.dispose();
+  await engine.dispose();
   await ledger.close();
 });
 
@@ -399,7 +458,7 @@ test("workflow выполняет отдельные шаги и передаё�
     ["Первый шаг завершён", "succeeded"],
     ["Второй шаг завершён", "succeeded"],
   ]);
-  engine.dispose();
+  await engine.dispose();
   await ledger.close();
 });
 
@@ -451,7 +510,7 @@ test("workflow следует явным переходам и может воз
     ["Задача выполнена", "succeeded"],
     ["Review завершён", "succeeded"],
   ]);
-  engine.dispose();
+  await engine.dispose();
   await ledger.close();
 });
 
@@ -503,7 +562,7 @@ test("после перезапуска workflow продолжает работ
     state: { branch: "feature/resume", change: null },
   });
 
-  engine.dispose();
+  await engine.dispose();
   await ledger.close();
 
   const restoredLedger = new OrchestratorLedger({ paseoHome });
@@ -539,7 +598,7 @@ test("после перезапуска workflow продолжает работ
   assert.equal(resumedContexts[0].state.change, null);
   assert.equal(restoredLedger.get("workspace-resume").lifecycle.status, "completed");
   assert.equal(restoredLedger.getWorkflowCheckpoint("workspace-resume"), null);
-  resumedEngine.dispose();
+  await resumedEngine.dispose();
   await restoredLedger.close();
 });
 
@@ -665,7 +724,7 @@ test("clear отменяет активный шаг и удаляет исто�
   assert.deepEqual(cleared.history, []);
   assert.equal(ledger.getWorkflowCheckpoint("workspace-clear"), null);
   await ledger.flush();
-  engine.dispose();
+  await engine.dispose();
   await ledger.close();
 });
 
@@ -696,7 +755,7 @@ test("неизвестный переход останавливает workflow 
   assert.equal(snapshot.lifecycle.availableCommand, "retry");
   assert.match(snapshot.lifecycle.message, /Следующий шаг «missing-step» не найден/);
   assert.equal(snapshot.history.at(-1)?.outcome, "failed");
-  engine.dispose();
+  await engine.dispose();
   await ledger.close();
 });
 
@@ -724,7 +783,7 @@ test("engine отменяет активный шаг через AbortSignal п�
   await nextEventLoop();
   assert.equal(stepSignal.aborted, false);
 
-  engine.dispose();
+  await engine.dispose();
   assert.equal(stepSignal.aborted, true);
   await settleWorkflow();
   assert.equal(ledger.get("workspace-cancellation").lifecycle.status, "idle");
@@ -759,7 +818,7 @@ test("неожиданная ошибка шага переводит workflow �
   assert.match(snapshot.lifecycle.message, /Нестабильный шаг/);
   assert.doesNotMatch(snapshot.lifecycle.message, /внутренние детали/);
   assert.equal(snapshot.history.at(-1)?.outcome, "failed");
-  engine.dispose();
+  await engine.dispose();
   await ledger.close();
 });
 
@@ -795,9 +854,10 @@ test("на main ветке workflow останавливается, а retry п�
     ["Все обязательные профили агентов доступны", "succeeded"],
     ["Git-ветка: feature/after-switch", "succeeded"],
     ["Рабочее дерево Git чистое", "succeeded"],
+    ["Mise toolchain доступен", "succeeded"],
     ["Выбран OpenSpec change: selected-change", "succeeded"],
   ]);
-  engine.dispose();
+  await engine.dispose();
   await ledger.close();
 });
 
@@ -830,8 +890,8 @@ test("detached HEAD и ошибка Git требуют retry", async (context) =
   assert.equal(snapshot.lifecycle.status, "failed");
   assert.match(snapshot.lifecycle.message, /Не удалось определить Git-ветку/);
 
-  engine.dispose();
-  failingEngine.dispose();
+  await engine.dispose();
+  await failingEngine.dispose();
   await ledger.close();
 });
 
@@ -868,7 +928,7 @@ test("пауза во время проверки ветки применяет�
   await settleWorkflow();
   assert.equal(ledger.get("workspace-1").lifecycle.status, "completed");
   assert.equal(calls, 1);
-  engine.dispose();
+  await engine.dispose();
   await ledger.close();
 });
 
@@ -935,7 +995,7 @@ test("после reload незавершённая проверка ветки �
   assert.equal(snapshot.lifecycle.status, "idle");
   assert.equal(snapshot.currentAction, null);
   assert.equal(snapshot.history.at(-1)?.outcome, "cancelled");
-  engine.dispose();
+  await engine.dispose();
   await restoredLedger.close();
 });
 
@@ -1008,6 +1068,7 @@ test("контроллер передаёт контекст и создаёт �
     workspaceName: "Проверка авторизации",
   });
   assert.equal(typeof initializedContext.refreshWorkspaceDisplay, "function");
+  assert.equal(typeof initializedContext.miseToolchain, "function");
   assert.deepEqual(await initializedContext.readAgentProfiles(), configuredProfiles);
   configuredProfiles = undefined;
   assert.deepEqual(await initializedContext.readAgentProfiles(), []);
