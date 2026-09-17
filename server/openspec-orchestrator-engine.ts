@@ -1,4 +1,5 @@
 import { ORCHESTRATOR_LIMITS, type ControlCommand } from "../shared/orchestrator.ts";
+import type { AgentProfileReader } from "./agent-profiles.ts";
 import {
   normalizeOrchestratorWorkspaceDisplay,
   type OrchestratorNotificationRequest,
@@ -38,6 +39,7 @@ interface WorkspaceRuntime {
   workspaceDirectory: string;
   workspaceDisplay: OrchestratorWorkspaceDisplay;
   refreshWorkspaceDisplay: () => Promise<OrchestratorWorkspaceDisplay>;
+  readAgentProfiles: AgentProfileReader;
   generation: number;
   pauseRequested: boolean;
   active: boolean;
@@ -108,6 +110,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       workspaceDirectory: context.workspaceDirectory,
       workspaceDisplay: normalizeOrchestratorWorkspaceDisplay(context.workspaceDisplay),
       refreshWorkspaceDisplay: context.refreshWorkspaceDisplay,
+      readAgentProfiles: context.readAgentProfiles,
       generation: 0,
       pauseRequested: false,
       active: false,
@@ -284,6 +287,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
           signal: abortController.signal,
           state: runtime.state,
           services: {
+            readAgentProfiles: runtime.readAgentProfiles,
             gitBranch: this.#branchProbe,
             gitWorktree: this.#worktreeProbe,
             notify: (notification) => this.#notify(workspaceId, notification, runtime),

@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { REQUIRED_AGENT_PROFILE_NAMES } from "../server/agent-profiles.ts";
 import { OpenSpecOrchestratorEngine } from "../server/openspec-orchestrator-engine.ts";
 import { readGitBranch } from "../server/git-branch.ts";
 import { readGitWorktreeStatus } from "../server/git-worktree.ts";
@@ -28,12 +29,25 @@ async function settleWorkflow() {
   await new Promise((resolve) => setTimeout(resolve, 50));
 }
 
-function engineContext(workspaceDirectory = "/workspace/project") {
+function requiredAgentProfiles() {
+  return REQUIRED_AGENT_PROFILE_NAMES.map((name) => ({
+    id: `profile-${name.toLowerCase().replaceAll(" ", "-")}`,
+    name,
+    provider: "codex",
+    model: "gpt-5.5",
+  }));
+}
+
+function engineContext(
+  workspaceDirectory = "/workspace/project",
+  readAgentProfiles = async () => requiredAgentProfiles(),
+) {
   const workspaceDisplay = { projectName: null, workspaceName: null };
   return {
     workspaceDirectory,
     workspaceDisplay,
     refreshWorkspaceDisplay: async () => workspaceDisplay,
+    readAgentProfiles,
   };
 }
 
@@ -118,6 +132,7 @@ test("на non-main ветке workflow завершает инициализа�
   assert.deepEqual(directories, ["/workspace/project"]);
   assert.equal(snapshot.lifecycle.status, "completed");
   assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
+    ["Все обязательные профили агентов доступны", "succeeded"],
     ["Git-ветка: feature/orchestrator", "succeeded"],
     ["Рабочее дерево Git чистое", "succeeded"],
   ]);
@@ -143,6 +158,7 @@ test("изменения рабочего дерева блокируют workfl
   assert.equal(snapshot.lifecycle.availableCommand, "retry");
   assert.match(snapshot.lifecycle.message, /незакоммиченные или неотслеживаемые/);
   assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
+    ["Все обязательные профили агентов доступны", "succeeded"],
     ["Git-ветка: feature/clean-check", "succeeded"],
     ["Рабочее дерево Git содержит изменения", "failed"],
   ]);
@@ -153,11 +169,91 @@ test("изменения рабочего дерева блокируют workfl
   snapshot = ledger.get("workspace-dirty");
   assert.equal(snapshot.lifecycle.status, "completed");
   assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
+    ["Все обязательные профили агентов доступны", "succeeded"],
     ["Git-ветка: feature/clean-check", "succeeded"],
     ["Рабочее дерево Git содержит изменения", "failed"],
+    ["Все обязательные профили агентов доступны", "succeeded"],
     ["Git-ветка: feature/clean-check", "succeeded"],
     ["Рабочее дерево Git чистое", "succeeded"],
   ]);
+  engine.dispose();
+  await ledger.close();
+});
+
+test("отсутствующие профили блокируют Git-проверки, а retry читает их заново", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-profiles");
+  let profiles = requiredAgentProfiles().filter(({ name }) => name !== "Orchestrator");
+  let profileReads = 0;
+  let branchReads = 0;
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    branchProbe: async () => {
+      branchReads += 1;
+      return { kind: "non-main", name: "feature/profile-check" };
+    },
+    worktreeProbe: async () => ({ kind: "clean" }),
+  });
+  engine.initialize(
+    "workspace-profiles",
+    engineContext("/workspace/project", async () => {
+      profileReads += 1;
+      return profiles;
+    }),
+  );
+
+  engine.command("workspace-profiles", "start");
+  await settleWorkflow();
+  let snapshot = ledger.get("workspace-profiles");
+  assert.equal(snapshot.lifecycle.status, "failed");
+  assert.match(snapshot.lifecycle.message, /Orchestrator/);
+  assert.equal(branchReads, 0);
+  assert.equal(profileReads, 1);
+
+  profiles = requiredAgentProfiles();
+  engine.command("workspace-profiles", "retry");
+  await settleWorkflow();
+  snapshot = ledger.get("workspace-profiles");
+  assert.equal(snapshot.lifecycle.status, "completed");
+  assert.equal(profileReads, 2);
+  assert.equal(branchReads, 1);
+  assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
+    ["Отсутствуют профили агентов: Orchestrator", "failed"],
+    ["Все обязательные профили агентов доступны", "succeeded"],
+    ["Git-ветка: feature/profile-check", "succeeded"],
+    ["Рабочее дерево Git чистое", "succeeded"],
+  ]);
+  engine.dispose();
+  await ledger.close();
+});
+
+test("ошибка чтения профилей останавливает workflow с безопасным сообщением", async (context) => {
+  context.mock.method(console, "error", () => undefined);
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-profile-error");
+  let branchReads = 0;
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    branchProbe: async () => {
+      branchReads += 1;
+      return { kind: "non-main", name: "feature/profile-error" };
+    },
+  });
+  engine.initialize(
+    "workspace-profile-error",
+    engineContext("/workspace/project", async () => {
+      throw new Error("секретная диагностическая информация");
+    }),
+  );
+
+  engine.command("workspace-profile-error", "start");
+  await settleWorkflow();
+
+  const snapshot = ledger.get("workspace-profile-error");
+  assert.equal(snapshot.lifecycle.status, "failed");
+  assert.match(snapshot.lifecycle.message, /Не удалось получить профили агентов из Paseo/);
+  assert.doesNotMatch(snapshot.lifecycle.message, /секретная/);
+  assert.equal(branchReads, 0);
   engine.dispose();
   await ledger.close();
 });
@@ -495,6 +591,7 @@ test("на main ветке workflow останавливается, а retry п�
   assert.equal(snapshot.lifecycle.status, "failed");
   assert.equal(snapshot.lifecycle.availableCommand, "retry");
   assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
+    ["Все обязательные профили агентов доступны", "succeeded"],
     ["Git-ветка main — запуск запрещён", "failed"],
   ]);
 
@@ -504,7 +601,9 @@ test("на main ветке workflow останавливается, а retry п�
   snapshot = ledger.get("workspace-1");
   assert.equal(snapshot.lifecycle.status, "completed");
   assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
+    ["Все обязательные профили агентов доступны", "succeeded"],
     ["Git-ветка main — запуск запрещён", "failed"],
+    ["Все обязательные профили агентов доступны", "succeeded"],
     ["Git-ветка: feature/after-switch", "succeeded"],
     ["Рабочее дерево Git чистое", "succeeded"],
   ]);
@@ -551,12 +650,17 @@ test("пауза во время проверки ветки применяет�
   const ledger = new OrchestratorLedger({ paseoHome });
   await ledger.open("workspace-1");
   let resolveBranch;
+  let markBranchStarted;
+  const branchStarted = new Promise((resolve) => {
+    markBranchStarted = resolve;
+  });
   let calls = 0;
   const engine = new OpenSpecOrchestratorEngine(ledger, {
     branchProbe: async () => {
       calls += 1;
       return new Promise((resolve) => {
         resolveBranch = resolve;
+        markBranchStarted();
       });
     },
     worktreeProbe: async () => ({ kind: "clean" }),
@@ -564,7 +668,7 @@ test("пауза во время проверки ветки применяет�
   engine.initialize("workspace-1", engineContext());
 
   engine.command("workspace-1", "start");
-  await nextEventLoop();
+  await branchStarted;
   engine.command("workspace-1", "pause");
   resolveBranch({ kind: "non-main", name: "feature/paused" });
   await settleWorkflow();
@@ -625,7 +729,15 @@ test("контроллер передаёт engine директорию и на�
     title: "Проверка авторизации",
     name: "feature/auth",
   };
+  let configuredProfiles = requiredAgentProfiles();
+  let configReads = 0;
   const paseo = {
+    config: {
+      get: async () => {
+        configReads += 1;
+        return { config: { agentProfiles: configuredProfiles } };
+      },
+    },
     workspaces: {
       ref: () => ({
         directory: "/tmp/workspace-1",
@@ -646,6 +758,12 @@ test("контроллер передаёт engine директорию и на�
     workspaceName: "Проверка авторизации",
   });
   assert.equal(typeof initializedContext.refreshWorkspaceDisplay, "function");
+  assert.deepEqual(await initializedContext.readAgentProfiles(), configuredProfiles);
+  configuredProfiles = undefined;
+  assert.deepEqual(await initializedContext.readAgentProfiles(), []);
+  configuredProfiles = requiredAgentProfiles().slice(0, 1);
+  assert.deepEqual(await initializedContext.readAgentProfiles(), configuredProfiles);
+  assert.equal(configReads, 3);
   assert.deepEqual(calls[1], ["command", "workspace-1", "start"]);
 
   workspaceSnapshot = {

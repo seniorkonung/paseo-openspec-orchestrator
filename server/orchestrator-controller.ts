@@ -134,6 +134,9 @@ export class OrchestratorController {
         }
         return workspaceDisplayFromSnapshot(refreshed);
       },
+      // Публичный SDK возвращает сохранённые профили через config.get().
+      // Источник: https://paseo.sh/docs/sdk/reference#clientconfig
+      readAgentProfiles: async () => (await paseo.config.get()).config.agentProfiles ?? [],
     });
   }
 }
