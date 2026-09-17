@@ -58,6 +58,24 @@ export type RequiredAgentProfilesResolution =
       readonly incomplete: readonly IncompleteRequiredAgentProfile[];
     };
 
+export type RequiredAgentProfileResolution =
+  | {
+      readonly kind: "available";
+      readonly profile: CompleteRequiredAgentProfile;
+    }
+  | {
+      readonly kind: "invalid";
+      readonly reason: "missing" | "ambiguous";
+    }
+  | {
+      readonly kind: "invalid";
+      readonly reason: "incomplete";
+      readonly missingFields: readonly [
+        RequiredAgentProfileField,
+        ...RequiredAgentProfileField[],
+      ];
+    };
+
 export type InvalidRequiredAgentProfilesResolution = Extract<
   RequiredAgentProfilesResolution,
   { kind: "invalid" }
@@ -83,31 +101,26 @@ const REQUIRED_NAME_BY_NORMALIZED = new Map<string, RequiredAgentProfileName>(
 export function resolveRequiredAgentProfiles(
   profiles: readonly AgentProfile[],
 ): RequiredAgentProfilesResolution {
-  const matches = new Map<RequiredAgentProfileName, AgentProfile[]>();
-  for (const name of REQUIRED_AGENT_PROFILE_NAMES) matches.set(name, []);
-
-  for (const profile of profiles) {
-    const requiredName = REQUIRED_NAME_BY_NORMALIZED.get(normalizeProfileName(profile.name));
-    if (requiredName !== undefined) matches.get(requiredName)?.push(profile);
-  }
-
-  const missing = REQUIRED_AGENT_PROFILE_NAMES.filter(
-    (name) => matches.get(name)?.length === 0,
+  const resolutions = new Map(
+    REQUIRED_AGENT_PROFILE_NAMES.map((name) => [
+      name,
+      resolveRequiredAgentProfile(profiles, name),
+    ]),
   );
-  const ambiguous = REQUIRED_AGENT_PROFILE_NAMES.filter(
-    (name) => (matches.get(name)?.length ?? 0) > 1,
-  );
+  const missing = REQUIRED_AGENT_PROFILE_NAMES.filter((name) => {
+    const resolution = resolutions.get(name);
+    return resolution?.kind === "invalid" && resolution.reason === "missing";
+  });
+  const ambiguous = REQUIRED_AGENT_PROFILE_NAMES.filter((name) => {
+    const resolution = resolutions.get(name);
+    return resolution?.kind === "invalid" && resolution.reason === "ambiguous";
+  });
   const incomplete = REQUIRED_AGENT_PROFILE_NAMES.flatMap(
     (name): IncompleteRequiredAgentProfile[] => {
-      const matchesForName = matches.get(name) ?? [];
-      if (matchesForName.length !== 1) return [];
-      const profile = matchesForName[0];
-      const missingFields = REQUIRED_AGENT_PROFILE_FIELDS.filter(
-        (field) => normalizeRequiredField(profile[field]) === null,
-      );
-      return missingFields.length === 0
-        ? []
-        : [{ name, missingFields: Object.freeze(missingFields) }];
+      const resolution = resolutions.get(name);
+      return resolution?.kind === "invalid" && resolution.reason === "incomplete"
+        ? [{ name, missingFields: resolution.missingFields }]
+        : [];
     },
   );
   if (missing.length > 0 || ambiguous.length > 0 || incomplete.length > 0) {
@@ -120,19 +133,56 @@ export function resolveRequiredAgentProfiles(
   }
 
   const entries = REQUIRED_AGENT_PROFILE_NAMES.map((name) => {
-    const profile = matches.get(name)?.[0];
-    if (!profile) {
+    const resolution = resolutions.get(name);
+    if (resolution?.kind !== "available") {
       throw new Error(`Профиль ${name} исчез после проверки полноты`);
     }
-    const provider = normalizeRequiredField(profile.provider);
-    const model = normalizeRequiredField(profile.model);
-    const modeId = normalizeRequiredField(profile.modeId);
-    const thinkingOptionId = normalizeRequiredField(profile.thinkingOptionId);
-    if (!provider || !model || !modeId || !thinkingOptionId) {
-      throw new Error(`Профиль ${name} стал неполным после проверки`);
-    }
-    const { featureValues, ...profileWithoutFeatures } = profile;
-    const complete: CompleteRequiredAgentProfile = Object.freeze({
+    return [name, resolution.profile] as const;
+  });
+  // Полнота record доказана проверками missing/ambiguous/incomplete выше.
+  const resolved = Object.fromEntries(entries) as RequiredAgentProfiles;
+  return { kind: "available", profiles: Object.freeze(resolved) };
+}
+
+export function resolveRequiredAgentProfile(
+  profiles: readonly AgentProfile[],
+  name: RequiredAgentProfileName,
+): RequiredAgentProfileResolution {
+  const matches = profiles.filter(
+    (profile) => REQUIRED_NAME_BY_NORMALIZED.get(normalizeProfileName(profile.name)) === name,
+  );
+  if (matches.length === 0) {
+    return { kind: "invalid", reason: "missing" };
+  }
+  if (matches.length > 1) {
+    return { kind: "invalid", reason: "ambiguous" };
+  }
+  const profile = matches[0];
+  const missingFields = REQUIRED_AGENT_PROFILE_FIELDS.filter(
+    (field) => normalizeRequiredField(profile[field]) === null,
+  );
+  if (missingFields.length > 0) {
+    return {
+      kind: "invalid",
+      reason: "incomplete",
+      missingFields: Object.freeze(missingFields) as readonly [
+        RequiredAgentProfileField,
+        ...RequiredAgentProfileField[],
+      ],
+    };
+  }
+
+  const provider = normalizeRequiredField(profile.provider);
+  const model = normalizeRequiredField(profile.model);
+  const modeId = normalizeRequiredField(profile.modeId);
+  const thinkingOptionId = normalizeRequiredField(profile.thinkingOptionId);
+  if (!provider || !model || !modeId || !thinkingOptionId) {
+    throw new Error(`Профиль ${name} стал неполным после проверки`);
+  }
+  const { featureValues, ...profileWithoutFeatures } = profile;
+  return {
+    kind: "available",
+    profile: Object.freeze({
       ...profileWithoutFeatures,
       provider,
       model,
@@ -141,12 +191,22 @@ export function resolveRequiredAgentProfiles(
       ...(featureValues == null
         ? {}
         : { featureValues: Object.freeze(Object.fromEntries(Object.entries(featureValues))) }),
-    });
-    return [name, complete] as const;
-  });
-  // Полнота record доказана проверками missing/ambiguous/incomplete выше.
-  const resolved = Object.fromEntries(entries) as RequiredAgentProfiles;
-  return { kind: "available", profiles: Object.freeze(resolved) };
+    }),
+  };
+}
+
+export function describeRequiredAgentProfileProblem(
+  name: RequiredAgentProfileName,
+  resolution: Extract<RequiredAgentProfileResolution, { kind: "invalid" }>,
+): string {
+  switch (resolution.reason) {
+    case "missing":
+      return `Отсутствует профиль агента: ${name}`;
+    case "ambiguous":
+      return `Неоднозначный профиль агента: ${name}`;
+    case "incomplete":
+      return `Неполный профиль агента: ${name} (${resolution.missingFields.join(", ")})`;
+  }
 }
 
 export function describeRequiredAgentProfileProblems(

@@ -12,12 +12,32 @@ import {
   createOrchestratorReporter,
   runAction,
 } from "../server/orchestrator-reporter.ts";
+import { workflowCheckpointSchema } from "../server/workflow/types.ts";
 
 async function temporaryHome(context) {
   const directory = await mkdtemp(join(tmpdir(), "openspec-ledger-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
   return directory;
 }
+
+test("checkpoint версии 1 без pending-сессии получает совместимый default", () => {
+  assert.deepEqual(
+    workflowCheckpointSchema.parse({
+      version: 1,
+      nextStepId: "select-change",
+      state: { branch: "feature/legacy", change: { id: "legacy-change" } },
+    }),
+    {
+      version: 1,
+      nextStepId: "select-change",
+      state: {
+        branch: "feature/legacy",
+        change: { id: "legacy-change" },
+        pendingArtifactSession: null,
+      },
+    },
+  );
+});
 
 test("reporter хранит ровно одно действие и завершает handle один раз", async (context) => {
   const paseoHome = await temporaryHome(context);
@@ -128,7 +148,11 @@ test("ledger сохраняет checkpoint workflow и полностью очи
   assert.deepEqual(ledger.getWorkflowCheckpoint("workspace-checkpoint"), {
     version: 1,
     nextStepId: "review-change",
-    state: { branch: "feature/checkpoint", change: null },
+    state: {
+      branch: "feature/checkpoint",
+      change: null,
+      pendingArtifactSession: null,
+    },
   });
 
   const cleared = ledger.clear("workspace-checkpoint");

@@ -56,11 +56,27 @@ function immediateChangeSelection(changeId = "selected-change") {
   };
 }
 
+function completedChangeArtifacts() {
+  return {
+    async inspect() {
+      return { kind: "complete", schemaName: "spec-driven" };
+    },
+    async prepare() {
+      throw new Error("Для завершённого change нельзя готовить артефакт");
+    },
+    async create() {
+      throw new Error("Для завершённого change нельзя создавать артефакт");
+    },
+    async verifyApply() {},
+  };
+}
+
 function engineContext(
   workspaceDirectory = "/workspace/project",
   readAgentProfiles = async () => requiredAgentProfiles(),
   changeSelection = immediateChangeSelection(),
   miseToolchain = async () => ({ kind: "available" }),
+  changeArtifacts = completedChangeArtifacts(),
 ) {
   const workspaceDisplay = { projectName: null, workspaceName: null };
   return {
@@ -70,6 +86,7 @@ function engineContext(
     readAgentProfiles,
     miseToolchain,
     changeSelection,
+    changeArtifacts,
   };
 }
 
@@ -159,13 +176,123 @@ test("на non-main ветке workflow завершает инициализа�
     ["Git-ветка: feature/orchestrator", "succeeded"],
     ["Рабочее дерево Git чистое", "succeeded"],
     ["Mise toolchain доступен", "succeeded"],
-    ["Выбран OpenSpec change: selected-change", "succeeded"],
+    ["OpenSpec change готов к apply: selected-change", "succeeded"],
   ]);
   assert.deepEqual(snapshot.history.at(-1)?.links, [
     {
       kind: "agent",
       agentId: "agent-change-selection",
       label: "Выбор OpenSpec change",
+    },
+  ]);
+  await engine.dispose();
+  await ledger.close();
+});
+
+test("незавершённый change создаёт по одному артефакту и повторяет шаг", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-artifact-loop");
+  let profileReads = 0;
+  let inspectCalls = 0;
+  let prepareCalls = 0;
+  let createCalls = 0;
+  let verifyApplyCalls = 0;
+  const sessions = [];
+  const profiles = [];
+  const changeArtifacts = {
+    async inspect() {
+      inspectCalls += 1;
+      return createCalls >= 2
+        ? { kind: "complete", schemaName: "custom-flow" }
+        : {
+            kind: "next-artifact",
+            schemaName: "custom-flow",
+            artifactId: `artifact-${createCalls + 1}`,
+          };
+    },
+    async prepare() {
+      prepareCalls += 1;
+      return {
+        artifactId: `artifact-${createCalls + 1}`,
+        schemaName: "custom-flow",
+        baselineCommit: String(createCalls + 1).repeat(40),
+      };
+    },
+    async create(request) {
+      sessions.push(request.session);
+      profiles.push(request.profile.name);
+      request.onAgentCreated(`agent-artifact-${createCalls + 1}`);
+      createCalls += 1;
+      const plan =
+        createCalls === 2
+          ? { kind: "complete", schemaName: "custom-flow" }
+          : {
+              kind: "next-artifact",
+              schemaName: "custom-flow",
+              artifactId: "artifact-2",
+            };
+      await request.onArtifactCompleted(plan);
+      return plan;
+    },
+    async verifyApply() {
+      verifyApplyCalls += 1;
+    },
+  };
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    branchProbe: async () => ({ kind: "non-main", name: "feature/artifact-loop" }),
+    worktreeProbe: async () => ({ kind: "clean" }),
+  });
+  engine.initialize(
+    "workspace-artifact-loop",
+    engineContext(
+      "/workspace/project",
+      async () => {
+        profileReads += 1;
+        return requiredAgentProfiles();
+      },
+      immediateChangeSelection(),
+      async () => ({ kind: "available" }),
+      changeArtifacts,
+    ),
+  );
+
+  engine.command("workspace-artifact-loop", "start");
+  await settleWorkflow();
+
+  const snapshot = ledger.get("workspace-artifact-loop");
+  assert.equal(snapshot.lifecycle.status, "completed");
+  assert.equal(profileReads, 4);
+  assert.equal(inspectCalls, 3);
+  assert.equal(prepareCalls, 2);
+  assert.equal(createCalls, 2);
+  assert.equal(verifyApplyCalls, 1);
+  assert.deepEqual(profiles, ["Ultra Sandbox", "Ultra Sandbox"]);
+  assert.deepEqual(
+    sessions.map(({ artifactId }) => artifactId),
+    ["artifact-1", "artifact-2"],
+  );
+  assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
+    ["Все обязательные профили агентов доступны", "succeeded"],
+    ["Git-ветка: feature/artifact-loop", "succeeded"],
+    ["Рабочее дерево Git чистое", "succeeded"],
+    ["Mise toolchain доступен", "succeeded"],
+    ["Выбран OpenSpec change: selected-change", "succeeded"],
+    ["Создан OpenSpec-артефакт: artifact-1", "succeeded"],
+    ["OpenSpec change готов к apply: selected-change", "succeeded"],
+  ]);
+  assert.deepEqual(snapshot.history.at(-2)?.links, [
+    {
+      kind: "agent",
+      agentId: "agent-artifact-1",
+      label: "Артефакт artifact-1",
+    },
+  ]);
+  assert.deepEqual(snapshot.history.at(-1)?.links, [
+    {
+      kind: "agent",
+      agentId: "agent-artifact-2",
+      label: "Артефакт artifact-2",
     },
   ]);
   await engine.dispose();
@@ -208,7 +335,7 @@ test("изменения рабочего дерева блокируют workfl
     ["Git-ветка: feature/clean-check", "succeeded"],
     ["Рабочее дерево Git чистое", "succeeded"],
     ["Mise toolchain доступен", "succeeded"],
-    ["Выбран OpenSpec change: selected-change", "succeeded"],
+    ["OpenSpec change готов к apply: selected-change", "succeeded"],
   ]);
   await engine.dispose();
   await ledger.close();
@@ -309,7 +436,7 @@ test("отсутствующие профили блокируют Git-пров�
     ["Git-ветка: feature/profile-check", "succeeded"],
     ["Рабочее дерево Git чистое", "succeeded"],
     ["Mise toolchain доступен", "succeeded"],
-    ["Выбран OpenSpec change: selected-change", "succeeded"],
+    ["OpenSpec change готов к apply: selected-change", "succeeded"],
   ]);
   await engine.dispose();
   await ledger.close();
@@ -453,7 +580,9 @@ test("workflow выполняет отдельные шаги и передаё�
 
   const snapshot = ledger.get("workspace-steps");
   assert.equal(snapshot.lifecycle.status, "completed");
-  assert.deepEqual(seenStates, [{ branch: "feature/from-step", change: null }]);
+  assert.deepEqual(seenStates, [
+    { branch: "feature/from-step", change: null, pendingArtifactSession: null },
+  ]);
   assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
     ["Первый шаг завершён", "succeeded"],
     ["Второй шаг завершён", "succeeded"],
@@ -559,7 +688,7 @@ test("после перезапуска workflow продолжает работ
   assert.deepEqual(ledger.getWorkflowCheckpoint("workspace-resume"), {
     version: 1,
     nextStepId: "second",
-    state: { branch: "feature/resume", change: null },
+    state: { branch: "feature/resume", change: null, pendingArtifactSession: null },
   });
 
   await engine.dispose();
@@ -643,7 +772,83 @@ test("сохранённый change после reload проверяется б�
   await ledger.close();
 });
 
-test("ошибка записи выбранного change откатывает проекцию и checkpoint", async (context) => {
+test("после reload pending-сессия продолжает тот же артефакт", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-pending-artifact");
+  createOrchestratorReporter(ledger, "workspace-pending-artifact").setChange({
+    id: "selected-change",
+  });
+  const pendingArtifactSession = {
+    artifactId: "risk-map",
+    schemaName: "custom-flow",
+    baselineCommit: "a".repeat(40),
+  };
+  await ledger.saveWorkflowCheckpoint("workspace-pending-artifact", {
+    version: 1,
+    nextStepId: "create-change-artifacts",
+    state: {
+      branch: "feature/recover-artifact",
+      change: { id: "selected-change" },
+      pendingArtifactSession,
+    },
+  });
+  let inspectCalls = 0;
+  let prepareCalls = 0;
+  let selectCalls = 0;
+  const resumedSessions = [];
+  const changeArtifacts = {
+    async inspect() {
+      inspectCalls += 1;
+      return { kind: "complete", schemaName: "custom-flow" };
+    },
+    async prepare() {
+      prepareCalls += 1;
+      throw new Error("Нельзя заменять pending-сессию новой");
+    },
+    async create(request) {
+      resumedSessions.push(request.session);
+      request.onAgentCreated("agent-recovered-artifact");
+      const plan = { kind: "complete", schemaName: "custom-flow" };
+      await request.onArtifactCompleted(plan);
+      return plan;
+    },
+    async verifyApply() {},
+  };
+  const engine = new OpenSpecOrchestratorEngine(ledger);
+  engine.initialize(
+    "workspace-pending-artifact",
+    engineContext(
+      "/workspace/project",
+      async () => requiredAgentProfiles(),
+      {
+        async verify(_workspace, changeId) {
+          return { id: changeId };
+        },
+        async select() {
+          selectCalls += 1;
+          throw new Error("Выбор change не должен повторяться");
+        },
+      },
+      async () => ({ kind: "available" }),
+      changeArtifacts,
+    ),
+  );
+
+  engine.command("workspace-pending-artifact", "start");
+  await settleWorkflow();
+
+  assert.equal(ledger.get("workspace-pending-artifact").lifecycle.status, "completed");
+  assert.equal(inspectCalls, 0);
+  assert.equal(prepareCalls, 0);
+  assert.equal(selectCalls, 0);
+  assert.deepEqual(resumedSessions, [pendingArtifactSession]);
+  assert.equal(ledger.getWorkflowCheckpoint("workspace-pending-artifact"), null);
+  await engine.dispose();
+  await ledger.close();
+});
+
+test("ошибка checkpointState откатывает публичный change и внутреннее состояние", async (context) => {
   context.mock.method(console, "error", () => undefined);
   const paseoHome = await temporaryHome(context);
   const ledger = new OrchestratorLedger({
@@ -661,9 +866,17 @@ test("ошибка записи выбранного change откатывает
       {
         id: "persist-change",
         label: "Сохраняю change",
-        async run({ persistChange }) {
+        async run({ checkpointState, state }) {
           try {
-            await persistChange({ id: "selected-change" });
+            await checkpointState({
+              ...state,
+              change: { id: "selected-change" },
+              pendingArtifactSession: {
+                artifactId: "risk-map",
+                schemaName: "custom-flow",
+                baselineCommit: "b".repeat(40),
+              },
+            });
           } catch {
             persistenceRejected = true;
           }
@@ -855,7 +1068,7 @@ test("на main ветке workflow останавливается, а retry п�
     ["Git-ветка: feature/after-switch", "succeeded"],
     ["Рабочее дерево Git чистое", "succeeded"],
     ["Mise toolchain доступен", "succeeded"],
-    ["Выбран OpenSpec change: selected-change", "succeeded"],
+    ["OpenSpec change готов к apply: selected-change", "succeeded"],
   ]);
   await engine.dispose();
   await ledger.close();
@@ -1069,6 +1282,8 @@ test("контроллер передаёт контекст и создаёт �
   });
   assert.equal(typeof initializedContext.refreshWorkspaceDisplay, "function");
   assert.equal(typeof initializedContext.miseToolchain, "function");
+  assert.equal(typeof initializedContext.changeArtifacts.inspect, "function");
+  assert.equal(typeof initializedContext.changeArtifacts.create, "function");
   assert.deepEqual(await initializedContext.readAgentProfiles(), configuredProfiles);
   configuredProfiles = undefined;
   assert.deepEqual(await initializedContext.readAgentProfiles(), []);

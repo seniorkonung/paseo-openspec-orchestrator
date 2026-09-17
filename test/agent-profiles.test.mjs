@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   REQUIRED_AGENT_PROFILE_NAMES,
+  resolveRequiredAgentProfile,
   resolveRequiredAgentProfiles,
 } from "../server/agent-profiles.ts";
 
@@ -115,4 +116,18 @@ test("нормализует обязательные настройки и не
       featureValues: undefined,
     },
   );
+});
+
+test("разрешает только запрошенный профиль и игнорирует проблемы остальных", () => {
+  const profiles = [
+    profile("Ultra Sandbox"),
+    { ...profile("Medium Sandbox"), model: " " },
+    profile("Medium Sandbox", "duplicate-medium"),
+  ];
+
+  const result = resolveRequiredAgentProfile(profiles, "Ultra Sandbox");
+
+  assert.equal(result.kind, "available");
+  assert.equal(result.profile.name, "Ultra Sandbox");
+  assert.equal(result.profile.provider, "codex");
 });

@@ -1,9 +1,9 @@
 import {
   ORCHESTRATOR_LIMITS,
   type ControlCommand,
-  type OrchestratorChange,
 } from "../shared/orchestrator.ts";
 import type { AgentProfileReader } from "./agent-profiles.ts";
+import type { ChangeArtifactCreationService } from "./change-artifact-creation.ts";
 import type { ChangeSelectionService } from "./change-selection.ts";
 import type { MiseToolchainProbe } from "./mise-toolchain.ts";
 import {
@@ -26,6 +26,7 @@ import {
 } from "./orchestrator-reporter.ts";
 import {
   createInitialWorkflowState,
+  workflowStateSchema,
   type WorkflowState,
   type WorkflowStepDefinition,
   type WorkflowStepId,
@@ -48,6 +49,7 @@ interface WorkspaceRuntime {
   readAgentProfiles: AgentProfileReader;
   miseToolchain: MiseToolchainProbe;
   changeSelection: ChangeSelectionService;
+  changeArtifacts: ChangeArtifactCreationService;
   generation: number;
   pauseRequested: boolean;
   active: boolean;
@@ -123,6 +125,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       readAgentProfiles: context.readAgentProfiles,
       miseToolchain: context.miseToolchain,
       changeSelection: context.changeSelection,
+      changeArtifacts: context.changeArtifacts,
       generation: 0,
       pauseRequested: false,
       active: false,
@@ -317,6 +320,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
             gitWorktree: this.#worktreeProbe,
             miseToolchain: runtime.miseToolchain,
             changeSelection: runtime.changeSelection,
+            changeArtifacts: runtime.changeArtifacts,
             notify: (notification) => this.#notify(workspaceId, notification, runtime),
           },
           updateActionLinks: (links) => {
@@ -325,14 +329,14 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
             }
             handle.update({ links: [...links] });
           },
-          persistChange: (change) =>
-            this.#persistChange(
+          checkpointState: (nextState) =>
+            this.#checkpointState(
               workspaceId,
               runtime,
               reporter,
               generation,
               currentStepId,
-              change,
+              nextState,
             ),
         });
         if (this.#disposed || runtime.generation !== generation) return;
@@ -497,13 +501,13 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
     }
   }
 
-  async #persistChange(
+  async #checkpointState(
     workspaceId: string,
     runtime: WorkspaceRuntime,
     reporter: OrchestratorReporter,
     generation: number,
     stepId: WorkflowStepId,
-    change: OrchestratorChange,
+    requestedState: WorkflowState,
   ): Promise<void> {
     if (
       this.#disposed ||
@@ -511,15 +515,16 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       runtime.currentStepId !== stepId ||
       runtime.abortController?.signal.aborted
     ) {
-      throw new Error("Workflow больше не принимает выбранный change");
+      throw new Error("Workflow больше не принимает обновление состояния");
     }
 
     const previousState = runtime.state;
     const previousChange = this.#ledger.get(workspaceId).change;
     const previousCheckpoint = this.#ledger.getWorkflowCheckpoint(workspaceId);
-    const nextState: WorkflowState = { ...runtime.state, change };
+    const nextState = workflowStateSchema.parse(requestedState);
+    const publicChangeChanged = previousChange?.id !== nextState.change?.id;
     runtime.state = nextState;
-    reporter.setChange(change);
+    if (publicChangeChanged) reporter.setChange(nextState.change);
     try {
       await this.#ledger.saveWorkflowCheckpoint(workspaceId, {
         version: 1,
@@ -528,7 +533,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       });
     } catch (error) {
       runtime.state = previousState;
-      reporter.setChange(previousChange);
+      if (publicChangeChanged) reporter.setChange(previousChange);
       this.#ledger.setWorkflowCheckpoint(workspaceId, previousCheckpoint);
       throw error;
     }

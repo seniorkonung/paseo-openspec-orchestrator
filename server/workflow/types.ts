@@ -2,6 +2,11 @@ import type { GitBranchDecision, GitBranchProbe } from "../git-branch.ts";
 import type { GitWorktreeProbe } from "../git-worktree.ts";
 import type { AgentProfileReader } from "../agent-profiles.ts";
 import type { ChangeSelectionService } from "../change-selection.ts";
+import {
+  pendingArtifactSessionSchema,
+  type ChangeArtifactCreationService,
+  type PendingArtifactSession,
+} from "../change-artifact-creation.ts";
 import type { MiseToolchainProbe } from "../mise-toolchain.ts";
 import type { OrchestratorNotificationRequest } from "../../shared/orchestrator-notifications.ts";
 import {
@@ -14,6 +19,7 @@ import { z } from "zod";
 export interface WorkflowState {
   readonly branch: Extract<GitBranchDecision, { kind: "non-main" }>["name"] | null;
   readonly change: OrchestratorChange | null;
+  readonly pendingArtifactSession: PendingArtifactSession | null;
 }
 
 export interface WorkflowServices {
@@ -22,6 +28,7 @@ export interface WorkflowServices {
   readonly gitWorktree: GitWorktreeProbe;
   readonly miseToolchain: MiseToolchainProbe;
   readonly changeSelection: ChangeSelectionService;
+  readonly changeArtifacts: ChangeArtifactCreationService;
   /** Не блокирует и не ломает шаг при ошибке доставки уведомления. */
   readonly notify: (notification: OrchestratorNotificationRequest) => Promise<boolean>;
 }
@@ -37,6 +44,7 @@ export const workflowStateSchema = z
   .object({
     branch: z.string().trim().max(512).nullable(),
     change: orchestratorChangeSchema.nullable().default(null),
+    pendingArtifactSession: pendingArtifactSessionSchema.nullable().default(null),
   })
   .strict();
 
@@ -56,7 +64,7 @@ export interface WorkflowStepContext {
   readonly state: Readonly<WorkflowState>;
   readonly services: WorkflowServices;
   readonly updateActionLinks: (links: readonly AgentLink[]) => void;
-  readonly persistChange: (change: OrchestratorChange) => Promise<void>;
+  readonly checkpointState: (nextState: WorkflowState) => Promise<void>;
 }
 
 export type WorkflowStepResult =
@@ -89,5 +97,5 @@ export interface WorkflowStepDefinition {
 }
 
 export function createInitialWorkflowState(): WorkflowState {
-  return { branch: null, change: null };
+  return { branch: null, change: null, pendingArtifactSession: null };
 }

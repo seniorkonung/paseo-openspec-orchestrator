@@ -1,6 +1,7 @@
 import type { ControlCommand } from "../shared/orchestrator.ts";
 import type { OrchestratorWorkspaceDisplay } from "../shared/orchestrator-notifications.ts";
 import type { AgentProfileReader } from "./agent-profiles.ts";
+import type { ChangeArtifactCreationService } from "./change-artifact-creation.ts";
 import type { ChangeSelectionService } from "./change-selection.ts";
 import type { MiseToolchainProbe } from "./mise-toolchain.ts";
 
@@ -11,6 +12,7 @@ export interface OrchestratorEngineContext {
   readonly readAgentProfiles: AgentProfileReader;
   readonly miseToolchain: MiseToolchainProbe;
   readonly changeSelection: ChangeSelectionService;
+  readonly changeArtifacts: ChangeArtifactCreationService;
 }
 
 export interface OrchestratorEngine {

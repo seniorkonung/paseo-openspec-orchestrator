@@ -1,6 +1,7 @@
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { OrchestratorWorkspaceDisplay } from "../shared/orchestrator-notifications.ts";
 import type { ControlCommand, OrchestratorSnapshot } from "../shared/orchestrator.ts";
+import { createChangeArtifactCreationService } from "./change-artifact-creation.ts";
 import { createChangeSelectionService } from "./change-selection.ts";
 import { OpenSpecOrchestratorEngine } from "./openspec-orchestrator-engine.ts";
 import { inspectMiseToolchain } from "./mise-toolchain.ts";
@@ -144,6 +145,9 @@ export class OrchestratorController {
         // Глобальный paseo.agents.create создаёт новый workspace для cwd.
         // Workspace-handle сохраняет размещение агента в текущем окружении.
         // Источник: https://paseo.sh/docs/sdk/workspaces#start-an-agent-in-a-workspace
+        createAgent: (options) => workspace.agents.create(options),
+      }),
+      changeArtifacts: createChangeArtifactCreationService({
         createAgent: (options) => workspace.agents.create(options),
       }),
     });

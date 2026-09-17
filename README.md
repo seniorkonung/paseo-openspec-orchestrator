@@ -25,6 +25,9 @@ The plugin is responsible for:
   restart;
 - guiding the user through an explicit choice of the active OpenSpec change and
   persisting that choice only after the change exists in Git history;
+- inspecting the selected change's schema-defined planning graph and creating
+  one approved, separately committed artifact per agent session until planning
+  is complete;
 - delivering optional workflow notifications through ntfy;
 - delegating interactive workflow steps to Paseo agents through scoped MCP
   tools.
@@ -87,7 +90,12 @@ The main boundaries are:
   not fail the workflow itself.
 - `server/orchestrator-mcp-tool-host.ts` provides the scoped local MCP server
   used to attach orchestrator-owned tools to Paseo agents. The default workflow
-  uses it to expose only `set_change` to its change-selection agent.
+  exposes only `set_change` to a change-selection agent and only
+  `complete_artifact` to each artifact-creation agent. A tool from one session
+  is not shared with another session.
+- `server/change-artifact-creation.ts` is the boundary around OpenSpec planning
+  status, repository path validation, per-artifact Git verification, agent
+  sessions, and the `complete_artifact` MCP contract.
 
 The shared Zod schemas are runtime boundaries as well as TypeScript contracts.
 Persisted data, RPC payloads, workflow state, and tool results must be validated
@@ -111,8 +119,35 @@ OpenSpec as `mise exec --no-deps -- openspec ...` from that workspace. A newly
 created change must be committed before the agent can select it. The tool reads
 the actual `changeRoot` from `openspec status --json`, validates its workspace
 and repository boundaries, repository cleanliness, and presence in `HEAD`
-before recording the choice. Creating planning artifacts or performing
-implementation work is outside this step.
+before recording the choice.
+
+The selection step then reads the schema-defined artifact graph from
+`openspec status --json`. If planning is already complete, the workflow checks
+`openspec instructions apply --json` and finishes. Otherwise it enters the
+`create-change-artifacts` step. That step loops back to itself, always choosing
+the first `ready` artifact in OpenSpec's dependency order; it does not assume
+that an artifact is named `tasks` or that the repository uses the default
+schema. The OpenSpec JSON contracts and ordering rules come from the
+[OpenSpec agent contract](https://github.com/Fission-AI/OpenSpec/blob/main/docs/agent-contract.md).
+
+Each loop iteration rereads Paseo profiles and starts one idle `Ultra Sandbox`
+agent in the current workspace. The orchestrator checks the live command catalog
+before sending work, so a missing `openspec-continue-change` skill fails closed.
+The agent invokes that skill once, creates only the expected artifact, shows it
+to the user, and waits for explicit approval. This follows the skill's
+[one-artifact contract](https://github.com/Fission-AI/OpenSpec/blob/main/skills/openspec-continue-change/SKILL.md).
+After approval, the agent commits only the concrete paths reported by OpenSpec
+and calls `complete_artifact`.
+
+The completion tool independently requires a clean worktree, exactly one commit
+after the saved baseline, and no changed paths outside the expected artifact.
+It disables the agent's final ntfy notification and clears the pending session
+checkpoint before acknowledging success. A restart before that acknowledgement
+resumes the same artifact; a restart after it advances from the durable cleared
+checkpoint. Agent placement and live command discovery use the documented
+[Paseo workspace agent](https://paseo.sh/docs/sdk/workspaces#start-an-agent-in-a-workspace)
+and [agent command catalog](https://paseo.sh/docs/sdk/agents#list-the-commands-a-session-loaded)
+APIs. Implementation work remains outside the current workflow endpoint.
 
 ## Extending the workflow
 
