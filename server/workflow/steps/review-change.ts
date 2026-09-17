@@ -39,7 +39,8 @@ export async function reviewChangeStep(
       );
       if (plan.kind === "already-reviewed") {
         return {
-          kind: "complete",
+          kind: "continue",
+          next: "resolve-review-findings",
           state: { pendingReviewSession: null },
           summary: `Review OpenSpec change уже опубликован: ${plan.reviewPath}`,
         };
@@ -105,7 +106,8 @@ export async function reviewChangeStep(
       },
     });
     return {
-      kind: "complete",
+      kind: "continue",
+      next: "resolve-review-findings",
       state: { pendingReviewSession: null },
       summary: `Review OpenSpec change опубликован: ${review.reviewPath}`,
     };

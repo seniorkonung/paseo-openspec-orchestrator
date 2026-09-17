@@ -4,6 +4,11 @@ import type { AgentProfileReader } from "../agent-profiles.ts";
 import type { ChangeSelectionService } from "../change-selection.ts";
 import type { ChangePublicationService } from "../change-publication.ts";
 import {
+  pendingFindingResolutionSessionSchema,
+  type ChangeFindingResolutionService,
+  type PendingFindingResolutionSession,
+} from "../change-finding-resolution.ts";
+import {
   pendingReviewSessionSchema,
   type ChangeReviewService,
   type PendingReviewSession,
@@ -27,6 +32,7 @@ export interface WorkflowState {
   readonly change: OrchestratorChange | null;
   readonly pendingArtifactSession: PendingArtifactSession | null;
   readonly pendingReviewSession: PendingReviewSession | null;
+  readonly pendingFindingResolutionSession: PendingFindingResolutionSession | null;
 }
 
 export interface WorkflowServices {
@@ -38,6 +44,7 @@ export interface WorkflowServices {
   readonly changeArtifacts: ChangeArtifactCreationService;
   readonly changePublication: ChangePublicationService;
   readonly changeReview: ChangeReviewService;
+  readonly changeFindingResolution: ChangeFindingResolutionService;
   /** Не блокирует и не ломает шаг при ошибке доставки уведомления. */
   readonly notify: (notification: OrchestratorNotificationRequest) => Promise<boolean>;
 }
@@ -55,14 +62,22 @@ export const workflowStateSchema = z
     change: orchestratorChangeSchema.nullable().default(null),
     pendingArtifactSession: pendingArtifactSessionSchema.nullable().default(null),
     pendingReviewSession: pendingReviewSessionSchema.nullable().default(null),
+    pendingFindingResolutionSession: pendingFindingResolutionSessionSchema
+      .nullable()
+      .default(null),
   })
   .strict()
   .superRefine((state, context) => {
-    if (state.pendingArtifactSession && state.pendingReviewSession) {
+    const pendingSessions = [
+      state.pendingArtifactSession,
+      state.pendingReviewSession,
+      state.pendingFindingResolutionSession,
+    ].filter(Boolean).length;
+    if (pendingSessions > 1) {
       context.addIssue({
         code: "custom",
-        path: ["pendingReviewSession"],
-        message: "Workflow не может одновременно восстанавливать artifact и review",
+        path: ["pendingFindingResolutionSession"],
+        message: "Workflow не может одновременно восстанавливать несколько агентских сессий",
       });
     }
   });
@@ -120,5 +135,6 @@ export function createInitialWorkflowState(): WorkflowState {
     change: null,
     pendingArtifactSession: null,
     pendingReviewSession: null,
+    pendingFindingResolutionSession: null,
   };
 }

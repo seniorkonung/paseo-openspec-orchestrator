@@ -38,12 +38,13 @@ test("checkpoint версии 1 без pending-сессии получает с�
         change: { id: "legacy-change" },
         pendingArtifactSession: null,
         pendingReviewSession: null,
+        pendingFindingResolutionSession: null,
       },
     },
   );
 });
 
-test("workflow не принимает одновременно artifact- и review-сессии", () => {
+test("workflow не принимает несколько незавершённых агентских сессий", () => {
   assert.throws(
     () =>
       workflowStateSchema.parse({
@@ -60,7 +61,27 @@ test("workflow не принимает одновременно artifact- и rev
           baselineCommit: "b".repeat(40),
         },
       }),
-    /одновременно восстанавливать artifact и review/,
+    /одновременно восстанавливать несколько агентских сессий/,
+  );
+  assert.throws(
+    () =>
+      workflowStateSchema.parse({
+        branch: "feature/conflicting-sessions",
+        change: { id: "conflicting-sessions" },
+        pendingArtifactSession: null,
+        pendingReviewSession: {
+          changeId: "conflicting-sessions",
+          branch: "feature/conflicting-sessions",
+          baselineCommit: "b".repeat(40),
+        },
+        pendingFindingResolutionSession: {
+          changeId: "conflicting-sessions",
+          branch: "feature/conflicting-sessions",
+          findingId: "F1",
+          baselineCommit: "c".repeat(40),
+        },
+      }),
+    /одновременно восстанавливать несколько агентских сессий/,
   );
 });
 
@@ -178,6 +199,7 @@ test("ledger сохраняет checkpoint workflow и полностью очи
       change: null,
       pendingArtifactSession: null,
       pendingReviewSession: null,
+      pendingFindingResolutionSession: null,
     },
   });
 

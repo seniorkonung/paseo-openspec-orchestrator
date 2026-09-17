@@ -109,6 +109,20 @@ function completedChangeReview() {
   };
 }
 
+function completedChangeFindingResolution() {
+  return {
+    async plan(_workspaceDirectory, changeId) {
+      return {
+        kind: "no-findings",
+        reviewPath: `openspec/changes/${changeId}/review.md`,
+      };
+    },
+    async run() {
+      throw new Error("При отсутствии findings агент не должен запускаться");
+    },
+  };
+}
+
 function engineContext(
   workspaceDirectory = "/workspace/project",
   readAgentProfiles = async () => requiredAgentProfiles(),
@@ -117,6 +131,7 @@ function engineContext(
   changeArtifacts = completedChangeArtifacts(),
   changePublication = completedChangePublication(),
   changeReview = completedChangeReview(),
+  changeFindingResolution = completedChangeFindingResolution(),
 ) {
   const workspaceDisplay = { projectName: null, workspaceName: null };
   return {
@@ -129,6 +144,7 @@ function engineContext(
     changeArtifacts,
     changePublication,
     changeReview,
+    changeFindingResolution,
   };
 }
 
@@ -224,28 +240,33 @@ test("на non-main ветке workflow завершает инициализа�
       "Review OpenSpec change опубликован: openspec/changes/selected-change/review.md",
       "succeeded",
     ],
+    [
+      "В review нет нерешённых findings: openspec/changes/selected-change/review.md",
+      "succeeded",
+    ],
   ]);
-  assert.deepEqual(snapshot.history.at(-3)?.links, [
+  assert.deepEqual(snapshot.history.at(-4)?.links, [
     {
       kind: "agent",
       agentId: "agent-change-selection",
       label: "Выбор OpenSpec change",
     },
   ]);
-  assert.deepEqual(snapshot.history.at(-2)?.links, [
+  assert.deepEqual(snapshot.history.at(-3)?.links, [
     {
       kind: "agent",
       agentId: "agent-change-publication",
       label: "Публикация change selected-change",
     },
   ]);
-  assert.deepEqual(snapshot.history.at(-1)?.links, [
+  assert.deepEqual(snapshot.history.at(-2)?.links, [
     {
       kind: "agent",
       agentId: "agent-change-review",
       label: "Review change selected-change",
     },
   ]);
+  assert.deepEqual(snapshot.history.at(-1)?.links, []);
   await engine.dispose();
   await ledger.close();
 });
@@ -346,35 +367,40 @@ test("незавершённый change создаёт по одному арт�
       "Review OpenSpec change опубликован: openspec/changes/selected-change/review.md",
       "succeeded",
     ],
+    [
+      "В review нет нерешённых findings: openspec/changes/selected-change/review.md",
+      "succeeded",
+    ],
   ]);
-  assert.deepEqual(snapshot.history.at(-4)?.links, [
+  assert.deepEqual(snapshot.history.at(-5)?.links, [
     {
       kind: "agent",
       agentId: "agent-artifact-1",
       label: "Артефакт artifact-1",
     },
   ]);
-  assert.deepEqual(snapshot.history.at(-3)?.links, [
+  assert.deepEqual(snapshot.history.at(-4)?.links, [
     {
       kind: "agent",
       agentId: "agent-artifact-2",
       label: "Артефакт artifact-2",
     },
   ]);
-  assert.deepEqual(snapshot.history.at(-2)?.links, [
+  assert.deepEqual(snapshot.history.at(-3)?.links, [
     {
       kind: "agent",
       agentId: "agent-change-publication",
       label: "Публикация change selected-change",
     },
   ]);
-  assert.deepEqual(snapshot.history.at(-1)?.links, [
+  assert.deepEqual(snapshot.history.at(-2)?.links, [
     {
       kind: "agent",
       agentId: "agent-change-review",
       label: "Review change selected-change",
     },
   ]);
+  assert.deepEqual(snapshot.history.at(-1)?.links, []);
   await engine.dispose();
   await ledger.close();
 });
@@ -417,6 +443,10 @@ test("изменения рабочего дерева блокируют workfl
     ["Pull request #42 опубликован: https://github.com/example/project/pull/42", "succeeded"],
     [
       "Review OpenSpec change опубликован: openspec/changes/selected-change/review.md",
+      "succeeded",
+    ],
+    [
+      "В review нет нерешённых findings: openspec/changes/selected-change/review.md",
       "succeeded",
     ],
   ]);
@@ -611,6 +641,10 @@ test("отсутствующие профили блокируют Git-пров�
     ["Pull request #42 опубликован: https://github.com/example/project/pull/42", "succeeded"],
     [
       "Review OpenSpec change опубликован: openspec/changes/selected-change/review.md",
+      "succeeded",
+    ],
+    [
+      "В review нет нерешённых findings: openspec/changes/selected-change/review.md",
       "succeeded",
     ],
   ]);
@@ -808,6 +842,7 @@ test("workflow выполняет отдельные шаги и передаё�
       change: null,
       pendingArtifactSession: null,
       pendingReviewSession: null,
+      pendingFindingResolutionSession: null,
     },
   ]);
   assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
@@ -920,6 +955,7 @@ test("после перезапуска workflow продолжает работ
       change: null,
       pendingArtifactSession: null,
       pendingReviewSession: null,
+      pendingFindingResolutionSession: null,
     },
   });
 
@@ -1346,12 +1382,16 @@ test("после reload шаг публикации повторно согла�
   assert.equal(selectCalls, 0);
   assert.equal(publishCalls, 1);
   assert.equal(
-    snapshot.history.at(-2)?.text,
+    snapshot.history.at(-3)?.text,
     "Pull request #77 опубликован: https://github.com/example/project/pull/77",
   );
   assert.equal(
-    snapshot.history.at(-1)?.text,
+    snapshot.history.at(-2)?.text,
     "Review OpenSpec change опубликован: openspec/changes/selected-change/review.md",
+  );
+  assert.equal(
+    snapshot.history.at(-1)?.text,
+    "В review нет нерешённых findings: openspec/changes/selected-change/review.md",
   );
   assert.equal(ledger.getWorkflowCheckpoint("workspace-publication-resume"), null);
   await engine.dispose();
@@ -1401,9 +1441,14 @@ test("существующий опубликованный review пропус�
   assert.equal(snapshot.lifecycle.status, "completed");
   assert.equal(reviewRuns, 0);
   assert.equal(
-    snapshot.history.at(-1)?.text,
+    snapshot.history.at(-2)?.text,
     "Review OpenSpec change уже опубликован: openspec/changes/selected-change/review.md",
   );
+  assert.equal(
+    snapshot.history.at(-1)?.text,
+    "В review нет нерешённых findings: openspec/changes/selected-change/review.md",
+  );
+  assert.deepEqual(snapshot.history.at(-2)?.links, []);
   assert.deepEqual(snapshot.history.at(-1)?.links, []);
   await engine.dispose();
   await ledger.close();
@@ -1473,14 +1518,230 @@ test("после reload review продолжает сохранённую basel
   assert.equal(snapshot.lifecycle.status, "completed");
   assert.equal(planCalls, 0);
   assert.deepEqual(resumedSessions, [pendingReviewSession]);
-  assert.deepEqual(snapshot.history.at(-1)?.links, [
+  assert.deepEqual(snapshot.history.at(-2)?.links, [
     {
       kind: "agent",
       agentId: "agent-review-resume",
       label: "Review change selected-change",
     },
   ]);
+  assert.deepEqual(snapshot.history.at(-1)?.links, []);
   assert.equal(ledger.getWorkflowCheckpoint("workspace-review-resume"), null);
+  await engine.dispose();
+  await ledger.close();
+});
+
+test("findings устраняются по одной отдельными High Sandbox агентами", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-finding-loop");
+  const pendingFindingIds = ["F1", "F3"];
+  const plannedFindingIds = [];
+  const resolvedFindingIds = [];
+  const resolutionProfiles = [];
+  const changeFindingResolution = {
+    async plan(_workspaceDirectory, changeId, branch) {
+      const findingId = pendingFindingIds[0];
+      assert.ok(findingId);
+      plannedFindingIds.push(findingId);
+      return {
+        kind: "finding-required",
+        findingId,
+        session: {
+          changeId,
+          branch,
+          findingId,
+          baselineCommit: findingId === "F1" ? "1".repeat(40) : "3".repeat(40),
+        },
+      };
+    },
+    async run(request) {
+      const findingId = pendingFindingIds.shift();
+      assert.equal(request.session.findingId, findingId);
+      assert.equal(request.profile.name, "High Sandbox");
+      resolutionProfiles.push(request.profile.name);
+      resolvedFindingIds.push(request.session.findingId);
+      request.onAgentCreated(`agent-finding-${request.session.findingId}`);
+      const completed = {
+        changeId: request.changeId,
+        findingId: request.session.findingId,
+        remainingFindingIds: [...pendingFindingIds],
+        commit: request.session.findingId === "F1" ? "a".repeat(40) : "b".repeat(40),
+      };
+      await request.onFindingResolved(completed);
+      return completed;
+    },
+  };
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    branchProbe: async () => ({ kind: "non-main", name: "feature/finding-loop" }),
+    worktreeProbe: async () => ({ kind: "clean" }),
+  });
+  engine.initialize(
+    "workspace-finding-loop",
+    engineContext(
+      "/workspace/project",
+      async () => requiredAgentProfiles(),
+      immediateChangeSelection(),
+      async () => ({ kind: "available" }),
+      completedChangeArtifacts(),
+      completedChangePublication(),
+      completedChangeReview(),
+      changeFindingResolution,
+    ),
+  );
+
+  engine.command("workspace-finding-loop", "start");
+  await settleWorkflow();
+
+  const snapshot = ledger.get("workspace-finding-loop");
+  assert.equal(snapshot.lifecycle.status, "completed");
+  assert.deepEqual(plannedFindingIds, ["F1", "F3"]);
+  assert.deepEqual(resolvedFindingIds, ["F1", "F3"]);
+  assert.deepEqual(resolutionProfiles, ["High Sandbox", "High Sandbox"]);
+  assert.equal(snapshot.history.at(-2)?.text, "Устранена finding F1; осталось 1");
+  assert.equal(snapshot.history.at(-1)?.text, "Устранена последняя finding review: F3");
+  assert.deepEqual(snapshot.history.at(-2)?.links, [
+    {
+      kind: "agent",
+      agentId: "agent-finding-F1",
+      label: "Finding F1",
+    },
+  ]);
+  assert.deepEqual(snapshot.history.at(-1)?.links, [
+    {
+      kind: "agent",
+      agentId: "agent-finding-F3",
+      label: "Finding F3",
+    },
+  ]);
+  assert.equal(ledger.getWorkflowCheckpoint("workspace-finding-loop"), null);
+  await engine.dispose();
+  await ledger.close();
+});
+
+test("после reload finding продолжает сохранённую baseline-сессию", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-finding-resume");
+  createOrchestratorReporter(ledger, "workspace-finding-resume").setChange({
+    id: "selected-change",
+  });
+  const pendingFindingResolutionSession = {
+    changeId: "selected-change",
+    branch: "feature/finding-resume",
+    findingId: "F7",
+    baselineCommit: "7".repeat(40),
+  };
+  await ledger.saveWorkflowCheckpoint("workspace-finding-resume", {
+    version: 1,
+    nextStepId: "resolve-review-findings",
+    state: {
+      branch: "feature/finding-resume",
+      change: { id: "selected-change" },
+      pendingArtifactSession: null,
+      pendingReviewSession: null,
+      pendingFindingResolutionSession,
+    },
+  });
+  let planCalls = 0;
+  const resumedSessions = [];
+  const changeFindingResolution = {
+    async plan() {
+      planCalls += 1;
+      throw new Error("Finding и baseline не должны вычисляться повторно");
+    },
+    async run(request) {
+      resumedSessions.push(request.session);
+      assert.equal(request.profile.name, "High Sandbox");
+      request.onAgentCreated("agent-finding-resume");
+      const completed = {
+        changeId: request.changeId,
+        findingId: request.session.findingId,
+        remainingFindingIds: [],
+        commit: "e".repeat(40),
+      };
+      await request.onFindingResolved(completed);
+      return completed;
+    },
+  };
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    branchProbe: async () => ({ kind: "non-main", name: "feature/finding-resume" }),
+    worktreeProbe: async () => ({ kind: "clean" }),
+  });
+  engine.initialize(
+    "workspace-finding-resume",
+    engineContext(
+      "/workspace/project",
+      async () => requiredAgentProfiles(),
+      immediateChangeSelection(),
+      async () => ({ kind: "available" }),
+      completedChangeArtifacts(),
+      completedChangePublication(),
+      completedChangeReview(),
+      changeFindingResolution,
+    ),
+  );
+
+  engine.command("workspace-finding-resume", "start");
+  await settleWorkflow();
+
+  const snapshot = ledger.get("workspace-finding-resume");
+  assert.equal(snapshot.lifecycle.status, "completed");
+  assert.equal(planCalls, 0);
+  assert.deepEqual(resumedSessions, [pendingFindingResolutionSession]);
+  assert.deepEqual(snapshot.history.at(-1)?.links, [
+    {
+      kind: "agent",
+      agentId: "agent-finding-resume",
+      label: "Finding F7",
+    },
+  ]);
+  assert.equal(ledger.getWorkflowCheckpoint("workspace-finding-resume"), null);
+  await engine.dispose();
+  await ledger.close();
+});
+
+test("пустой findings завершается до чтения профиля агента", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open("workspace-no-findings");
+  createOrchestratorReporter(ledger, "workspace-no-findings").setChange({
+    id: "selected-change",
+  });
+  await ledger.saveWorkflowCheckpoint("workspace-no-findings", {
+    version: 1,
+    nextStepId: "resolve-review-findings",
+    state: {
+      branch: "feature/no-findings",
+      change: { id: "selected-change" },
+      pendingArtifactSession: null,
+      pendingReviewSession: null,
+      pendingFindingResolutionSession: null,
+    },
+  });
+  let profileReads = 0;
+  const engine = new OpenSpecOrchestratorEngine(ledger);
+  engine.initialize(
+    "workspace-no-findings",
+    engineContext(
+      "/workspace/project",
+      async () => {
+        profileReads += 1;
+        throw new Error("Профили не должны читаться без findings");
+      },
+    ),
+  );
+
+  engine.command("workspace-no-findings", "start");
+  await settleWorkflow();
+
+  const snapshot = ledger.get("workspace-no-findings");
+  assert.equal(snapshot.lifecycle.status, "completed");
+  assert.equal(profileReads, 0);
+  assert.equal(
+    snapshot.history.at(-1)?.text,
+    "В review нет нерешённых findings: openspec/changes/selected-change/review.md",
+  );
   await engine.dispose();
   await ledger.close();
 });
@@ -1827,6 +2088,10 @@ test("на main ветке workflow останавливается, а retry п�
     ["Pull request #42 опубликован: https://github.com/example/project/pull/42", "succeeded"],
     [
       "Review OpenSpec change опубликован: openspec/changes/selected-change/review.md",
+      "succeeded",
+    ],
+    [
+      "В review нет нерешённых findings: openspec/changes/selected-change/review.md",
       "succeeded",
     ],
   ]);

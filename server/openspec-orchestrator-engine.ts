@@ -7,6 +7,7 @@ import type { ChangeArtifactCreationService } from "./change-artifact-creation.t
 import type { ChangeSelectionService } from "./change-selection.ts";
 import type { ChangePublicationService } from "./change-publication.ts";
 import type { ChangeReviewService } from "./change-review.ts";
+import type { ChangeFindingResolutionService } from "./change-finding-resolution.ts";
 import type { MiseToolchainProbe } from "./mise-toolchain.ts";
 import {
   normalizeOrchestratorWorkspaceDisplay,
@@ -56,6 +57,7 @@ interface WorkspaceRuntime {
   changeArtifacts: ChangeArtifactCreationService;
   changePublication: ChangePublicationService;
   changeReview: ChangeReviewService;
+  changeFindingResolution: ChangeFindingResolutionService;
   generation: number;
   pauseRequested: boolean;
   active: boolean;
@@ -146,6 +148,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       changeArtifacts: context.changeArtifacts,
       changePublication: context.changePublication,
       changeReview: context.changeReview,
+      changeFindingResolution: context.changeFindingResolution,
       generation: 0,
       pauseRequested: false,
       active: false,
@@ -350,6 +353,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
             changeArtifacts: runtime.changeArtifacts,
             changePublication: runtime.changePublication,
             changeReview: runtime.changeReview,
+            changeFindingResolution: runtime.changeFindingResolution,
             notify: (notification) => this.#notify(workspaceId, notification, runtime),
           },
           updateActionLinks: (links) => {

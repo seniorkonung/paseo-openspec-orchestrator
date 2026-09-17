@@ -33,6 +33,8 @@ The plugin is responsible for:
 - reviewing all artifacts of the published change, recording the findings in a
   committed and pushed `review.md`, and preserving an interactive agent session
   when the review needs user input;
+- resolving active review findings one at a time through separate approved,
+  committed, and pushed planning-artifact changes until none remain;
 - delivering optional workflow notifications through ntfy;
 - delegating interactive workflow steps to Paseo agents through scoped MCP
   tools.
@@ -98,8 +100,9 @@ The main boundaries are:
   exposes only `set_change` to a change-selection agent and only
   `complete_artifact` to each artifact-creation agent, only
   `complete_change_publication` to the publication agent, and only
-  `complete_change_review` to the review agent. A tool from one session is not
-  shared with another session.
+  `complete_change_review` to the review agent. Each finding-resolution agent
+  receives only `complete_review_finding`. A tool from one session is not shared
+  with another session.
 - `server/change-artifact-creation.ts` is the boundary around OpenSpec planning
   status, repository path validation, per-artifact Git verification, agent
   sessions, and the `complete_artifact` MCP contract.
@@ -109,6 +112,10 @@ The main boundaries are:
 - `server/change-review.ts` owns review recovery, safe `review.md` detection,
   the review agent session, and independent verification of the resulting Git
   commit and remote branch.
+- `server/change-review-report.ts` validates the versioned `review.md` contract
+  fail closed, while `server/change-finding-resolution.ts` owns finding
+  selection, the interactive resolution session, Git verification, scoped MCP,
+  and restart recovery.
 
 The shared Zod schemas are runtime boundaries as well as TypeScript contracts.
 Persisted data, RPC payloads, workflow state, and tool results must be validated
@@ -186,7 +193,7 @@ Draft policy, title, and body before advancing to `review-change`. A restart
 safely reconciles the already pushed branch or PR instead of creating a
 duplicate.
 
-The terminal `review-change` step resolves `review.md` against the actual
+The `review-change` step resolves `review.md` against the actual
 `changeRoot` reported by OpenSpec. A non-empty ordinary file can skip the agent
 only when it is tracked by the current `HEAD`, the worktree is clean, the saved
 branch is active, and `origin` contains that exact `HEAD`. Otherwise the step
@@ -208,8 +215,38 @@ pending review session. A restart reuses the saved baseline; if the review
 commit already exists, the recovery agent only finishes publication and the
 completion handshake instead of reviewing or committing again.
 
-Implementation of the selected change remains outside the current workflow
-endpoint, as does correction of review findings.
+Both review outcomes continue to `resolve-review-findings`. Before reading an
+agent profile, that step obtains the actual `changeRoot` from OpenSpec and
+parses a tracked ordinary `review.md` as strict UTF-8 format version 1 (up to
+1 MiB and 256 active findings). Active `F<n>` entries come only from the
+`Findings` section and retain report order; `AR<n>` entries in `Accepted risks`
+are resolved outcomes. Malformed or unsupported reports fail closed with
+actionable feedback. No active findings completes the workflow immediately.
+
+Otherwise the step durably saves the first finding and baseline commit, rereads
+the `High Sandbox` profile, and starts one workspace-local agent with
+`ntfy=true`. The prompt tells the agent to invoke `openspec-review-change` for
+the exact change and finding without first inspecting the command catalog. The
+agent explains the finding to a user with no assumed context. Product or
+contract choices include options and trade-offs; an obvious technical
+correction includes a concise explanation that product behavior does not
+change. The user must explicitly approve the artifact change or risk acceptance
+and, after re-review, separately approve the commit and push.
+
+Each successful iteration creates exactly one
+`docs(openspec): resolve <F-id> review finding` commit, pushes the current branch
+to `origin`, and calls the sole `complete_review_finding {}` tool. The tool
+independently reparses the report, requires the selected ID to be absent,
+checks the branch, clean worktree, baseline ancestry, one exact-subject commit,
+the `review.md` diff, change-root path boundary, and exact local/remote HEAD. It
+then disables `ntfy` and atomically clears the pending session; a checkpoint
+failure restores `ntfy=true`. Remaining findings loop back through the same
+step, one agent per finding. Recovery keeps the selected ID and baseline, and a
+valid existing commit is only pushed and acknowledged rather than recreated.
+
+Implementation code for the selected change remains outside the current
+workflow endpoint; finding resolution is restricted to planning artifacts and
+`review.md` under its change root.
 
 ## Extending the workflow
 
