@@ -30,9 +30,9 @@ The plugin is responsible for:
   is complete;
 - publishing the completed planning branch to `origin` and creating or
   reconciling one change-owned integration pull request into `main`;
-- reviewing all artifacts of the published change, recording the findings in a
-  committed and pushed `review.md`, and preserving an interactive agent session
-  when the review needs user input;
+- creating a dependent `<change-branch>-review` branch and Ready pull request
+  into the published change branch, then reviewing all artifacts there and
+  recording the findings in a committed and pushed `review.md`;
 - resolving active review findings one at a time through separate approved,
   committed, and pushed planning-artifact changes until none remain;
 - resolving active implementation-review findings one at a time, either by
@@ -113,9 +113,9 @@ The main boundaries are:
 - `server/change-publication.ts` owns the GitHub publication seam: it validates
   `origin`, GitHub CLI access, the remote commit and pull-request metadata while
   a workspace-local agent performs the push and PR create/edit operations.
-- `server/change-review.ts` owns review recovery, safe `review.md` detection,
-  the review agent session, and independent verification of the resulting Git
-  commit and remote branch.
+- `server/change-review.ts` owns the review agent session and review-commit
+  verification. `server/change-review-publication.ts` owns the immutable
+  parent/child branch target, GitHub PR boundary, and restart reconciliation.
 - `server/change-review-report.ts` and
   `server/implementation-review-report.ts` validate their versioned report
   contracts fail closed. `server/review-finding-resolution.ts` owns the shared
@@ -202,29 +202,34 @@ succeeds. A failed tool check returns actionable feedback to the agent and may
 be retried in the same session. A restart safely reconciles the already pushed
 branch or PR instead of creating a duplicate.
 
-The `review-change` step resolves `review.md` against the actual
-`changeRoot` reported by OpenSpec. A non-empty ordinary file can skip the agent
-only when it is tracked by the current `HEAD`, the worktree is clean, the saved
-branch is active, and `origin` contains that exact `HEAD`. Otherwise the step
-saves the branch and baseline commit, rereads the `Ultra Sandbox` profile, and
-immediately creates a workspace-local agent with `ntfy=true` and a prompt to
-invoke `openspec-review-change` for the complete change ID. The orchestrator
-does not inspect the agent's skill catalog; skill discovery belongs to the
-agent environment.
+The `review-change` step treats `WorkflowState.branch` as the active tip of the
+pull-request chain. Before any mutation it requires a clean worktree, the saved
+parent branch as the current branch, identical local and `origin` parent HEADs,
+and exactly one open parent pull request into `main`. It also rejects any local
+branch, remote branch, or historical pull request that already occupies the
+derived `<parent>-review` name. The durable pending session records the change,
+both branch refs, baseline commit, GitHub repository identity, and parent PR.
+An existing `review.md` never skips this stage: every review session must
+produce one new review commit.
 
 The review session may span any number of agent turns and user replies. Ending
 one turn is not a workflow failure: the step waits for the scoped
 `complete_change_review` tool while `ntfy=true` keeps user intervention visible.
-Findings do not block completion and are not fixed in this step. The agent adds
-only new review files under the change root, creates exactly one review commit,
-and pushes the branch without force. The completion tool independently checks
-the file, worktree, saved branch and baseline, commit count and subject, changed
-paths, and remote `HEAD`. It then disables `ntfy` and atomically clears the
-pending review session. A restart reuses the saved baseline; if the review
-commit already exists, the recovery agent only finishes publication and the
-completion handshake instead of reviewing or committing again.
+Findings do not block completion and are not fixed in this step. The agent
+creates the child branch strictly at the saved baseline, pushes it before the
+review, invokes `openspec-review-change`, creates exactly one review commit,
+pushes again, and creates one Ready PR from the child into the parent. Existing
+`review.md` may be updated, but no other pre-existing planning file may change.
+The completion tool independently checks the parent immutability, child
+ancestry and commit, changed paths, exact remote HEAD, repository, Ready state,
+base/head refs, title, body, and absence of a fork. Only the successful durable
+workflow transition changes the active branch to the child and clears the
+pending session. A restart reconciles a local branch, initial push, completed
+review commit, or already-created PR without duplicating effects.
 
-Both review outcomes continue to `resolve-review-findings`. Before reading an
+Finding-resolution steps therefore commit and push on the review branch. Merge
+the review PR into the change branch first; only then merge the change PR into
+`main`. The successful review continues to `resolve-review-findings`. Before reading an
 agent profile, that step obtains the actual `changeRoot` from OpenSpec and
 parses a tracked ordinary `review.md` as strict UTF-8 format version 1 (up to
 1 MiB and 256 active findings). Active `F<n>` entries come only from the

@@ -23,15 +23,36 @@ async function temporaryHome(context) {
   return directory;
 }
 
-test("checkpoint версии 1 без pending-сессии получает совместимый default", () => {
+function pendingReviewSession(changeId, parentBranch) {
+  return {
+    changeId,
+    parentBranch,
+    reviewBranch: `${parentBranch}-review`,
+    baselineCommit: "b".repeat(40),
+    repositoryHost: "github.com",
+    repositoryNameWithOwner: "example/project",
+    repositoryUrl: "https://github.com/example/project",
+    parentPullRequestNumber: 42,
+  };
+}
+
+test("checkpoint версии 1 неподдерживаем, а версия 2 заполняет default", () => {
+  assert.throws(
+    () =>
+      workflowCheckpointSchema.parse({
+        version: 1,
+        nextStepId: "select-change",
+        state: { branch: "feature/legacy", change: { id: "legacy-change" } },
+      }),
+  );
   assert.deepEqual(
     workflowCheckpointSchema.parse({
-      version: 1,
+      version: 2,
       nextStepId: "select-change",
       state: { branch: "feature/legacy", change: { id: "legacy-change" } },
     }),
     {
-      version: 1,
+      version: 2,
       nextStepId: "select-change",
       state: {
         branch: "feature/legacy",
@@ -56,11 +77,10 @@ test("workflow не принимает несколько незавершённ
           schemaName: "spec-driven",
           baselineCommit: "a".repeat(40),
         },
-        pendingReviewSession: {
-          changeId: "conflicting-sessions",
-          branch: "feature/conflicting-sessions",
-          baselineCommit: "b".repeat(40),
-        },
+        pendingReviewSession: pendingReviewSession(
+          "conflicting-sessions",
+          "feature/conflicting-sessions",
+        ),
       }),
     /одновременно восстанавливать несколько агентских сессий/,
   );
@@ -92,11 +112,10 @@ test("workflow не принимает несколько незавершённ
         branch: "feature/conflicting-sessions",
         change: { id: "conflicting-sessions" },
         pendingArtifactSession: null,
-        pendingReviewSession: {
-          changeId: "conflicting-sessions",
-          branch: "feature/conflicting-sessions",
-          baselineCommit: "b".repeat(40),
-        },
+        pendingReviewSession: pendingReviewSession(
+          "conflicting-sessions",
+          "feature/conflicting-sessions",
+        ),
         pendingFindingResolutionSession: {
           changeId: "conflicting-sessions",
           branch: "feature/conflicting-sessions",
@@ -210,12 +229,12 @@ test("ledger сохраняет checkpoint workflow и полностью очи
     change: { id: "change-a" },
   }));
   await ledger.saveWorkflowCheckpoint("workspace-checkpoint", {
-    version: 1,
+    version: 2,
     nextStepId: "review-change",
     state: { branch: "feature/checkpoint", change: null },
   });
   assert.deepEqual(ledger.getWorkflowCheckpoint("workspace-checkpoint"), {
-    version: 1,
+    version: 2,
     nextStepId: "review-change",
     state: {
       branch: "feature/checkpoint",

@@ -96,7 +96,7 @@ export const workflowStateSchema = z
 
 export const workflowCheckpointSchema = z
   .object({
-    version: z.literal(1),
+    version: z.literal(2),
     nextStepId: z.string().trim().min(1).max(128),
     state: workflowStateSchema,
   })

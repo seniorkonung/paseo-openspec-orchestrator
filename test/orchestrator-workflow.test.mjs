@@ -85,26 +85,36 @@ function completedChangePublication() {
   };
 }
 
+function reviewSession(changeId, parentBranch, baselineCommit = "c".repeat(40)) {
+  return {
+    changeId,
+    parentBranch,
+    reviewBranch: `${parentBranch}-review`,
+    baselineCommit,
+    repositoryHost: "github.com",
+    repositoryNameWithOwner: "example/project",
+    repositoryUrl: "https://github.com/example/project",
+    parentPullRequestNumber: 42,
+  };
+}
+
 function completedChangeReview() {
   return {
     async plan(_workspaceDirectory, changeId, branch) {
-      return {
-        kind: "review-required",
-        session: {
-          changeId,
-          branch,
-          baselineCommit: "c".repeat(40),
-        },
-      };
+      return reviewSession(changeId, branch);
     },
     async run(request) {
       request.onAgentCreated("agent-change-review");
-      const review = {
-        changeId: request.changeId,
-        reviewPath: `openspec/changes/${request.changeId}/review.md`,
+      return {
+        changeId: request.session.changeId,
+        reviewPath: `openspec/changes/${request.session.changeId}/review.md`,
+        branch: request.session.reviewBranch,
+        pullRequest: {
+          number: 43,
+          url: "https://github.com/example/project/pull/43",
+          title: `Первичное ревью OpenSpec change «${request.session.changeId}»`,
+        },
       };
-      await request.onReviewCompleted(review);
-      return review;
     },
   };
 }
@@ -253,7 +263,7 @@ test("на non-main ветке workflow завершает инициализа�
     ["OpenSpec change готов к apply: selected-change", "succeeded"],
     ["Pull request #42 опубликован: https://github.com/example/project/pull/42", "succeeded"],
     [
-      "Review OpenSpec change опубликован: openspec/changes/selected-change/review.md",
+      "Review OpenSpec change опубликован в PR #43: https://github.com/example/project/pull/43",
       "succeeded",
     ],
     [
@@ -385,7 +395,7 @@ test("незавершённый change создаёт по одному арт�
     ["OpenSpec change готов к apply: selected-change", "succeeded"],
     ["Pull request #42 опубликован: https://github.com/example/project/pull/42", "succeeded"],
     [
-      "Review OpenSpec change опубликован: openspec/changes/selected-change/review.md",
+      "Review OpenSpec change опубликован в PR #43: https://github.com/example/project/pull/43",
       "succeeded",
     ],
     [
@@ -468,7 +478,7 @@ test("изменения рабочего дерева блокируют workfl
     ["OpenSpec change готов к apply: selected-change", "succeeded"],
     ["Pull request #42 опубликован: https://github.com/example/project/pull/42", "succeeded"],
     [
-      "Review OpenSpec change опубликован: openspec/changes/selected-change/review.md",
+      "Review OpenSpec change опубликован в PR #43: https://github.com/example/project/pull/43",
       "succeeded",
     ],
     [
@@ -670,7 +680,7 @@ test("отсутствующие профили блокируют Git-пров�
     ["OpenSpec change готов к apply: selected-change", "succeeded"],
     ["Pull request #42 опубликован: https://github.com/example/project/pull/42", "succeeded"],
     [
-      "Review OpenSpec change опубликован: openspec/changes/selected-change/review.md",
+      "Review OpenSpec change опубликован в PR #43: https://github.com/example/project/pull/43",
       "succeeded",
     ],
     [
@@ -983,7 +993,7 @@ test("после перезапуска workflow продолжает работ
   await secondStartedPromise;
   await ledger.flush();
   assert.deepEqual(ledger.getWorkflowCheckpoint("workspace-resume"), {
-    version: 1,
+    version: 2,
     nextStepId: "second",
     state: {
       branch: "feature/resume",
@@ -1240,7 +1250,7 @@ test("сохранённый change после reload проверяется б�
     id: "selected-change",
   });
   await ledger.saveWorkflowCheckpoint("workspace-selected-resume", {
-    version: 1,
+    version: 2,
     nextStepId: "select-change",
     state: { branch: "feature/resume-change", change: { id: "selected-change" } },
   });
@@ -1289,7 +1299,7 @@ test("после reload pending-сессия продолжает тот же а
     baselineCommit: "a".repeat(40),
   };
   await ledger.saveWorkflowCheckpoint("workspace-pending-artifact", {
-    version: 1,
+    version: 2,
     nextStepId: "create-change-artifacts",
     state: {
       branch: "feature/recover-artifact",
@@ -1363,7 +1373,7 @@ test("после reload шаг публикации повторно согла�
     id: "selected-change",
   });
   await ledger.saveWorkflowCheckpoint("workspace-publication-resume", {
-    version: 1,
+    version: 2,
     nextStepId: "publish-change",
     state: {
       branch: "feature/publication-resume",
@@ -1423,7 +1433,7 @@ test("после reload шаг публикации повторно согла�
   );
   assert.equal(
     snapshot.history.at(-3)?.text,
-    "Review OpenSpec change опубликован: openspec/changes/selected-change/review.md",
+    "Review OpenSpec change опубликован в PR #43: https://github.com/example/project/pull/43",
   );
   assert.equal(
     snapshot.history.at(-2)?.text,
@@ -1438,7 +1448,7 @@ test("после reload шаг публикации повторно согла�
   await ledger.close();
 });
 
-test("существующий опубликованный review пропускает создание агента", async (context) => {
+test("существующий review.md не пропускает новую review-сессию", async (context) => {
   const paseoHome = await temporaryHome(context);
   const ledger = new OrchestratorLedger({ paseoHome });
   await ledger.open("workspace-existing-review");
@@ -1447,14 +1457,21 @@ test("существующий опубликованный review пропус�
     async plan(_workspaceDirectory, selectedChangeId, selectedBranch) {
       assert.equal(selectedChangeId, "selected-change");
       assert.equal(selectedBranch, "feature/existing-review");
-      return {
-        kind: "already-reviewed",
-        reviewPath: "openspec/changes/selected-change/review.md",
-      };
+      return reviewSession(selectedChangeId, selectedBranch);
     },
-    async run() {
+    async run(request) {
       reviewRuns += 1;
-      throw new Error("Агент review не должен запускаться повторно");
+      request.onAgentCreated("agent-existing-review");
+      return {
+        changeId: request.session.changeId,
+        reviewPath: "openspec/changes/selected-change/review.md",
+        branch: request.session.reviewBranch,
+        pullRequest: {
+          number: 43,
+          url: "https://github.com/example/project/pull/43",
+          title: "Первичное ревью OpenSpec change «selected-change»",
+        },
+      };
     },
   };
   const engine = new OpenSpecOrchestratorEngine(ledger, {
@@ -1479,10 +1496,10 @@ test("существующий опубликованный review пропус�
 
   const snapshot = ledger.get("workspace-existing-review");
   assert.equal(snapshot.lifecycle.status, "completed");
-  assert.equal(reviewRuns, 0);
+  assert.equal(reviewRuns, 1);
   assert.equal(
     snapshot.history.at(-3)?.text,
-    "Review OpenSpec change уже опубликован: openspec/changes/selected-change/review.md",
+    "Review OpenSpec change опубликован в PR #43: https://github.com/example/project/pull/43",
   );
   assert.equal(
     snapshot.history.at(-2)?.text,
@@ -1492,7 +1509,13 @@ test("существующий опубликованный review пропус�
     snapshot.history.at(-1)?.text,
     "В implementation review нет нерешённых findings: openspec/changes/selected-change/implementation-review.md",
   );
-  assert.deepEqual(snapshot.history.at(-3)?.links, []);
+  assert.deepEqual(snapshot.history.at(-3)?.links, [
+    {
+      kind: "agent",
+      agentId: "agent-existing-review",
+      label: "Review change selected-change",
+    },
+  ]);
   assert.deepEqual(snapshot.history.at(-2)?.links, []);
   assert.deepEqual(snapshot.history.at(-1)?.links, []);
   await engine.dispose();
@@ -1506,13 +1529,13 @@ test("после reload review продолжает сохранённую basel
   createOrchestratorReporter(ledger, "workspace-review-resume").setChange({
     id: "selected-change",
   });
-  const pendingReviewSession = {
-    changeId: "selected-change",
-    branch: "feature/review-resume",
-    baselineCommit: "d".repeat(40),
-  };
+  const pendingReviewSession = reviewSession(
+    "selected-change",
+    "feature/review-resume",
+    "d".repeat(40),
+  );
   await ledger.saveWorkflowCheckpoint("workspace-review-resume", {
-    version: 1,
+    version: 2,
     nextStepId: "review-change",
     state: {
       branch: "feature/review-resume",
@@ -1531,12 +1554,16 @@ test("после reload review продолжает сохранённую basel
     async run(request) {
       resumedSessions.push(request.session);
       request.onAgentCreated("agent-review-resume");
-      const review = {
-        changeId: request.changeId,
+      return {
+        changeId: request.session.changeId,
         reviewPath: "openspec/changes/selected-change/review.md",
+        branch: request.session.reviewBranch,
+        pullRequest: {
+          number: 43,
+          url: "https://github.com/example/project/pull/43",
+          title: "Первичное ревью OpenSpec change «selected-change»",
+        },
       };
-      await request.onReviewCompleted(review);
-      return review;
     },
   };
   const engine = new OpenSpecOrchestratorEngine(ledger, {
@@ -1587,6 +1614,7 @@ test("findings устраняются по одной отдельными High 
   const resolutionProfiles = [];
   const changeFindingResolution = {
     async plan(_workspaceDirectory, changeId, branch) {
+      assert.equal(branch, "feature/finding-loop-review");
       const findingId = pendingFindingIds[0];
       assert.ok(findingId);
       plannedFindingIds.push(findingId);
@@ -1675,6 +1703,7 @@ test("implementation findings устраняются по одной отдел�
   const resolvedFindingIds = [];
   const implementationFindingResolution = {
     async plan(_workspaceDirectory, changeId, branch) {
+      assert.equal(branch, "feature/implementation-finding-loop-review");
       const findingId = pendingFindingIds[0];
       assert.ok(findingId);
       plannedFindingIds.push(findingId);
@@ -1775,7 +1804,7 @@ test("после reload finding продолжает сохранённую base
     baselineCommit: "7".repeat(40),
   };
   await ledger.saveWorkflowCheckpoint("workspace-finding-resume", {
-    version: 1,
+    version: 2,
     nextStepId: "resolve-review-findings",
     state: {
       branch: "feature/finding-resume",
@@ -1858,7 +1887,7 @@ test("после reload implementation finding продолжает сохран
     baselineCommit: "8".repeat(40),
   };
   await ledger.saveWorkflowCheckpoint("workspace-implementation-finding-resume", {
-    version: 1,
+    version: 2,
     nextStepId: "resolve-implementation-review-findings",
     state: {
       branch: "feature/implementation-finding-resume",
@@ -1939,7 +1968,7 @@ test("пустой findings завершается до чтения профи�
     id: "selected-change",
   });
   await ledger.saveWorkflowCheckpoint("workspace-no-findings", {
-    version: 1,
+    version: 2,
     nextStepId: "resolve-review-findings",
     state: {
       branch: "feature/no-findings",
@@ -2036,6 +2065,88 @@ test("ошибка записи перехода оставляет runtime на
   assert.equal(ledger.get(workspaceId).lifecycle.status, "completed");
   assert.deepEqual(firstStepStates, [null, null]);
   assert.equal(secondStepRuns, 1);
+  await engine.dispose();
+  await ledger.close();
+});
+
+test("ошибка финального review-checkpoint сохраняет parent-ветку и pending-сессию", async (context) => {
+  context.mock.method(console, "error", () => undefined);
+  const paseoHome = await temporaryHome(context);
+  const workspaceId = "workspace-review-transition-error";
+  let rejectReviewTransition = true;
+  const ledger = new OrchestratorLedger({
+    paseoHome,
+    async writer(_path, value) {
+      if (
+        rejectReviewTransition &&
+        value.checkpoint?.nextStepId === "resolve-review-findings"
+      ) {
+        throw new Error("диск временно недоступен");
+      }
+    },
+  });
+  await ledger.open(workspaceId);
+  let planCalls = 0;
+  let runCalls = 0;
+  const changeReview = {
+    async plan(_workspaceDirectory, selectedChangeId, selectedBranch) {
+      planCalls += 1;
+      return reviewSession(selectedChangeId, selectedBranch);
+    },
+    async run(request) {
+      runCalls += 1;
+      request.onAgentCreated(`agent-review-transition-${runCalls}`);
+      return {
+        changeId: request.session.changeId,
+        reviewPath: "openspec/changes/selected-change/review.md",
+        branch: request.session.reviewBranch,
+        pullRequest: {
+          number: 43,
+          url: "https://github.com/example/project/pull/43",
+          title: "Первичное ревью OpenSpec change «selected-change»",
+        },
+      };
+    },
+  };
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    branchProbe: async () => ({ kind: "non-main", name: "feature/review-atomic" }),
+    worktreeProbe: async () => ({ kind: "clean" }),
+  });
+  engine.initialize(
+    workspaceId,
+    engineContext(
+      "/workspace/project",
+      async () => requiredAgentProfiles(),
+      immediateChangeSelection(),
+      async () => ({ kind: "available" }),
+      completedChangeArtifacts(),
+      completedChangePublication(),
+      changeReview,
+    ),
+  );
+
+  engine.command(workspaceId, "start");
+  await settleWorkflow();
+
+  assert.equal(ledger.get(workspaceId).lifecycle.status, "failed");
+  const checkpoint = ledger.getWorkflowCheckpoint(workspaceId);
+  assert.equal(checkpoint?.nextStepId, "review-change");
+  assert.equal(checkpoint?.state.branch, "feature/review-atomic");
+  assert.equal(
+    checkpoint?.state.pendingReviewSession?.reviewBranch,
+    "feature/review-atomic-review",
+  );
+  assert.equal(planCalls, 1);
+  assert.equal(runCalls, 1);
+
+  rejectReviewTransition = false;
+  engine.command(workspaceId, "retry");
+  await settleWorkflow();
+
+  assert.equal(ledger.get(workspaceId).lifecycle.status, "completed");
+  assert.equal(planCalls, 1);
+  assert.equal(runCalls, 2);
+  assert.equal(ledger.getWorkflowCheckpoint(workspaceId), null);
   await engine.dispose();
   await ledger.close();
 });
@@ -2321,7 +2432,7 @@ test("на main ветке workflow останавливается, а retry п�
     ["OpenSpec change готов к apply: selected-change", "succeeded"],
     ["Pull request #42 опубликован: https://github.com/example/project/pull/42", "succeeded"],
     [
-      "Review OpenSpec change опубликован: openspec/changes/selected-change/review.md",
+      "Review OpenSpec change опубликован в PR #43: https://github.com/example/project/pull/43",
       "succeeded",
     ],
     [

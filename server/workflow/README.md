@@ -234,30 +234,38 @@ branch/SHA, Draft-политику и точное содержимое title/bo
 
 ## Review change
 
-`review-change` сначала получает
-фактический `changeRoot` из `openspec status --change <id> --json` и проверяет
-`review.md` внутри этого каталога. Существующий review позволяет пропустить
-агента только тогда, когда это непустой обычный файл, присутствующий в текущем
-`HEAD`, рабочее дерево чисто, активна сохранённая ветка и `origin` содержит этот
-же `HEAD`. Symlink, директория, пустой, незакоммиченный или только локальный файл
-не считаются завершённым review.
+`review-change` считает `WorkflowState.branch` активной вершиной цепочки PR.
+Перед любыми изменениями шаг получает фактический `changeRoot`, требует полностью
+чистое дерево, сохранённую parent-ветку как текущую, одинаковый локальный и
+`origin` HEAD parent-ветки и ровно один открытый PR `parent → main`. Будущее имя
+`<parent>-review` не должно быть занято локальной или remote-веткой либо любым
+историческим PR.
 
-Если review ещё не выполнен, до запуска агента checkpoint сохраняет
-`pendingReviewSession` с полным change ID, веткой и baseline commit. Artifact- и
-review-сессии не могут быть активны одновременно. При reload используется тот
-же baseline: новый запуск не начинает отдельную review-сессию и не допускает
-несколько review-коммитов.
+До запуска агента checkpoint сохраняет `pendingReviewSession`: полный change ID,
+parent- и review-ветки, baseline commit, GitHub repository identity и номер
+parent PR. Существующий `review.md` не пропускает этап: каждая новая review-сессия
+обязана создать новый review-коммит. Одновременно может существовать только одна
+агентская pending-сессия. Checkpoint version 2 намеренно не читает старый формат
+review-сессии.
 
 Шаг перечитывает профиль `Ultra Sandbox` и сразу создаёт workspace-local агента
 через `workspace.agents.create` с готовым prompt, единственным scoped-инструментом
 `complete_change_review` и меткой `ntfy=true`. Оркестратор намеренно не вызывает
 `agent.commands()` и не проверяет наличие `openspec-review-change`: способы
 обнаружения и запуска skill являются частью среды конкретного агента. Prompt
-передаёт точное полное имя change и требует вызвать этот skill, записать
-законченный `review.md`, не исправлять findings или существующие planning-файлы,
-создать ровно один commit `docs(openspec): add <change-id> review` и выполнить
-обычный `git push --set-upstream origin <branch>` без force. Для слишком длинного
-subject используется `docs(openspec): add change review`.
+передаёт точное полное имя change. Агент создаёт `<parent>-review` строго от
+baseline, сразу публикует ветку, вызывает skill, записывает законченный
+`review.md`, не исправляет findings или planning-файлы, создаёт ровно один commit
+`docs(openspec): add <change-id> review` и повторно публикует ветку без force.
+Существующий `review.md` разрешено изменить; остальные существующие файлы менять
+нельзя. Для слишком длинного subject используется
+`docs(openspec): add change review`.
+
+После push агент создаёт или согласует ровно один Ready PR
+`<parent>-review → <parent>` в сохранённом origin-репозитории. Title равен
+`Первичное ревью OpenSpec change «<change-id>»` с коротким fallback для лимита
+GitHub, body кратко обозначает первичное ревью артефактов. Draft, fork и PR с
+другими base/head запрещены.
 
 Агент вызывает `complete_change_review {}` после завершения review независимо от
 наличия findings. Если ему нужна помощь или он считает review незаконченным, он
@@ -266,19 +274,24 @@ subject используется `docs(openspec): add change review`.
 workflow ждёт MCP-подтверждение, scope остаётся доступным, а `ntfy=true` позволяет
 уведомить пользователя.
 
-Инструмент сериализует повторные вызовы и независимо проверяет непустой обычный
-`review.md`, чистое дерево, ветку и наследование baseline, ровно один новый
-коммит, наличие review в diff, отсутствие изменённых файлов вне change root и
-изменений ранее существовавших файлов, точный subject и совпадение локального и
-remote HEAD. Ошибка возвращается агенту как конкретный feedback для исправления
-commit или push. После успеха инструмент выключает `ntfy`, атомарно очищает
-`pendingReviewSession` и подтверждает завершение. Если checkpoint записать не
-удалось, он восстанавливает `ntfy=true` и разрешает повторить вызов. Если при
-reload правильный review-коммит уже существует, восстановительный агент не
-запускает skill и не создаёт второй commit, а только завершает push и вызывает
-инструмент.
+Инструмент сериализует повторные вызовы и независимо проверяет неизменность
+parent HEAD и parent PR, непустой обычный `review.md`, чистое дерево, активную
+review-ветку и наследование baseline, ровно один новый коммит, наличие review в
+diff, отсутствие путей вне change root и изменений существующих planning-файлов,
+точный subject и remote HEAD. Затем он требует единственный открытый Ready PR в
+том же репозитории с точными base/head/SHA/title/body и без fork.
 
-Оба успешных исхода `review-change` переходят в `resolve-review-findings`.
+Только после успешной проверки атомарный workflow-переход меняет активную
+`state.branch` на review-ветку и очищает `pendingReviewSession`. Если запись
+перехода не удалась, durable checkpoint сохраняет сессию для retry. При reload
+локальная ветка, первый push, review-коммит и уже созданный PR согласуются по
+сохранённой сессии без дублирования. Правильный существующий review-коммит не
+создаётся повторно. Затем `review-change` переходит в
+`resolve-review-findings`, и все commits устранения findings публикуются в
+review-ветку.
+
+Порядок merge: сначала review PR вливается в parent change-ветку, затем change PR
+вливается в `main`.
 
 ## Устранение review findings
 

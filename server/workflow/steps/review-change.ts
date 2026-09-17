@@ -3,6 +3,7 @@ import {
   resolveRequiredAgentProfile,
 } from "../../agent-profiles.ts";
 import { ChangeReviewError } from "../../change-review.ts";
+import { ChangeReviewPublicationError } from "../../change-review-publication.ts";
 import type {
   WorkflowStepContext,
   WorkflowStepDefinition,
@@ -31,21 +32,12 @@ export async function reviewChangeStep(
   let session = context.state.pendingReviewSession;
   if (!session) {
     try {
-      const plan = await context.services.changeReview.plan(
+      session = await context.services.changeReview.plan(
         context.workspaceDirectory,
         change.id,
         branch,
         context.signal,
       );
-      if (plan.kind === "already-reviewed") {
-        return {
-          kind: "continue",
-          next: "resolve-review-findings",
-          state: { pendingReviewSession: null },
-          summary: `Review OpenSpec change уже опубликован: ${plan.reviewPath}`,
-        };
-      }
-      session = plan.session;
       await context.checkpointState({
         ...context.state,
         pendingReviewSession: session,
@@ -84,8 +76,6 @@ export async function reviewChangeStep(
   try {
     const review = await context.services.changeReview.run({
       workspaceDirectory: context.workspaceDirectory,
-      changeId: change.id,
-      branch,
       profile: resolution.profile,
       session,
       signal: context.signal,
@@ -98,18 +88,12 @@ export async function reviewChangeStep(
           },
         ]);
       },
-      onReviewCompleted: async () => {
-        await context.checkpointState({
-          ...context.state,
-          pendingReviewSession: null,
-        });
-      },
     });
     return {
       kind: "continue",
       next: "resolve-review-findings",
-      state: { pendingReviewSession: null },
-      summary: `Review OpenSpec change опубликован: ${review.reviewPath}`,
+      state: { branch: review.branch, pendingReviewSession: null },
+      summary: `Review OpenSpec change опубликован в PR #${review.pullRequest.number}: ${review.pullRequest.url}`,
     };
   } catch (error) {
     return reviewFailure(context, error, "Не удалось завершить review change");
@@ -125,7 +109,11 @@ function reviewFailure(
   console.error("[OpenSpec] Ошибка review OpenSpec change", {
     code: errorCode(error),
   });
-  const summary = error instanceof ChangeReviewError ? error.message : fallback;
+  const summary =
+    error instanceof ChangeReviewError ||
+    error instanceof ChangeReviewPublicationError
+      ? error.message
+      : fallback;
   return {
     kind: "halt",
     summary,
