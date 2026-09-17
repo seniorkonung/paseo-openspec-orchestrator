@@ -38,6 +38,8 @@ The plugin is responsible for:
 - resolving active implementation-review findings one at a time, either by
   assigning durable planning ownership or by recording an explicitly accepted
   residual risk;
+- executing unfinished OpenSpec implementation tasks one at a time on stacked
+  task branches, with one committed, pushed, Ready pull request per task;
 - delivering optional workflow notifications through ntfy;
 - delegating interactive workflow steps to Paseo agents through scoped MCP
   tools.
@@ -105,8 +107,9 @@ The main boundaries are:
   `complete_change_publication` to the publication agent, and only
   `complete_change_review` to the review agent. Each finding-resolution agent
   receives only its matching `complete_review_finding` or
-  `complete_implementation_review_finding` tool. A tool from one session is not
-  shared with another session.
+  `complete_implementation_review_finding` tool. Each task agent receives only
+  `complete_change_task`. A tool from one session is not shared with another
+  session.
 - `server/change-artifact-creation.ts` is the boundary around OpenSpec planning
   status, repository path validation, per-artifact Git verification, agent
   sessions, and the `complete_artifact` MCP contract.
@@ -123,6 +126,9 @@ The main boundaries are:
   finding-resolution lifecycle, Git verification, scoped MCP, notification,
   and restart-recovery invariants; the two format-specific adapters own report
   parsing, prompts, tool names, and commit subjects.
+- `server/change-task-execution.ts` is the task-execution boundary around
+  OpenSpec apply instructions, stacked Git branches and GitHub pull requests,
+  recovery, agent sessions, scoped MCP verification, and ntfy state.
 
 The shared Zod schemas are runtime boundaries as well as TypeScript contracts.
 Persisted data, RPC payloads, workflow state, and tool results must be validated
@@ -228,9 +234,8 @@ workflow transition changes the active branch to the child and clears the
 pending session. A restart reconciles a local branch, initial push, completed
 review commit, or already-created PR without duplicating effects.
 
-Finding-resolution steps therefore commit and push on the review branch. Merge
-the review PR into the change branch first; only then merge the change PR into
-`main`. The successful review continues to `resolve-review-findings`. Before reading an
+Finding-resolution steps therefore commit and push on the review branch. The
+successful review continues to `resolve-review-findings`. Before reading an
 agent profile, that step obtains the actual `changeRoot` from OpenSpec and
 parses a tracked ordinary `review.md` as strict UTF-8 format version 1 (up to
 1 MiB and 256 active findings). Active `F<n>` entries come only from the
@@ -276,8 +281,8 @@ GitHub work.
 
 `resolve-implementation-review-findings` then applies the same one-finding-per-
 agent lifecycle to the canonical `implementation-review.md`. The absence of
-that file during initial planning is a normal empty result and completes the
-workflow without reading an agent profile. Once a finding has been selected,
+that file during initial planning is a normal empty result and advances without
+reading an agent profile. Once a finding has been selected,
 deleting the report is an error. A present report must be an ordinary,
 non-symlink file inside the actual OpenSpec `changeRoot`, no larger than 1 MiB,
 valid UTF-8, and fully conformant to OpenSpec Implementation Review format
@@ -308,12 +313,48 @@ HEAD, and the same verified accumulated review-PR publication. Failed checks
 return actionable feedback and keep `ntfy=true`; checkpoint failure restores
 it. Success returns the outcome and verified PR number and URL, disables the
 label, atomically clears the pending session, and either loops for the next
-report-ordered finding or completes the workflow. A restart preserves the
+report-ordered finding or advances to task execution. A restart preserves the
 selected ID and baseline and uses the same idempotent recovery modes.
 
-Implementation code for the selected change remains outside the current
-workflow endpoint; both finding resolvers are restricted to planning artifacts
-and their canonical report under the change root.
+Both successful outcomes of implementation finding resolution enter
+`execute-change-tasks`. The step reads `openspec instructions apply --json` and
+selects the first unfinished task in response order. OpenSpec's positional
+`tasks[].id` remains internal; the human task number is parsed from the start of
+the description, such as `1.1` or `1.1.1`. Missing or duplicate numbers fail
+closed, while `all_done` completes the workflow without creating an agent.
+
+Each iteration treats the active `WorkflowState.branch` as its immutable
+parent. It requires a clean tree, matching local and `origin` parent HEADs, and
+exactly one Ready parent pull request. It then reserves
+`<change-id>-task-<task-number>` and saves the parent and task refs, baseline,
+task-list digests, repository identity, and parent PR in the version 2
+checkpoint. An occupied local or remote branch or any historical PR with that
+head is rejected unless it belongs to the saved pending session.
+
+The step rereads the `High` profile and starts one idle task agent with
+`ntfy=true`. Before prompting it, the orchestrator requires both
+`openspec-apply-change` and `change-summary` in the live command catalog. The
+agent publishes the baseline task branch, invokes `openspec-apply-change` for
+the exact human task number, changes only that task state, creates exactly one
+Conventional Commit, pushes without force or tags, and uses the direct
+`change-summary` output as the body of one Ready pull request into the immediate
+parent branch. No interactive approval is required unless a real blocker or
+ambiguity prevents completion.
+
+The sole `complete_change_task` tool independently verifies the immutable
+parent and its PR, clean tree, task branch ancestry, exactly one commit, the
+single allowed task-state transition, local/remote HEAD equality, and exact
+Ready non-fork PR base, head, OID, title, and body. Failed checks are returned
+to the same agent as actionable feedback. Success disables `ntfy` and atomically
+makes the task branch the active workflow branch before the self-loop selects
+the next task. Recovery reconciles the baseline push, completed commit, remote
+push, or existing PR without repeating implementation.
+
+The resulting pull requests form a stack: the first task targets the review
+branch, and every next task targets the previous task branch. Merge from the
+tip backwards: merge the last task PR into its parent, continue through earlier
+task PRs, then merge the review PR into the change branch, and finally merge the
+change PR into `main`.
 
 ## Extending the workflow
 

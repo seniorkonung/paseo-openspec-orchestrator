@@ -24,6 +24,11 @@ import {
   type PendingArtifactSession,
 } from "../change-artifact-creation.ts";
 import type { MiseToolchainProbe } from "../mise-toolchain.ts";
+import {
+  pendingTaskExecutionSessionSchema,
+  type ChangeTaskExecutionService,
+  type PendingTaskExecutionSession,
+} from "../change-task-execution.ts";
 import type { OrchestratorNotificationRequest } from "../../shared/orchestrator-notifications.ts";
 import {
   orchestratorChangeSchema,
@@ -41,6 +46,7 @@ export interface WorkflowState {
   readonly pendingImplementationFindingResolutionSession:
     | PendingImplementationFindingResolutionSession
     | null;
+  readonly pendingTaskExecutionSession: PendingTaskExecutionSession | null;
 }
 
 export interface WorkflowServices {
@@ -54,6 +60,7 @@ export interface WorkflowServices {
   readonly changeReview: ChangeReviewService;
   readonly changeFindingResolution: ChangeFindingResolutionService;
   readonly implementationFindingResolution: ImplementationFindingResolutionService;
+  readonly changeTaskExecution: ChangeTaskExecutionService;
   /** Не блокирует и не ломает шаг при ошибке доставки уведомления. */
   readonly notify: (notification: OrchestratorNotificationRequest) => Promise<boolean>;
 }
@@ -76,6 +83,7 @@ export const workflowStateSchema = z
       .default(null),
     pendingImplementationFindingResolutionSession:
       pendingImplementationFindingResolutionSessionSchema.nullable().default(null),
+    pendingTaskExecutionSession: pendingTaskExecutionSessionSchema.nullable().default(null),
   })
   .strict()
   .superRefine((state, context) => {
@@ -84,6 +92,7 @@ export const workflowStateSchema = z
       state.pendingReviewSession,
       state.pendingFindingResolutionSession,
       state.pendingImplementationFindingResolutionSession,
+      state.pendingTaskExecutionSession,
     ].filter(Boolean).length;
     if (pendingSessions > 1) {
       context.addIssue({
@@ -149,5 +158,6 @@ export function createInitialWorkflowState(): WorkflowState {
     pendingReviewSession: null,
     pendingFindingResolutionSession: null,
     pendingImplementationFindingResolutionSession: null,
+    pendingTaskExecutionSession: null,
   };
 }

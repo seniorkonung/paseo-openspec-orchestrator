@@ -43,7 +43,8 @@ export async function resolveImplementationReviewFindingsStep(
       );
       if (plan.kind === "no-findings") {
         return {
-          kind: "complete",
+          kind: "continue",
+          next: "execute-change-tasks",
           state: { pendingImplementationFindingResolutionSession: null },
           summary: `В implementation review нет нерешённых findings: ${plan.reviewPath}`,
         };
@@ -116,7 +117,8 @@ export async function resolveImplementationReviewFindingsStep(
 
     if (completed.remainingFindingIds.length === 0) {
       return {
-        kind: "complete",
+        kind: "continue",
+        next: "execute-change-tasks",
         state: { pendingImplementationFindingResolutionSession: null },
         summary: `Обработана последняя implementation finding ${completed.findingId}; обновлён PR #${completed.pullRequest.number}`,
       };

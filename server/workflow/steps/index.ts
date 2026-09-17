@@ -3,6 +3,7 @@ import { checkGitBranch } from "./check-git-branch.ts";
 import { checkGitWorktree } from "./check-git-worktree.ts";
 import { checkMiseToolchain } from "./check-mise-toolchain.ts";
 import { createChangeArtifacts } from "./create-change-artifacts.ts";
+import { executeChangeTasks } from "./execute-change-tasks.ts";
 import { publishChange } from "./publish-change.ts";
 import { reviewChange } from "./review-change.ts";
 import { resolveReviewFindings } from "./resolve-review-findings.ts";
@@ -25,4 +26,5 @@ export const OPEN_SPEC_WORKFLOW_STEPS: readonly WorkflowStepDefinition[] = Objec
   reviewChange,
   resolveReviewFindings,
   resolveImplementationReviewFindings,
+  executeChangeTasks,
 ]);

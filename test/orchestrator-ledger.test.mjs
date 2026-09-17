@@ -61,6 +61,7 @@ test("checkpoint версии 1 неподдерживаем, а версия 2 
         pendingReviewSession: null,
         pendingFindingResolutionSession: null,
         pendingImplementationFindingResolutionSession: null,
+        pendingTaskExecutionSession: null,
       },
     },
   );
@@ -243,6 +244,7 @@ test("ledger сохраняет checkpoint workflow и полностью очи
       pendingReviewSession: null,
       pendingFindingResolutionSession: null,
       pendingImplementationFindingResolutionSession: null,
+      pendingTaskExecutionSession: null,
     },
   });
 

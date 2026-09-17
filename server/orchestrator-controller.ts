@@ -7,6 +7,7 @@ import { createChangePublicationService } from "./change-publication.ts";
 import { createChangeReviewService } from "./change-review.ts";
 import { createChangeFindingResolutionService } from "./change-finding-resolution.ts";
 import { createImplementationFindingResolutionService } from "./implementation-finding-resolution.ts";
+import { createChangeTaskExecutionService } from "./change-task-execution.ts";
 import { OpenSpecOrchestratorEngine } from "./openspec-orchestrator-engine.ts";
 import { inspectMiseToolchain } from "./mise-toolchain.ts";
 import type { OrchestratorEngine } from "./orchestrator-engine.ts";
@@ -164,6 +165,9 @@ export class OrchestratorController {
         createAgent: (options) => workspace.agents.create(options),
       }),
       implementationFindingResolution: createImplementationFindingResolutionService({
+        createAgent: (options) => workspace.agents.create(options),
+      }),
+      changeTaskExecution: createChangeTaskExecutionService({
         createAgent: (options) => workspace.agents.create(options),
       }),
     });
