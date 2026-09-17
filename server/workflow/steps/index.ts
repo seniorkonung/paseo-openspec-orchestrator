@@ -6,6 +6,7 @@ import { createChangeArtifacts } from "./create-change-artifacts.ts";
 import { publishChange } from "./publish-change.ts";
 import { reviewChange } from "./review-change.ts";
 import { resolveReviewFindings } from "./resolve-review-findings.ts";
+import { resolveImplementationReviewFindings } from "./resolve-implementation-review-findings.ts";
 import { selectChange } from "./select-change.ts";
 import type { WorkflowStepDefinition } from "../types.ts";
 
@@ -23,4 +24,5 @@ export const OPEN_SPEC_WORKFLOW_STEPS: readonly WorkflowStepDefinition[] = Objec
   publishChange,
   reviewChange,
   resolveReviewFindings,
+  resolveImplementationReviewFindings,
 ]);

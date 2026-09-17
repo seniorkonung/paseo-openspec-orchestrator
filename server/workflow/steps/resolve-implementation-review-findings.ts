@@ -2,40 +2,40 @@ import {
   describeRequiredAgentProfileProblem,
   resolveRequiredAgentProfile,
 } from "../../agent-profiles.ts";
-import { ChangeFindingResolutionError } from "../../change-finding-resolution.ts";
+import { ImplementationFindingResolutionError } from "../../implementation-finding-resolution.ts";
 import type {
   WorkflowStepContext,
   WorkflowStepDefinition,
   WorkflowStepResult,
 } from "../types.ts";
 
-export async function resolveReviewFindingsStep(
+export async function resolveImplementationReviewFindingsStep(
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
   const { branch, change } = context.state;
   if (!branch || !change) {
     return {
       kind: "halt",
-      summary: "Недостаточно данных для устранения findings",
+      summary: "Недостаточно данных для устранения implementation findings",
       message: "Git-ветка или OpenSpec change не сохранены; запустите workflow заново",
     };
   }
   if (
     context.state.pendingArtifactSession ||
     context.state.pendingReviewSession ||
-    context.state.pendingImplementationFindingResolutionSession
+    context.state.pendingFindingResolutionSession
   ) {
     return {
       kind: "halt",
-      summary: "Другая незавершённая сессия блокирует устранение findings",
-      message: "Завершите предыдущую artifact- или review-сессию и запустите workflow заново",
+      summary: "Другая незавершённая сессия блокирует implementation findings",
+      message: "Завершите предыдущую агентскую сессию и запустите workflow заново",
     };
   }
 
-  let session = context.state.pendingFindingResolutionSession;
+  let session = context.state.pendingImplementationFindingResolutionSession;
   if (!session) {
     try {
-      const plan = await context.services.changeFindingResolution.plan(
+      const plan = await context.services.implementationFindingResolution.plan(
         context.workspaceDirectory,
         change.id,
         branch,
@@ -43,19 +43,22 @@ export async function resolveReviewFindingsStep(
       );
       if (plan.kind === "no-findings") {
         return {
-          kind: "continue",
-          next: "resolve-implementation-review-findings",
-          state: { pendingFindingResolutionSession: null },
-          summary: `В review нет нерешённых findings: ${plan.reviewPath}`,
+          kind: "complete",
+          state: { pendingImplementationFindingResolutionSession: null },
+          summary: `В implementation review нет нерешённых findings: ${plan.reviewPath}`,
         };
       }
       session = plan.session;
       await context.checkpointState({
         ...context.state,
-        pendingFindingResolutionSession: session,
+        pendingImplementationFindingResolutionSession: session,
       });
     } catch (error) {
-      return findingFailure(context, error, "Не удалось определить следующую finding");
+      return findingFailure(
+        context,
+        error,
+        "Не удалось определить следующую implementation finding",
+      );
     }
   }
 
@@ -64,14 +67,15 @@ export async function resolveReviewFindingsStep(
     profiles = await context.services.readAgentProfiles();
   } catch (error) {
     if (context.signal.aborted) throw error;
-    console.error("[OpenSpec] Не удалось перечитать профили перед устранением finding", {
-      code: errorCode(error),
-    });
+    console.error(
+      "[OpenSpec] Не удалось перечитать профили перед устранением implementation finding",
+      { code: errorCode(error) },
+    );
     return {
       kind: "halt",
       summary: "Не удалось перечитать профили агентов",
       message:
-        "Не удалось перечитать профиль High Sandbox перед устранением finding; проверьте Paseo и нажмите «Повторить»",
+        "Не удалось перечитать профиль High Sandbox перед устранением implementation finding; проверьте Paseo и нажмите «Повторить»",
     };
   }
 
@@ -86,7 +90,7 @@ export async function resolveReviewFindingsStep(
   }
 
   try {
-    const completed = await context.services.changeFindingResolution.run({
+    const completed = await context.services.implementationFindingResolution.run({
       workspaceDirectory: context.workspaceDirectory,
       changeId: change.id,
       branch,
@@ -98,34 +102,38 @@ export async function resolveReviewFindingsStep(
           {
             kind: "agent",
             agentId,
-            label: `Finding ${session.findingId}`,
+            label: `Implementation finding ${session.findingId}`,
           },
         ]);
       },
       onFindingResolved: async () => {
         await context.checkpointState({
           ...context.state,
-          pendingFindingResolutionSession: null,
+          pendingImplementationFindingResolutionSession: null,
         });
       },
     });
 
     if (completed.remainingFindingIds.length === 0) {
       return {
-        kind: "continue",
-        next: "resolve-implementation-review-findings",
-        state: { pendingFindingResolutionSession: null },
-        summary: `Устранена последняя finding review: ${completed.findingId}`,
+        kind: "complete",
+        state: { pendingImplementationFindingResolutionSession: null },
+        summary: `Устранена последняя implementation finding: ${completed.findingId}`,
       };
     }
     return {
       kind: "continue",
-      next: "resolve-review-findings",
-      state: { pendingFindingResolutionSession: null },
-      summary: `Устранена finding ${completed.findingId}; осталось ${completed.remainingFindingIds.length}`,
+      next: "resolve-implementation-review-findings",
+      state: { pendingImplementationFindingResolutionSession: null },
+      summary:
+        `Устранена implementation finding ${completed.findingId}; осталось ${completed.remainingFindingIds.length}`,
     };
   } catch (error) {
-    return findingFailure(context, error, "Не удалось завершить устранение finding");
+    return findingFailure(
+      context,
+      error,
+      "Не удалось завершить устранение implementation finding",
+    );
   }
 }
 
@@ -135,10 +143,12 @@ function findingFailure(
   fallback: string,
 ): WorkflowStepResult {
   if (context.signal.aborted) throw error;
-  console.error("[OpenSpec] Ошибка устранения review finding", {
+  console.error("[OpenSpec] Ошибка устранения implementation review finding", {
     code: errorCode(error),
   });
-  const summary = error instanceof ChangeFindingResolutionError ? error.message : fallback;
+  const summary = error instanceof ImplementationFindingResolutionError
+    ? error.message
+    : fallback;
   return {
     kind: "halt",
     summary,
@@ -153,8 +163,8 @@ function errorCode(error: unknown): string {
   return "unknown";
 }
 
-export const resolveReviewFindings: WorkflowStepDefinition = {
-  id: "resolve-review-findings",
-  label: "Устраняю findings OpenSpec review",
-  run: resolveReviewFindingsStep,
+export const resolveImplementationReviewFindings: WorkflowStepDefinition = {
+  id: "resolve-implementation-review-findings",
+  label: "Устраняю findings implementation review",
+  run: resolveImplementationReviewFindingsStep,
 };

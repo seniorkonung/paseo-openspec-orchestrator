@@ -9,6 +9,11 @@ import {
   type PendingFindingResolutionSession,
 } from "../change-finding-resolution.ts";
 import {
+  pendingImplementationFindingResolutionSessionSchema,
+  type ImplementationFindingResolutionService,
+  type PendingImplementationFindingResolutionSession,
+} from "../implementation-finding-resolution.ts";
+import {
   pendingReviewSessionSchema,
   type ChangeReviewService,
   type PendingReviewSession,
@@ -33,6 +38,9 @@ export interface WorkflowState {
   readonly pendingArtifactSession: PendingArtifactSession | null;
   readonly pendingReviewSession: PendingReviewSession | null;
   readonly pendingFindingResolutionSession: PendingFindingResolutionSession | null;
+  readonly pendingImplementationFindingResolutionSession:
+    | PendingImplementationFindingResolutionSession
+    | null;
 }
 
 export interface WorkflowServices {
@@ -45,6 +53,7 @@ export interface WorkflowServices {
   readonly changePublication: ChangePublicationService;
   readonly changeReview: ChangeReviewService;
   readonly changeFindingResolution: ChangeFindingResolutionService;
+  readonly implementationFindingResolution: ImplementationFindingResolutionService;
   /** Не блокирует и не ломает шаг при ошибке доставки уведомления. */
   readonly notify: (notification: OrchestratorNotificationRequest) => Promise<boolean>;
 }
@@ -65,6 +74,8 @@ export const workflowStateSchema = z
     pendingFindingResolutionSession: pendingFindingResolutionSessionSchema
       .nullable()
       .default(null),
+    pendingImplementationFindingResolutionSession:
+      pendingImplementationFindingResolutionSessionSchema.nullable().default(null),
   })
   .strict()
   .superRefine((state, context) => {
@@ -72,6 +83,7 @@ export const workflowStateSchema = z
       state.pendingArtifactSession,
       state.pendingReviewSession,
       state.pendingFindingResolutionSession,
+      state.pendingImplementationFindingResolutionSession,
     ].filter(Boolean).length;
     if (pendingSessions > 1) {
       context.addIssue({
@@ -136,5 +148,6 @@ export function createInitialWorkflowState(): WorkflowState {
     pendingArtifactSession: null,
     pendingReviewSession: null,
     pendingFindingResolutionSession: null,
+    pendingImplementationFindingResolutionSession: null,
   };
 }

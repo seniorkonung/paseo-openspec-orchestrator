@@ -6,6 +6,7 @@ import type { ChangeSelectionService } from "./change-selection.ts";
 import type { ChangePublicationService } from "./change-publication.ts";
 import type { ChangeReviewService } from "./change-review.ts";
 import type { ChangeFindingResolutionService } from "./change-finding-resolution.ts";
+import type { ImplementationFindingResolutionService } from "./implementation-finding-resolution.ts";
 import type { MiseToolchainProbe } from "./mise-toolchain.ts";
 
 export interface OrchestratorEngineContext {
@@ -19,6 +20,7 @@ export interface OrchestratorEngineContext {
   readonly changePublication: ChangePublicationService;
   readonly changeReview: ChangeReviewService;
   readonly changeFindingResolution: ChangeFindingResolutionService;
+  readonly implementationFindingResolution: ImplementationFindingResolutionService;
 }
 
 export interface OrchestratorEngine {

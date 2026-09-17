@@ -35,6 +35,9 @@ The plugin is responsible for:
   when the review needs user input;
 - resolving active review findings one at a time through separate approved,
   committed, and pushed planning-artifact changes until none remain;
+- resolving active implementation-review findings one at a time, either by
+  assigning durable planning ownership or by recording an explicitly accepted
+  residual risk;
 - delivering optional workflow notifications through ntfy;
 - delegating interactive workflow steps to Paseo agents through scoped MCP
   tools.
@@ -101,8 +104,9 @@ The main boundaries are:
   `complete_artifact` to each artifact-creation agent, only
   `complete_change_publication` to the publication agent, and only
   `complete_change_review` to the review agent. Each finding-resolution agent
-  receives only `complete_review_finding`. A tool from one session is not shared
-  with another session.
+  receives only its matching `complete_review_finding` or
+  `complete_implementation_review_finding` tool. A tool from one session is not
+  shared with another session.
 - `server/change-artifact-creation.ts` is the boundary around OpenSpec planning
   status, repository path validation, per-artifact Git verification, agent
   sessions, and the `complete_artifact` MCP contract.
@@ -112,10 +116,12 @@ The main boundaries are:
 - `server/change-review.ts` owns review recovery, safe `review.md` detection,
   the review agent session, and independent verification of the resulting Git
   commit and remote branch.
-- `server/change-review-report.ts` validates the versioned `review.md` contract
-  fail closed, while `server/change-finding-resolution.ts` owns finding
-  selection, the interactive resolution session, Git verification, scoped MCP,
-  and restart recovery.
+- `server/change-review-report.ts` and
+  `server/implementation-review-report.ts` validate their versioned report
+  contracts fail closed. `server/review-finding-resolution.ts` owns the shared
+  finding-resolution lifecycle, Git verification, scoped MCP, notification,
+  and restart-recovery invariants; the two format-specific adapters own report
+  parsing, prompts, tool names, and commit subjects.
 
 The shared Zod schemas are runtime boundaries as well as TypeScript contracts.
 Persisted data, RPC payloads, workflow state, and tool results must be validated
@@ -224,7 +230,8 @@ parses a tracked ordinary `review.md` as strict UTF-8 format version 1 (up to
 1 MiB and 256 active findings). Active `F<n>` entries come only from the
 `Findings` section and retain report order; `AR<n>` entries in `Accepted risks`
 are resolved outcomes. Malformed or unsupported reports fail closed with
-actionable feedback. No active findings completes the workflow immediately.
+actionable feedback. No active findings advances directly to
+`resolve-implementation-review-findings`.
 
 Otherwise the step durably saves the first finding and baseline commit, rereads
 the `High Sandbox` profile, and starts one workspace-local agent with
@@ -247,9 +254,45 @@ failure restores `ntfy=true`. Remaining findings loop back through the same
 step, one agent per finding. Recovery keeps the selected ID and baseline, and a
 valid existing commit is only pushed and acknowledged rather than recreated.
 
+`resolve-implementation-review-findings` then applies the same one-finding-per-
+agent lifecycle to the canonical `implementation-review.md`. The absence of
+that file during initial planning is a normal empty result and completes the
+workflow without reading an agent profile. Once a finding has been selected,
+deleting the report is an error. A present report must be an ordinary,
+non-symlink file inside the actual OpenSpec `changeRoot`, no larger than 1 MiB,
+valid UTF-8, and fully conformant to OpenSpec Implementation Review format
+version 1. The parser returns active `F<n>` entries in report order, excludes
+accepted `AR<n>` risks, and limits active findings to 256.
+
+For the first active finding, the step durably records the change, branch,
+finding ID, and baseline commit, rereads `High Sandbox`, and starts a
+workspace-local agent with `ntfy=true`. The prompt directly requires
+`openspec-review-implementation` for the exact change and finding; the
+orchestrator neither checks nor discovers that skill. The user first approves
+the proposed planning remediation or explicit risk acceptance, then separately
+approves the final result before commit and push. The agent may update only
+planning/tracked-work artifacts and `implementation-review.md`, not
+implementation or test code. Accepted residual risk moves from `F<n>` to
+`AR<n>`.
+
+Each successful iteration creates exactly one
+`docs(openspec): resolve <F-id> implementation finding` commit (or the stable
+length fallback), pushes the current branch to `origin` without force or tags,
+and calls only `complete_implementation_review_finding {}`. The scoped tool
+reparses the report, requires the selected ID to be absent from all active
+findings, and enforces a tracked report, clean tree without untracked files,
+the saved branch, baseline ancestry, one exact-subject commit, report inclusion
+in the diff, change-root path boundaries, and exact local/remote HEAD. Failed
+checks return actionable feedback and keep `ntfy=true`; checkpoint failure
+restores it. Success disables the label, atomically clears the pending session,
+and either loops for the next report-ordered finding or completes the workflow.
+A restart preserves the selected ID and baseline. If the local commit is
+already valid, recovery skips the skill and both approvals and only finishes
+push plus the MCP handshake.
+
 Implementation code for the selected change remains outside the current
-workflow endpoint; finding resolution is restricted to planning artifacts and
-`review.md` under its change root.
+workflow endpoint; both finding resolvers are restricted to planning artifacts
+and their canonical report under the change root.
 
 ## Extending the workflow
 

@@ -8,7 +8,7 @@ Workflow состоит из последовательности независ
 выбор OpenSpec change и рекурсивно создаёт его planning-артефакты до готовности
 к apply, после чего публикует ветку и интеграционный pull request change и
 проводит review всех артефактов выбранного change, а затем по одной устраняет
-активные findings до полного завершения review.
+активные findings обычного и implementation review до полного завершения.
 
 ## Как добавить шаг
 
@@ -292,12 +292,13 @@ version 1. Допускается не больше 256 активных finding
 только записи `F<n>` раздела `Findings` в порядке отчёта; `AR<n>` из
 `Accepted risks` являются уже принятыми рисками. Неизвестный или повреждённый
 формат останавливает этап с feedback, а пустой список findings сразу успешно
-завершает workflow.
+переходит к `resolve-implementation-review-findings`.
 
 Если finding существует, checkpoint до создания агента сохраняет
 `pendingFindingResolutionSession`: change ID, ветку, первый finding ID и
 baseline commit. Одновременно может существовать не больше одной artifact-,
-review- или finding-сессии. Затем этап перечитывает профиль `High Sandbox` и
+review-, обычной finding- или implementation finding-сессии. Затем этап
+перечитывает профиль `High Sandbox` и
 создаёт workspace-local агента с `ntfy=true`. Он не вызывает `agent.commands()`
 и не проверяет наличие skill, а прямо предписывает агенту вызвать
 `openspec-review-change` для точных change ID и finding ID.
@@ -330,6 +331,65 @@ root и совпадение локального и remote HEAD. После у�
 перезапущен с pending-сессией, сохраняются тот же finding ID и baseline. Уже
 корректный локальный commit не создаётся повторно: восстановительный агент лишь
 завершает push и MCP-handshake.
+
+Оба успешных исхода этого этапа — отсутствие findings и устранение последней
+finding — переходят в `resolve-implementation-review-findings`.
+
+## Устранение implementation review findings
+
+`resolve-implementation-review-findings` — второй self-loop цепочки. До чтения
+профиля он выполняет общий Git preflight и разбирает канонический
+`implementation-review.md` внутри фактического `changeRoot`. Отсутствие файла
+разрешено только при первичном planning и означает пустой список findings;
+workflow тогда завершается без создания агента. Существующий файл должен быть
+обычным файлом без symlink, находиться внутри change root, иметь размер не более
+1 MiB и корректную кодировку UTF-8. Repo-owned parser полностью и fail-closed
+валидирует OpenSpec Implementation Review Format version 1, включая assessment,
+review target, coverage, findings, accepted risks и их cross-field инварианты.
+Он допускает не более 256 активных `F<n>`, сохраняет их порядок из `Findings` и
+не считает активными `AR<n>` из `Accepted risks`.
+
+При наличии finding этап сохраняет
+`pendingImplementationFindingResolutionSession` с change ID, веткой, первым ID
+и baseline commit, затем перечитывает профиль `High Sandbox` и создаёт агента в
+текущем Paseo workspace через `workspace.agents.create` без `cwd`. Агент
+получает `ntfy=true`, единственный scoped-инструмент
+`complete_implementation_review_finding {}` и прямое требование вызвать
+`openspec-review-implementation` для точных change ID и finding ID. Оркестратор
+не проверяет каталог или наличие skills.
+
+Пользователь не обязан заранее знать содержание finding. Для продуктового,
+поведенческого или контрактного вопроса агент объясняет влияние на продукт,
+варианты, компромиссы и свою рекомендацию. Для очевидной технической проблемы
+он объясняет исходную ситуацию с нулевого контекста, предлагает конкретную
+корректировку и подтверждает отсутствие изменения продуктового поведения.
+Первое явное разрешение требуется до изменения planning-артефактов либо явного
+принятия остаточного риска. После изменения и повторной проверки агент показывает
+результат и получает отдельное второе разрешение перед commit и push.
+
+Этот этап не изменяет implementation и тесты. Remediation либо создаёт
+устойчивого владельца исправления в planning/tracked work, либо переносит явно
+принятый риск из `F<n>` в `AR<n>`. После второго разрешения агент создаёт ровно
+один commit `docs(openspec): resolve <F-id> implementation finding` (для subject
+длиннее 72 символов используется
+`docs(openspec): resolve implementation review finding`), публикует текущую
+ветку в `origin` без force и tags и без третьего разрешения вызывает MCP.
+
+Инструмент повторно разбирает отчёт тем же parser и возвращает ошибку, пока
+выбранный ID остаётся среди активных findings. Он также требует существующий
+tracked `implementation-review.md`, чистое дерево без untracked-файлов,
+сохранённую ветку, наследование baseline, ровно один commit с точным subject,
+изменение отчёта, отсутствие путей вне change root и точное совпадение локального
+HEAD с `origin/<branch>`. Ошибка содержит feedback для агента, сохраняет
+`ntfy=true` и допускает повторный вызов. Успех выключает `ntfy`, атомарно очищает
+pending-сессию и возвращает commit и оставшиеся ID. Ошибка checkpoint снова
+включает `ntfy`.
+
+При оставшихся findings этап рекурсивно запускает себя, каждый раз выбирая
+первую актуальную finding отчёта и отдельного агента. После перезапуска
+сохраняются исходные finding ID и baseline. Если корректный локальный commit уже
+есть, recovery не повторяет skill и два подтверждения, а завершает только push и
+MCP-handshake. Удаление всего отчёта после выбора finding считается ошибкой.
 
 ## Уведомления
 

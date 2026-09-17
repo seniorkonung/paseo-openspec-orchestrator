@@ -39,6 +39,7 @@ test("checkpoint версии 1 без pending-сессии получает с�
         pendingArtifactSession: null,
         pendingReviewSession: null,
         pendingFindingResolutionSession: null,
+        pendingImplementationFindingResolutionSession: null,
       },
     },
   );
@@ -59,6 +60,28 @@ test("workflow не принимает несколько незавершённ
           changeId: "conflicting-sessions",
           branch: "feature/conflicting-sessions",
           baselineCommit: "b".repeat(40),
+        },
+      }),
+    /одновременно восстанавливать несколько агентских сессий/,
+  );
+  assert.throws(
+    () =>
+      workflowStateSchema.parse({
+        branch: "feature/conflicting-sessions",
+        change: { id: "conflicting-sessions" },
+        pendingArtifactSession: null,
+        pendingReviewSession: null,
+        pendingFindingResolutionSession: {
+          changeId: "conflicting-sessions",
+          branch: "feature/conflicting-sessions",
+          findingId: "F1",
+          baselineCommit: "c".repeat(40),
+        },
+        pendingImplementationFindingResolutionSession: {
+          changeId: "conflicting-sessions",
+          branch: "feature/conflicting-sessions",
+          findingId: "F2",
+          baselineCommit: "d".repeat(40),
         },
       }),
     /одновременно восстанавливать несколько агентских сессий/,
@@ -200,6 +223,7 @@ test("ledger сохраняет checkpoint workflow и полностью очи
       pendingArtifactSession: null,
       pendingReviewSession: null,
       pendingFindingResolutionSession: null,
+      pendingImplementationFindingResolutionSession: null,
     },
   });
 
