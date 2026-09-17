@@ -100,7 +100,6 @@ export type WorkflowStepResult =
     }
   | {
       kind: "halt";
-      state?: Partial<WorkflowState>;
       summary: string;
       message: string;
     };

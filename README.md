@@ -222,7 +222,9 @@ typed step contract from `server/workflow/types.ts`, and is added to the central
 step registry. Any state that must survive a restart must also be represented in
 the workflow state schema. Steps that perform external or mutating work must be
 idempotent or be able to detect an already completed result, because execution
-may resume from a checkpoint or restart after a retry.
+may resume after a process restart. Retry re-enters the failed step from its
+durably persisted checkpoint instead of resetting the workflow to its first
+step; only an explicit state reset or a new run after completion starts over.
 
 ## Development
 

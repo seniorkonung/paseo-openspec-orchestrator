@@ -410,8 +410,6 @@ test("изменения рабочего дерева блокируют workfl
     ["Все обязательные профили агентов доступны", "succeeded"],
     ["Git-ветка: feature/clean-check", "succeeded"],
     ["Рабочее дерево Git содержит изменения", "failed"],
-    ["Все обязательные профили агентов доступны", "succeeded"],
-    ["Git-ветка: feature/clean-check", "succeeded"],
     ["Рабочее дерево Git чистое", "succeeded"],
     ["Mise toolchain доступен", "succeeded"],
     ["OpenSpec change готов к apply: selected-change", "succeeded"],
@@ -964,6 +962,203 @@ test("после перезапуска workflow продолжает работ
   await restoredLedger.close();
 });
 
+test("retry после перезапуска повторяет ошибочный шаг с durable checkpoint", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const workspaceId = "workspace-failed-retry";
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open(workspaceId);
+  const firstEngine = new OpenSpecOrchestratorEngine(ledger, {
+    steps: [
+      {
+        id: "first",
+        label: "Первый шаг",
+        async run() {
+          return {
+            kind: "continue",
+            next: "second",
+            state: { branch: "feature/failed-retry" },
+          };
+        },
+      },
+      {
+        id: "second",
+        label: "Второй шаг",
+        async run() {
+          return {
+            kind: "halt",
+            summary: "Второй шаг остановлен",
+            message: "Исправьте причину и повторите шаг",
+          };
+        },
+      },
+    ],
+  });
+  firstEngine.initialize(workspaceId, engineContext());
+  firstEngine.command(workspaceId, "start");
+  await settleWorkflow();
+
+  assert.equal(ledger.get(workspaceId).lifecycle.status, "failed");
+  assert.equal(ledger.getWorkflowCheckpoint(workspaceId)?.nextStepId, "second");
+  await firstEngine.dispose();
+  await ledger.close();
+
+  const restoredLedger = new OrchestratorLedger({ paseoHome });
+  await restoredLedger.open(workspaceId);
+  const receivedStates = [];
+  const restoredEngine = new OpenSpecOrchestratorEngine(restoredLedger, {
+    steps: [
+      {
+        id: "first",
+        label: "Первый шаг",
+        async run() {
+          throw new Error("Первый шаг не должен быть повторён");
+        },
+      },
+      {
+        id: "second",
+        label: "Второй шаг",
+        async run({ state }) {
+          receivedStates.push(state);
+          return { kind: "complete", summary: "Второй шаг завершён" };
+        },
+      },
+    ],
+  });
+  restoredEngine.initialize(workspaceId, engineContext());
+  assert.equal(restoredLedger.get(workspaceId).lifecycle.status, "failed");
+
+  restoredEngine.command(workspaceId, "retry");
+  await settleWorkflow();
+
+  assert.equal(receivedStates.length, 1);
+  assert.equal(receivedStates[0].branch, "feature/failed-retry");
+  assert.equal(restoredLedger.get(workspaceId).lifecycle.status, "completed");
+  assert.deepEqual(
+    restoredLedger.get(workspaceId).history.map(({ text, outcome }) => [text, outcome]),
+    [
+      ["Первый шаг", "succeeded"],
+      ["Второй шаг остановлен", "failed"],
+      ["Второй шаг завершён", "succeeded"],
+    ],
+  );
+  await restoredEngine.dispose();
+  await restoredLedger.close();
+});
+
+test("первый ошибочный шаг можно повторить после перезапуска", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const workspaceId = "workspace-first-step-retry";
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open(workspaceId);
+  const firstEngine = new OpenSpecOrchestratorEngine(ledger, {
+    steps: [
+      {
+        id: "first",
+        label: "Первый шаг",
+        async run() {
+          return {
+            kind: "halt",
+            summary: "Первый шаг остановлен",
+            message: "Повторите первый шаг",
+          };
+        },
+      },
+    ],
+  });
+  firstEngine.initialize(workspaceId, engineContext());
+  firstEngine.command(workspaceId, "start");
+  await settleWorkflow();
+
+  assert.equal(ledger.getWorkflowCheckpoint(workspaceId)?.nextStepId, "first");
+  await firstEngine.dispose();
+  await ledger.close();
+
+  const restoredLedger = new OrchestratorLedger({ paseoHome });
+  await restoredLedger.open(workspaceId);
+  let restoredRuns = 0;
+  const restoredEngine = new OpenSpecOrchestratorEngine(restoredLedger, {
+    steps: [
+      {
+        id: "first",
+        label: "Первый шаг",
+        async run() {
+          restoredRuns += 1;
+          return { kind: "complete", summary: "Первый шаг завершён" };
+        },
+      },
+    ],
+  });
+  restoredEngine.initialize(workspaceId, engineContext());
+  restoredEngine.command(workspaceId, "retry");
+  await settleWorkflow();
+
+  assert.equal(restoredRuns, 1);
+  assert.equal(restoredLedger.get(workspaceId).lifecycle.status, "completed");
+  await restoredEngine.dispose();
+  await restoredLedger.close();
+});
+
+test("retry передаёт шагу последнее durable-состояние внутри этого шага", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const workspaceId = "workspace-inner-checkpoint-retry";
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open(workspaceId);
+  const receivedSessions = [];
+  const pendingSession = {
+    artifactId: "risk-map",
+    schemaName: "custom-flow",
+    baselineCommit: "a".repeat(40),
+  };
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    steps: [
+      {
+        id: "prepare",
+        label: "Подготавливаю состояние",
+        async run() {
+          return {
+            kind: "continue",
+            next: "unstable",
+            state: { branch: "feature/inner-checkpoint" },
+          };
+        },
+      },
+      {
+        id: "unstable",
+        label: "Выполняю нестабильный шаг",
+        async run({ checkpointState, state }) {
+          receivedSessions.push(state.pendingArtifactSession);
+          if (!state.pendingArtifactSession) {
+            await checkpointState({ ...state, pendingArtifactSession: pendingSession });
+            return {
+              kind: "halt",
+              summary: "Нестабильный шаг остановлен",
+              message: "Повторите нестабильный шаг",
+            };
+          }
+          return { kind: "complete", summary: "Нестабильный шаг завершён" };
+        },
+      },
+    ],
+  });
+  engine.initialize(workspaceId, engineContext());
+  engine.command(workspaceId, "start");
+  await settleWorkflow();
+  engine.command(workspaceId, "retry");
+  await settleWorkflow();
+
+  assert.deepEqual(receivedSessions, [null, pendingSession]);
+  assert.deepEqual(
+    ledger.get(workspaceId).history.map(({ text, outcome }) => [text, outcome]),
+    [
+      ["Подготавливаю состояние", "succeeded"],
+      ["Нестабильный шаг остановлен", "failed"],
+      ["Нестабильный шаг завершён", "succeeded"],
+    ],
+  );
+  await engine.dispose();
+  await ledger.close();
+});
+
 test("сохранённый change после reload проверяется без запуска нового агента", async (context) => {
   const paseoHome = await temporaryHome(context);
   const ledger = new OrchestratorLedger({ paseoHome });
@@ -1289,25 +1484,88 @@ test("после reload review продолжает сохранённую basel
   await ledger.close();
 });
 
-test("ошибка checkpointState откатывает публичный change и внутреннее состояние", async (context) => {
+test("ошибка записи перехода оставляет runtime на предыдущем durable checkpoint", async (context) => {
   context.mock.method(console, "error", () => undefined);
   const paseoHome = await temporaryHome(context);
+  const workspaceId = "workspace-transition-write-error";
+  let rejectTransition = true;
   const ledger = new OrchestratorLedger({
     paseoHome,
     async writer(_path, value) {
-      if (value.change?.id === "selected-change") {
+      if (rejectTransition && value.checkpoint?.nextStepId === "second") {
+        throw new Error("диск временно недоступен");
+      }
+    },
+  });
+  await ledger.open(workspaceId);
+  const firstStepStates = [];
+  let secondStepRuns = 0;
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    steps: [
+      {
+        id: "first",
+        label: "Первый шаг",
+        async run({ state }) {
+          firstStepStates.push(state.branch);
+          return {
+            kind: "continue",
+            next: "second",
+            state: { branch: "feature/transition-write" },
+            summary: "Первый шаг готов",
+          };
+        },
+      },
+      {
+        id: "second",
+        label: "Второй шаг",
+        async run() {
+          secondStepRuns += 1;
+          return { kind: "complete", summary: "Второй шаг завершён" };
+        },
+      },
+    ],
+  });
+  engine.initialize(workspaceId, engineContext());
+
+  engine.command(workspaceId, "start");
+  await settleWorkflow();
+  assert.equal(ledger.get(workspaceId).lifecycle.status, "failed");
+  assert.equal(ledger.getWorkflowCheckpoint(workspaceId)?.nextStepId, "first");
+  assert.deepEqual(firstStepStates, [null]);
+  assert.equal(secondStepRuns, 0);
+
+  rejectTransition = false;
+  engine.command(workspaceId, "retry");
+  await settleWorkflow();
+  assert.equal(ledger.get(workspaceId).lifecycle.status, "completed");
+  assert.deepEqual(firstStepStates, [null, null]);
+  assert.equal(secondStepRuns, 1);
+  await engine.dispose();
+  await ledger.close();
+});
+
+test("ошибка checkpointState откатывает публичный change и retry к durable-состоянию", async (context) => {
+  context.mock.method(console, "error", () => undefined);
+  const paseoHome = await temporaryHome(context);
+  let rejectCheckpoint = true;
+  const ledger = new OrchestratorLedger({
+    paseoHome,
+    async writer(_path, value) {
+      if (rejectCheckpoint && value.checkpoint?.state.change?.id === "selected-change") {
         throw new Error("диск временно недоступен");
       }
     },
   });
   await ledger.open("workspace-selection-write-error");
   let persistenceRejected = false;
+  const receivedChanges = [];
   const engine = new OpenSpecOrchestratorEngine(ledger, {
     steps: [
       {
         id: "persist-change",
         label: "Сохраняю change",
         async run({ checkpointState, state }) {
+          receivedChanges.push(state.change);
           try {
             await checkpointState({
               ...state,
@@ -1320,12 +1578,13 @@ test("ошибка checkpointState откатывает публичный chang
             });
           } catch {
             persistenceRejected = true;
+            return {
+              kind: "halt",
+              summary: "Change не сохранён",
+              message: "Повторите сохранение",
+            };
           }
-          return {
-            kind: "halt",
-            summary: "Change не сохранён",
-            message: "Повторите сохранение",
-          };
+          return { kind: "complete", summary: "Change сохранён" };
         },
       },
     ],
@@ -1337,7 +1596,18 @@ test("ошибка checkpointState откатывает публичный chang
 
   assert.equal(persistenceRejected, true);
   assert.equal(ledger.get("workspace-selection-write-error").change, null);
-  assert.equal(ledger.getWorkflowCheckpoint("workspace-selection-write-error"), null);
+  assert.equal(
+    ledger.getWorkflowCheckpoint("workspace-selection-write-error")?.nextStepId,
+    "persist-change",
+  );
+
+  rejectCheckpoint = false;
+  engine.command("workspace-selection-write-error", "retry");
+  await settleWorkflow();
+
+  assert.deepEqual(receivedChanges, [null, null]);
+  assert.equal(ledger.get("workspace-selection-write-error").lifecycle.status, "completed");
+  assert.equal(ledger.get("workspace-selection-write-error").change?.id, "selected-change");
   await engine.dispose();
   await ledger.close();
 });
@@ -1382,6 +1652,45 @@ test("clear отменяет активный шаг и удаляет исто�
   await ledger.close();
 });
 
+test("после завершения и clear новый запуск начинается с первого шага", async (context) => {
+  const paseoHome = await temporaryHome(context);
+  const workspaceId = "workspace-fresh-start";
+  const ledger = new OrchestratorLedger({ paseoHome });
+  await ledger.open(workspaceId);
+  let runs = 0;
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    steps: [
+      {
+        id: "first",
+        label: "Первый шаг",
+        async run() {
+          runs += 1;
+          return { kind: "complete", summary: `Запуск ${runs}` };
+        },
+      },
+    ],
+  });
+  engine.initialize(workspaceId, engineContext());
+
+  engine.command(workspaceId, "start");
+  await settleWorkflow();
+  engine.command(workspaceId, "start");
+  await settleWorkflow();
+  assert.equal(runs, 2);
+  assert.deepEqual(
+    ledger.get(workspaceId).history.map(({ text }) => text),
+    ["Запуск 1", "Запуск 2"],
+  );
+
+  engine.command(workspaceId, "clear");
+  engine.command(workspaceId, "start");
+  await settleWorkflow();
+  assert.equal(runs, 3);
+  assert.deepEqual(ledger.get(workspaceId).history.map(({ text }) => text), ["Запуск 3"]);
+  await engine.dispose();
+  await ledger.close();
+});
+
 test("неизвестный переход останавливает workflow с понятной ошибкой конфигурации", async (context) => {
   const paseoHome = await temporaryHome(context);
   const ledger = new OrchestratorLedger({ paseoHome });
@@ -1418,6 +1727,10 @@ test("engine отменяет активный шаг через AbortSignal п�
   const ledger = new OrchestratorLedger({ paseoHome });
   await ledger.open("workspace-cancellation");
   let stepSignal;
+  let markStepStarted;
+  const stepStarted = new Promise((resolve) => {
+    markStepStarted = resolve;
+  });
   const engine = new OpenSpecOrchestratorEngine(ledger, {
     steps: [
       {
@@ -1425,6 +1738,7 @@ test("engine отменяет активный шаг через AbortSignal п�
         label: "Долгий шаг",
         run: async ({ signal }) => {
           stepSignal = signal;
+          markStepStarted();
           await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
           return { kind: "complete", summary: "Шаг отменён" };
         },
@@ -1434,7 +1748,7 @@ test("engine отменяет активный шаг через AbortSignal п�
   engine.initialize("workspace-cancellation", engineContext());
 
   engine.command("workspace-cancellation", "start");
-  await nextEventLoop();
+  await stepStarted;
   assert.equal(stepSignal.aborted, false);
 
   await engine.dispose();
@@ -1505,7 +1819,6 @@ test("на main ветке workflow останавливается, а retry п�
   assert.deepEqual(snapshot.history.map(({ text, outcome }) => [text, outcome]), [
     ["Все обязательные профили агентов доступны", "succeeded"],
     ["Git-ветка main — запуск запрещён", "failed"],
-    ["Все обязательные профили агентов доступны", "succeeded"],
     ["Git-ветка: feature/after-switch", "succeeded"],
     ["Рабочее дерево Git чистое", "succeeded"],
     ["Mise toolchain доступен", "succeeded"],

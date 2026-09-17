@@ -28,7 +28,9 @@ import {
 } from "./orchestrator-reporter.ts";
 import {
   createInitialWorkflowState,
+  workflowCheckpointSchema,
   workflowStateSchema,
+  type WorkflowCheckpoint,
   type WorkflowState,
   type WorkflowStepDefinition,
   type WorkflowStepId,
@@ -59,7 +61,7 @@ interface WorkspaceRuntime {
   active: boolean;
   currentStepId: WorkflowStepId | null;
   state: WorkflowState;
-  resumeFromCheckpoint: boolean;
+  durableCheckpoint: WorkflowCheckpoint | null;
   currentHandle: ActionHandle | null;
   abortController: AbortController | null;
 }
@@ -69,6 +71,18 @@ const MAX_STEP_LABEL_LENGTH = ORCHESTRATOR_LIMITS.actionText;
 
 function isActiveLifecycleStatus(status: string): boolean {
   return (ACTIVE_LIFECYCLE_STATUSES as readonly string[]).includes(status);
+}
+
+function cloneCheckpoint(checkpoint: WorkflowCheckpoint | null): WorkflowCheckpoint | null {
+  return checkpoint ? workflowCheckpointSchema.parse(checkpoint) : null;
+}
+
+function checkpointFor(stepId: WorkflowStepId, state: WorkflowState): WorkflowCheckpoint {
+  return workflowCheckpointSchema.parse({
+    version: 1,
+    nextStepId: stepId,
+    state,
+  });
 }
 
 export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
@@ -137,7 +151,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       active: false,
       currentStepId: checkpoint?.nextStepId ?? null,
       state: checkpoint?.state ?? createInitialWorkflowState(),
-      resumeFromCheckpoint: checkpoint !== null,
+      durableCheckpoint: cloneCheckpoint(checkpoint),
       currentHandle: null,
       abortController: null,
     });
@@ -150,10 +164,10 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
 
     switch (command) {
       case "start":
-        this.#start(workspaceId, runtime, reporter, false);
+        this.#beginRun(workspaceId, runtime, reporter);
         break;
       case "retry":
-        this.#start(workspaceId, runtime, reporter, true);
+        this.#beginRun(workspaceId, runtime, reporter);
         break;
       case "pause":
         runtime.pauseRequested = true;
@@ -214,18 +228,19 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
     return this.#disposePromise;
   }
 
-  #start(
+  #beginRun(
     workspaceId: string,
     runtime: WorkspaceRuntime,
     reporter: OrchestratorReporter,
-    restart: boolean,
   ): void {
     runtime.generation += 1;
     runtime.pauseRequested = false;
     runtime.active = true;
-    const useCheckpoint = !restart && runtime.resumeFromCheckpoint;
-    runtime.resumeFromCheckpoint = false;
-    if (!useCheckpoint) {
+    const durableCheckpoint = cloneCheckpoint(runtime.durableCheckpoint);
+    if (durableCheckpoint) {
+      runtime.currentStepId = durableCheckpoint.nextStepId;
+      runtime.state = durableCheckpoint.state;
+    } else {
       runtime.currentStepId = this.#startStepId;
       runtime.state = createInitialWorkflowState();
       reporter.setChange(null);
@@ -235,20 +250,26 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
     runtime.abortController = new AbortController();
     reporter.setLifecycle({ status: "starting", availableCommand: null });
     const generation = runtime.generation;
-    const checkpointReset = restart
-      ? Promise.resolve().then(() => this.#ledger.saveWorkflowCheckpoint(workspaceId, null))
-      : Promise.resolve();
+    const prepareCheckpoint = durableCheckpoint
+      ? Promise.resolve(true)
+      : this.#saveCheckpoint(
+          workspaceId,
+          runtime,
+          reporter,
+          generation,
+          checkpointFor(this.#startStepId, runtime.state),
+        );
 
     queueMicrotask(() => {
-      void checkpointReset
-        .then(() => {
-          if (this.#disposed || runtime.generation !== generation) return;
+      void prepareCheckpoint
+        .then((prepared) => {
+          if (!prepared || this.#disposed || runtime.generation !== generation) return;
           reporter.setLifecycle({ status: "running", availableCommand: "pause" });
           this.#trackRun(this.#run(workspaceId, runtime, reporter, generation));
         })
         .catch((error) => {
           if (this.#disposed || runtime.generation !== generation) return;
-          console.error("[OpenSpec] Не удалось подготовить повторный запуск workflow", {
+          console.error("[OpenSpec] Не удалось подготовить запуск workflow", {
             workspaceId,
             error,
           });
@@ -256,7 +277,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
             workspaceId,
             reporter,
             runtime,
-            "Не удалось очистить предыдущий checkpoint; проверьте диск и нажмите «Повторить»",
+            "Не удалось подготовить состояние workflow; проверьте диск и нажмите «Повторить»",
           );
         });
     });
@@ -349,22 +370,27 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
         });
         if (this.#disposed || runtime.generation !== generation) return;
 
-        runtime.state = { ...runtime.state, ...(result.state ?? {}) };
         handle.update({ text: result.summary ?? step.label });
 
         switch (result.kind) {
           case "halt":
             this.#fail(workspaceId, reporter, runtime, result.message);
             return;
-          case "complete":
-            handle.succeed();
-            runtime.currentHandle = null;
-            runtime.currentStepId = null;
+          case "complete": {
+            const nextState = workflowStateSchema.parse({
+              ...runtime.state,
+              ...(result.state ?? {}),
+            });
             if (!(await this.#saveCheckpoint(workspaceId, runtime, reporter, generation, null))) return;
             if (this.#disposed || runtime.generation !== generation) return;
+            runtime.state = nextState;
+            runtime.currentStepId = null;
+            handle.succeed();
+            runtime.currentHandle = null;
             this.#complete(workspaceId, reporter, runtime);
             return;
-          case "continue":
+          }
+          case "continue": {
             if (!this.#steps.has(result.next)) {
               this.#fail(
                 workspaceId,
@@ -374,24 +400,32 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
               );
               return;
             }
-            handle.succeed();
-            runtime.currentHandle = null;
-            runtime.currentStepId = result.next;
+            const nextState = workflowStateSchema.parse({
+              ...runtime.state,
+              ...(result.state ?? {}),
+            });
             if (
-              !(await this.#saveCheckpoint(workspaceId, runtime, reporter, generation, {
-                version: 1,
-                nextStepId: result.next,
-                state: runtime.state,
-              }))
+              !(await this.#saveCheckpoint(
+                workspaceId,
+                runtime,
+                reporter,
+                generation,
+                checkpointFor(result.next, nextState),
+              ))
             ) {
               return;
             }
             if (this.#disposed || runtime.generation !== generation) return;
+            runtime.state = nextState;
+            runtime.currentStepId = result.next;
+            handle.succeed();
+            runtime.currentHandle = null;
             if (runtime.pauseRequested) {
               this.#reachPause(reporter, runtime);
               return;
             }
             break;
+          }
         }
       } catch (error) {
         if (this.#disposed || runtime.generation !== generation) return;
@@ -421,7 +455,6 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
   ): void {
     runtime.active = false;
     runtime.abortController = null;
-    runtime.resumeFromCheckpoint = false;
     reporter.setLifecycle({ status: "completed", availableCommand: "start" });
     this.#notify(
       workspaceId,
@@ -475,7 +508,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
     }
     runtime.currentStepId = null;
     runtime.state = createInitialWorkflowState();
-    runtime.resumeFromCheckpoint = false;
+    runtime.durableCheckpoint = null;
     this.#ledger.clear(workspaceId);
   }
 
@@ -484,15 +517,10 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
     runtime: WorkspaceRuntime,
     reporter: OrchestratorReporter,
     generation: number,
-    checkpoint: {
-      version: 1;
-      nextStepId: WorkflowStepId;
-      state: WorkflowState;
-    } | null,
+    checkpoint: WorkflowCheckpoint | null,
   ): Promise<boolean> {
     try {
-      await this.#ledger.saveWorkflowCheckpoint(workspaceId, checkpoint);
-      return true;
+      return await this.#writeCheckpoint(workspaceId, runtime, generation, checkpoint);
     } catch (error) {
       if (this.#disposed || runtime.generation !== generation) return false;
       console.error("[OpenSpec] Не удалось сохранить checkpoint workflow", {
@@ -507,6 +535,24 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       );
       return false;
     }
+  }
+
+  async #writeCheckpoint(
+    workspaceId: string,
+    runtime: WorkspaceRuntime,
+    generation: number,
+    checkpoint: WorkflowCheckpoint | null,
+  ): Promise<boolean> {
+    const previousCheckpoint = cloneCheckpoint(runtime.durableCheckpoint);
+    try {
+      await this.#ledger.saveWorkflowCheckpoint(workspaceId, checkpoint);
+    } catch (error) {
+      this.#ledger.setWorkflowCheckpoint(workspaceId, previousCheckpoint);
+      throw error;
+    }
+    if (this.#disposed || runtime.generation !== generation) return false;
+    runtime.durableCheckpoint = cloneCheckpoint(checkpoint);
+    return true;
   }
 
   async #checkpointState(
@@ -526,25 +572,20 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       throw new Error("Workflow больше не принимает обновление состояния");
     }
 
-    const previousState = runtime.state;
     const previousChange = this.#ledger.get(workspaceId).change;
-    const previousCheckpoint = this.#ledger.getWorkflowCheckpoint(workspaceId);
     const nextState = workflowStateSchema.parse(requestedState);
     const publicChangeChanged = previousChange?.id !== nextState.change?.id;
+    const saved = await this.#writeCheckpoint(
+      workspaceId,
+      runtime,
+      generation,
+      checkpointFor(stepId, nextState),
+    );
+    if (!saved) {
+      throw new Error("Workflow больше не принимает обновление состояния");
+    }
     runtime.state = nextState;
     if (publicChangeChanged) reporter.setChange(nextState.change);
-    try {
-      await this.#ledger.saveWorkflowCheckpoint(workspaceId, {
-        version: 1,
-        nextStepId: stepId,
-        state: nextState,
-      });
-    } catch (error) {
-      runtime.state = previousState;
-      if (publicChangeChanged) reporter.setChange(previousChange);
-      this.#ledger.setWorkflowCheckpoint(workspaceId, previousCheckpoint);
-      throw error;
-    }
   }
 
   #trackRun(run: Promise<void>): void {
