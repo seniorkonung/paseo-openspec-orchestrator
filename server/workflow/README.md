@@ -101,12 +101,14 @@ Paseo не принимает `profileId` в `agents.create`: шаг разво�
 
 ## Выбор change
 
-Терминальный шаг `select-change` создаёт агента `Medium Sandbox` с меткой
-`ntfy=true` и добавляет ссылку на него в текущее действие. Агент перечисляет все
-активные repo-local changes, требует явный выбор пользователя либо создаёт только
-scaffold нового change через `openspec-new-change`. Новый scaffold должен быть
-зафиксирован отдельным Git-коммитом; создание proposal, specs, design, tasks и
-других артефактов на этом этапе запрещено.
+Терминальный шаг `select-change` создаёт агента `Medium Sandbox` в текущем Paseo
+workspace через `workspace.agents.create`, устанавливает метку `ntfy=true` и
+добавляет ссылку на него в текущее действие. Глобальный `agents.create` для этого
+не подходит: он создаёт новый workspace для переданного `cwd`. Агент перечисляет
+все активные repo-local changes, требует явный выбор пользователя либо создаёт
+только scaffold нового change через `openspec-new-change`. Новый scaffold должен
+быть зафиксирован отдельным Git-коммитом; создание proposal, specs, design, tasks
+и других артефактов на этом этапе запрещено.
 
 Агент получает единственный orchestrator-owned MCP-инструмент `set_change` через
 `OrchestratorMcpToolHost`. Инструмент проверяет change командой `openspec status`,

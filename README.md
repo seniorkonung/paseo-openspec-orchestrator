@@ -100,12 +100,13 @@ and a clean worktree. Each required profile must explicitly define a provider,
 model, mode, and thinking option; the orchestrator does not discover or infer
 missing launch settings.
 
-After the checks, a `Medium Sandbox` agent lists the active repo-local OpenSpec
-changes and asks the user to select one or create a new scaffold. A newly
-created change must be committed before the agent can select it. The scoped
-`set_change` tool validates the OpenSpec location, repository cleanliness, and
-presence in `HEAD` before recording the choice. Creating planning artifacts or
-performing implementation work is outside this step.
+After the checks, a `Medium Sandbox` agent is added to the same Paseo workspace,
+where it lists the active repo-local OpenSpec changes and asks the user to select
+one or create a new scaffold. A newly created change must be committed before
+the agent can select it. The scoped `set_change` tool validates the OpenSpec
+location, repository cleanliness, and presence in `HEAD` before recording the
+choice. Creating planning artifacts or performing implementation work is
+outside this step.
 
 ## Extending the workflow
 

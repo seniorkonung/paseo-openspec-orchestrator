@@ -139,7 +139,10 @@ export class OrchestratorController {
       // Источник: https://paseo.sh/docs/sdk/reference#clientconfig
       readAgentProfiles: async () => (await paseo.config.get()).config.agentProfiles ?? [],
       changeSelection: createChangeSelectionService({
-        createAgent: (options) => paseo.agents.create(options),
+        // Глобальный paseo.agents.create создаёт новый workspace для cwd.
+        // Workspace-handle сохраняет размещение агента в текущем окружении.
+        // Источник: https://paseo.sh/docs/sdk/workspaces#start-an-agent-in-a-workspace
+        createAgent: (options) => workspace.agents.create(options),
       }),
     });
   }

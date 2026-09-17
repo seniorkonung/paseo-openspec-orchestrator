@@ -19,10 +19,11 @@ import {
 } from "./paseo-agent-labels.ts";
 
 type PaseoApi = PluginHandlerContext["paseo"];
-type PaseoAgent = Awaited<ReturnType<PaseoApi["agents"]["create"]>>;
+type PaseoWorkspace = ReturnType<PaseoApi["workspaces"]["ref"]>;
+type PaseoAgent = Awaited<ReturnType<PaseoWorkspace["agents"]["create"]>>;
 
 export type PaseoAgentCreator = (
-  options: Parameters<PaseoApi["agents"]["create"]>[0],
+  options: Parameters<PaseoWorkspace["agents"]["create"]>[0],
 ) => Promise<PaseoAgent>;
 
 export interface ChangeSelectionRequest {
@@ -211,7 +212,6 @@ export function createChangeSelectionService(
         });
         agent = await options.createAgent({
           config,
-          cwd: request.workspaceDirectory,
           title: AGENT_TITLE,
           prompt: CHANGE_SELECTION_PROMPT,
           labels: { ntfy: "true" },

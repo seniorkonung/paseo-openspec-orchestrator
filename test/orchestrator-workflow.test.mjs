@@ -939,7 +939,7 @@ test("после reload незавершённая проверка ветки �
   await restoredLedger.close();
 });
 
-test("контроллер передаёт engine директорию и названия проекта с workspace", async (context) => {
+test("контроллер передаёт контекст и создаёт агента в том же workspace", async (context) => {
   const paseoHome = await temporaryHome(context);
   const ledger = new OrchestratorLedger({ paseoHome });
   const calls = [];
@@ -966,7 +966,25 @@ test("контроллер передаёт engine директорию и на�
   };
   let configuredProfiles = requiredAgentProfiles();
   let configReads = 0;
+  let globalAgentCreates = 0;
+  const workspaceAgentCreates = [];
+  const workspace = {
+    directory: "/tmp/workspace-1",
+    refresh: async () => workspaceSnapshot,
+    agents: {
+      create: async (options) => {
+        workspaceAgentCreates.push(options);
+        throw new Error("workspace agent creator called");
+      },
+    },
+  };
   const paseo = {
+    agents: {
+      create: async () => {
+        globalAgentCreates += 1;
+        throw new Error("global agent creator must not be called");
+      },
+    },
     config: {
       get: async () => {
         configReads += 1;
@@ -974,10 +992,7 @@ test("контроллер передаёт engine директорию и на�
       },
     },
     workspaces: {
-      ref: () => ({
-        directory: "/tmp/workspace-1",
-        refresh: async () => workspaceSnapshot,
-      }),
+      ref: () => workspace,
     },
   };
 
@@ -1009,6 +1024,23 @@ test("контроллер передаёт engine директорию и на�
     projectName: "Платёжный сервис",
     workspaceName: "Ручное название после переименования",
   });
+
+  const mediumSandbox = requiredAgentProfiles().find(
+    ({ name }) => name === "Medium Sandbox",
+  );
+  await assert.rejects(
+    initializedContext.changeSelection.select({
+      workspaceDirectory: "/tmp/workspace-1",
+      profile: mediumSandbox,
+      signal: new AbortController().signal,
+      onAgentCreated() {},
+      async onChangeSelected() {},
+    }),
+    /workspace agent creator called/,
+  );
+  assert.equal(globalAgentCreates, 0);
+  assert.equal(workspaceAgentCreates.length, 1);
+  assert.equal("cwd" in workspaceAgentCreates[0], false);
 
   const cleared = await controller.control("workspace-1", initial.revision, "clear", paseo);
   assert.equal(cleared.status, "accepted");

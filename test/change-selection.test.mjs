@@ -105,6 +105,7 @@ test("агент получает Medium Sandbox, ntfy и единственны
   assert.deepEqual(created[0].labels, { ntfy: "true" });
   assert.equal(created[0].title, "Выбор OpenSpec change");
   assert.equal(created[0].prompt, CHANGE_SELECTION_PROMPT);
+  assert.equal("cwd" in created[0], false);
   assert.deepEqual(links, ["agent-selection"]);
   assert.deepEqual(persisted, [{ id: "selected-change" }]);
   assert.deepEqual(labels, [["agent-selection", false]]);
