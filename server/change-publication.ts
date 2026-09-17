@@ -355,17 +355,10 @@ export function createChangePublicationService(
         request.onAgentCreated(agent.id);
         agentReady.resolve(agent);
 
-        const turnFinished = agent.waitForFinish();
-        const outcome = await Promise.race([
-          completion.promise.then((result) => ({ kind: "completed" as const, result })),
-          turnFinished.then(() => ({ kind: "agent-finished" as const })),
-        ]);
-        if (outcome.kind === "agent-finished") {
-          throw new ChangePublicationError(
-            "Агент завершил работу без подтверждения публикации change",
-          );
-        }
-
+        const publication = await completion.promise;
+        // Completion разрешается внутри MCP handler. Даём transport закончить
+        // отправку ответа до возможного мгновенного waitForFinish и закрытия scope.
+        await new Promise<void>((resolveDrain) => setImmediate(resolveDrain));
         try {
           await agent.waitForFinish(agentDrainTimeoutMs);
         } catch (error) {
@@ -374,7 +367,7 @@ export function createChangePublicationService(
             code: errorCode(error),
           });
         }
-        return outcome.result;
+        return publication;
       } finally {
         request.signal.removeEventListener("abort", abortPublication);
         if (agent && !notificationsDisabled) {

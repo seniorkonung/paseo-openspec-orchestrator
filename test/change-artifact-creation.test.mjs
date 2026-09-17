@@ -345,6 +345,7 @@ test("Ultra Sandbox создаёт один артефакт и завершае
   const toolResults = [];
   const completedPlans = [];
   let completionAttempts = 0;
+  let drainCalls = 0;
   let toolFlow;
   const service = createChangeArtifactCreationService({
     command,
@@ -371,6 +372,8 @@ test("Ultra Sandbox создаёт один артефакт и завершае
               toolResults.push(
                 await client.callTool({ name: "complete_artifact", arguments: {} }),
               );
+              assert.equal(drainCalls, 0);
+              assert.deepEqual(labels, []);
 
               await writeFile(fixture.riskPath, "# Карта рисков\n");
               toolResults.push(
@@ -400,6 +403,7 @@ test("Ultra Sandbox создаёт один артефакт и завершае
           })();
         },
         async waitForFinish() {
+          drainCalls += 1;
           await toolFlow;
           return { status: "idle", lastMessage: null };
         },
@@ -448,6 +452,7 @@ test("Ultra Sandbox создаёт один артефакт и завершае
   assert.equal(toolResults.slice(2).filter(({ isError }) => isError === true).length, 1);
   assert.equal(toolResults.slice(2).filter(({ isError }) => isError !== true).length, 2);
   assert.equal(completionAttempts, 2);
+  assert.equal(drainCalls, 1);
   assert.deepEqual(completedPlans, [
     { kind: "complete", schemaName: "custom-assurance" },
   ]);

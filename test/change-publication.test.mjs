@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import {
-  ChangePublicationError,
   changePublicationPrompt,
   createChangePublicationService,
 } from "../server/change-publication.ts";
@@ -76,6 +75,7 @@ async function connectClient(url) {
 }
 
 function startPublicationAttempt(command, completionArguments = { pullRequestNumber: 42, title, body }) {
+  const controller = new AbortController();
   let startTool;
   const toolStarted = new Promise((resolve) => {
     startTool = resolve;
@@ -113,7 +113,7 @@ function startPublicationAttempt(command, completionArguments = { pullRequestNum
     changeId,
     branch,
     profile: profile(),
-    signal: new AbortController().signal,
+    signal: controller.signal,
     onAgentCreated() {},
   });
   return {
@@ -121,6 +121,10 @@ function startPublicationAttempt(command, completionArguments = { pullRequestNum
     async toolResult() {
       await toolStarted;
       return toolFlow;
+    },
+    async cancel() {
+      controller.abort();
+      await assert.rejects(publication, { name: "AbortError" });
     },
   };
 }
@@ -142,6 +146,7 @@ function publicationCommand({
   let listCalls = 0;
   let statusCalls = 0;
   let headCalls = 0;
+  let dirtyCompletionChecks = dirtyAtCompletion ? 1 : 0;
   const calls = [];
   const command = async (executable, arguments_, options) => {
     calls.push({ executable, arguments: [...arguments_], options });
@@ -168,11 +173,10 @@ function publicationCommand({
     }
     if (key === "git status --porcelain=v1 --untracked-files=all") {
       statusCalls += 1;
+      const dirtyAfterAgent = statusCalls > 1 && dirtyCompletionChecks > 0;
+      if (dirtyAfterAgent) dirtyCompletionChecks -= 1;
       return {
-        stdout:
-          dirtyInitially || (dirtyAtCompletion && statusCalls > 1)
-            ? "?? unexpected.txt\n"
-            : "",
+        stdout: dirtyInitially || dirtyAfterAgent ? "?? unexpected.txt\n" : "",
         stderr: "",
       };
     }
@@ -411,9 +415,10 @@ test("останавливается до агента при грязном р�
   assert.equal(created, false);
 });
 
-test("не подтверждает PR, если после работы агента дерево стало грязным", async () => {
+test("возвращает feedback для грязного дерева и принимает повторный MCP-вызов", async () => {
   const { command } = publicationCommand({ dirtyAtCompletion: true });
   const toolResults = [];
+  const labels = [];
   let toolFlow;
   const service = createChangePublicationService({
     command,
@@ -422,6 +427,12 @@ test("не подтверждает PR, если после работы аге�
       toolFlow = (async () => {
         const client = await connectClient(url);
         try {
+          toolResults.push(
+            await client.callTool({
+              name: "complete_change_publication",
+              arguments: { pullRequestNumber: 42, title, body },
+            }),
+          );
           toolResults.push(
             await client.callTool({
               name: "complete_change_publication",
@@ -440,23 +451,24 @@ test("не подтверждает PR, если после работы аге�
         },
       };
     },
-    updateNotificationLabel: async () => {},
+    updateNotificationLabel: async (agentId, enabled) => labels.push([agentId, enabled]),
     logger: { error() {}, warn() {} },
   });
 
-  await assert.rejects(
-    service.publish({
-      workspaceDirectory: "/workspace/project",
-      changeId,
-      branch,
-      profile: profile(),
-      signal: new AbortController().signal,
-      onAgentCreated() {},
-    }),
-    ChangePublicationError,
-  );
+  const publication = await service.publish({
+    workspaceDirectory: "/workspace/project",
+    changeId,
+    branch,
+    profile: profile(),
+    signal: new AbortController().signal,
+    onAgentCreated() {},
+  });
+
+  assert.equal(publication.number, 42);
   assert.equal(toolResults[0].isError, true);
   assert.match(firstText(toolResults[0]), /незакоммиченные или неотслеживаемые/);
+  assert.equal(toolResults[1].isError, undefined);
+  assert.deepEqual(labels, [["agent-dirty", false]]);
 });
 
 test("не подтверждает публикацию, если агент изменил локальный HEAD", async () => {
@@ -468,20 +480,20 @@ test("не подтверждает публикацию, если агент и
   });
   const attempt = startPublicationAttempt(command);
 
-  await assert.rejects(attempt.publication, ChangePublicationError);
   const toolResult = await attempt.toolResult();
   assert.equal(toolResult.isError, true);
   assert.match(firstText(toolResult), /HEAD изменился/);
+  await attempt.cancel();
 });
 
 test("не подтверждает публикацию при несовпадении remote SHA", async () => {
   const { command } = publicationCommand({ remoteHead: "c".repeat(40) });
   const attempt = startPublicationAttempt(command);
 
-  await assert.rejects(attempt.publication, ChangePublicationError);
   const toolResult = await attempt.toolResult();
   assert.equal(toolResult.isError, true);
   assert.match(firstText(toolResult), /origin не содержит текущий HEAD/);
+  await attempt.cancel();
 });
 
 test("не подтверждает PR с отличающейся base-веткой", async () => {
@@ -490,10 +502,10 @@ test("не подтверждает PR с отличающейся base-ветк
   });
   const attempt = startPublicationAttempt(command);
 
-  await assert.rejects(attempt.publication, ChangePublicationError);
   const toolResult = await attempt.toolResult();
   assert.equal(toolResult.isError, true);
   assert.match(firstText(toolResult), /направлен в ветку main/);
+  await attempt.cancel();
 });
 
 test("не подтверждает несовпадающее название или описание PR", async () => {
@@ -502,10 +514,10 @@ test("не подтверждает несовпадающее название 
   });
   const attempt = startPublicationAttempt(command);
 
-  await assert.rejects(attempt.publication, ChangePublicationError);
   const toolResult = await attempt.toolResult();
   assert.equal(toolResult.isError, true);
   assert.match(firstText(toolResult), /не совпадает с подтверждаемым содержимым/);
+  await attempt.cancel();
 });
 
 test("останавливается до агента, если gh не авторизован для origin", async () => {
@@ -578,32 +590,64 @@ test("останавливается до агента, если origin отсу
   assert.equal(created, false);
 });
 
-test("завершает шаг ошибкой, если агент не вызвал completion tool", async () => {
+test("окончание хода без completion сохраняет ntfy и MCP scope", async () => {
   const { command } = publicationCommand();
   const labels = [];
+  let createdOptions;
+  let resolveAgentCreated;
+  const agentCreated = new Promise((resolve) => {
+    resolveAgentCreated = resolve;
+  });
+  let drainCalls = 0;
+  let settled = false;
   const service = createChangePublicationService({
     command,
-    async createAgent() {
+    async createAgent(options) {
+      createdOptions = options;
+      resolveAgentCreated();
       return {
         id: "agent-without-tool",
-        waitForFinish: async () => ({ status: "idle" }),
+        waitForFinish: async () => {
+          drainCalls += 1;
+          return { status: "idle" };
+        },
       };
     },
     updateNotificationLabel: async (agentId, enabled) => labels.push([agentId, enabled]),
     logger: { error() {}, warn() {} },
   });
 
-  await assert.rejects(
-    service.publish({
-      workspaceDirectory: "/workspace/project",
-      changeId,
-      branch,
-      profile: profile(),
-      signal: new AbortController().signal,
-      onAgentCreated() {},
-    }),
-    /без подтверждения публикации/,
+  const publication = service.publish({
+    workspaceDirectory: "/workspace/project",
+    changeId,
+    branch,
+    profile: profile(),
+    signal: new AbortController().signal,
+    onAgentCreated() {},
+  });
+  void publication.then(
+    () => { settled = true; },
+    () => { settled = true; },
   );
+  await agentCreated;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(createdOptions.labels, { ntfy: "true" });
+  assert.equal(settled, false);
+  assert.equal(drainCalls, 0);
+  assert.deepEqual(labels, []);
+
+  const [{ url }] = Object.values(createdOptions.config.mcpServers);
+  const client = await connectClient(url);
+  const toolResult = await client.callTool({
+    name: "complete_change_publication",
+    arguments: { pullRequestNumber: 42, title, body },
+  });
+  await client.close();
+
+  assert.equal(toolResult.isError, undefined);
+  assert.equal((await publication).number, 42);
+  assert.equal(drainCalls, 1);
   assert.deepEqual(labels, [["agent-without-tool", false]]);
 });
 

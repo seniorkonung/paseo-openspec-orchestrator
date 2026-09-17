@@ -201,6 +201,7 @@ test("High Sandbox ждёт scoped MCP и завершает finding тольк�
   const completed = [];
   let createdOptions;
   let resolveCreated;
+  let drainCalls = 0;
   const agentCreated = new Promise((resolve) => { resolveCreated = resolve; });
   const service = createChangeFindingResolutionService({
     command,
@@ -208,7 +209,13 @@ test("High Sandbox ждёт scoped MCP и завершает finding тольк�
       created.push(options);
       createdOptions = options;
       resolveCreated();
-      return { id: "agent-finding", async waitForFinish() { return { status: "idle" }; } };
+      return {
+        id: "agent-finding",
+        async waitForFinish() {
+          drainCalls += 1;
+          return { status: "idle" };
+        },
+      };
     },
     updateNotificationLabel: async (agentId, enabled) => labels.push([agentId, enabled]),
     logger: { error() {}, warn() {} },
@@ -226,8 +233,11 @@ test("High Sandbox ждёт scoped MCP и завершает finding тольк�
     async onFindingResolved(result) { completed.push(result); },
   });
   await agentCreated;
+  await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(created.length, 1);
+  assert.equal(drainCalls, 0);
+  assert.deepEqual(labels, []);
   assert.equal(createdOptions.config.provider, "codex/gpt-6-astra");
   assert.equal(createdOptions.config.thinkingOptionId, "high");
   assert.deepEqual(createdOptions.labels, { ntfy: "true" });
@@ -281,6 +291,7 @@ test("High Sandbox ждёт scoped MCP и завершает finding тольк�
   assert.equal(resolution.findingId, "F1");
   assert.deepEqual(resolution.remainingFindingIds, ["F3"]);
   assert.deepEqual(completed, [resolution]);
+  assert.equal(drainCalls, 1);
   assert.deepEqual(labels, [["agent-finding", false]]);
 });
 

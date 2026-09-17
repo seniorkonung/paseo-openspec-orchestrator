@@ -189,9 +189,12 @@ change artifacts. An existing open PR is retargeted to `main` and keeps its
 Draft/Ready state; otherwise the agent creates a new Draft PR, ignoring closed
 or merged history. The scoped `complete_change_publication` tool independently
 checks the clean worktree, local and remote HEADs, repository, base/head refs,
-Draft policy, title, and body before advancing to `review-change`. A restart
-safely reconciles the already pushed branch or PR instead of creating a
-duplicate.
+Draft policy, title, and body before advancing to `review-change`. The agent
+starts with `ntfy=true`, and ending an individual turn does not complete or fail
+the step: the notification label and MCP scope remain active until the tool
+succeeds. A failed tool check returns actionable feedback to the agent and may
+be retried in the same session. A restart safely reconciles the already pushed
+branch or PR instead of creating a duplicate.
 
 The `review-change` step resolves `review.md` against the actual
 `changeRoot` reported by OpenSpec. A non-empty ordinary file can skip the agent

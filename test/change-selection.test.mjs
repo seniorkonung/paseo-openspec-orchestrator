@@ -37,6 +37,7 @@ test("агент получает Low Sandbox, ntfy и единственный 
   const persisted = [];
   const completionOrder = [];
   const toolResults = [];
+  let drainCalls = 0;
   let toolFlow;
   const service = createChangeSelectionService({
     async createAgent(options) {
@@ -53,6 +54,8 @@ test("агент получает Low Sandbox, ntfy и единственный 
               arguments: { changeId: "missing-change" },
             }),
           );
+          assert.equal(drainCalls, 0);
+          assert.deepEqual(labels, []);
           toolResults.push(
             await client.callTool({
               name: "set_change",
@@ -66,6 +69,7 @@ test("агент получает Low Sandbox, ntfy и единственный 
       return {
         id: "agent-selection",
         waitForFinish: async () => {
+          drainCalls += 1;
           await toolFlow;
           return { status: "idle", lastMessage: null };
         },
@@ -116,6 +120,7 @@ test("агент получает Low Sandbox, ntfy и единственный 
   assert.deepEqual(links, ["agent-selection"]);
   assert.deepEqual(persisted, [{ id: "selected-change" }]);
   assert.deepEqual(labels, [["agent-selection", false]]);
+  assert.equal(drainCalls, 1);
   assert.deepEqual(completionOrder, ["ntfy=false", "persisted"]);
   assert.equal(toolResults[0].isError, true);
   assert.equal(firstText(toolResults[0]), "Change отсутствует");
