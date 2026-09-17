@@ -136,6 +136,9 @@ test("parser сохраняет порядок implementation findings и иск
   assert.equal(parsed.changeId, changeId);
   assert.equal(parsed.result, "Changes needed");
   assert.deepEqual(parsed.findings.map(({ id }) => id), ["F2", "F7"]);
+  assert.deepEqual(parsed.acceptedRisks, [
+    { id: "AR1", originatingFindingId: "F1" },
+  ]);
   assert.deepEqual(parsed.acceptedRiskIds, ["AR1"]);
 });
 

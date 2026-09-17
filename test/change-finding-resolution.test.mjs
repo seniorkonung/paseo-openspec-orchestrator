@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,10 +11,21 @@ import {
   createChangeFindingResolutionService,
   findingResolutionCommitSubject,
 } from "../server/change-finding-resolution.ts";
+import {
+  publishReviewFindingOutcome,
+  reviewPullRequestBody,
+  reviewPullRequestTitle,
+} from "../server/change-review-publication.ts";
 
 const execFileAsync = promisify(execFile);
-const branch = "feature/resolve-review-findings";
+const parentBranch = "feature/resolve-review-findings";
+const branch = `${parentBranch}-review`;
 const changeId = "resolve-review-findings";
+const publishInput = {
+  mode: "publish",
+  problem: "Артефакты не фиксировали обязательное поведение.",
+  resolution: "Проверяемый контракт зафиксирован в артефактах change.",
+};
 
 function highSandboxProfile() {
   return {
@@ -114,7 +125,25 @@ async function createRepository(context, findingIds = ["F1", "F3"]) {
   await execFileAsync("git", ["init", "--bare", remote], { cwd: root });
   await execFileAsync("git", ["remote", "add", "origin", remote], { cwd: workspace });
   await execFileAsync("git", ["push", "--set-upstream", "origin", branch], { cwd: workspace });
-  return { workspace, changeRoot, reviewPath, baselineCommit };
+  return {
+    workspace,
+    remote,
+    changeRoot,
+    reviewPath,
+    baselineCommit,
+    pullRequest: {
+      number: 43,
+      url: "https://github.com/example/project/pull/43",
+      state: "OPEN",
+      isDraft: false,
+      isCrossRepository: false,
+      baseRefName: parentBranch,
+      headRefName: branch,
+      headRefOid: baselineCommit,
+      title: reviewPullRequestTitle(changeId),
+      body: reviewPullRequestBody(changeId),
+    },
+  };
 }
 
 function createCommand(fixture) {
@@ -140,6 +169,41 @@ function createCommand(fixture) {
         }),
         stderr: "",
       };
+    }
+    if (executable === "git" && arguments_[0] === "remote" && arguments_[1] === "get-url") {
+      return { stdout: "git@github.com:example/project.git\n", stderr: "" };
+    }
+    if (executable === "gh") {
+      const { stdout } = await execFileAsync(
+        "git",
+        ["ls-remote", "--heads", fixture.remote, `refs/heads/${branch}`],
+        { encoding: "utf8" },
+      );
+      const remoteHead = String(stdout).trim().split(/\s+/u)[0];
+      if (remoteHead) fixture.pullRequest.headRefOid = remoteHead;
+      if (arguments_[0] === "auth") return { stdout: "", stderr: "" };
+      if (arguments_[0] === "repo") {
+        return {
+          stdout: JSON.stringify({
+            nameWithOwner: "example/project",
+            url: "https://github.com/example/project",
+          }),
+          stderr: "",
+        };
+      }
+      if (arguments_[0] === "pr" && arguments_[1] === "list") {
+        return { stdout: JSON.stringify([fixture.pullRequest]), stderr: "" };
+      }
+      if (arguments_[0] === "pr" && arguments_[1] === "view") {
+        return { stdout: JSON.stringify(fixture.pullRequest), stderr: "" };
+      }
+      if (arguments_[0] === "pr" && arguments_[1] === "edit") {
+        const bodyFile = arguments_[arguments_.indexOf("--body-file") + 1];
+        fixture.pullRequest.body = await readFile(bodyFile, "utf8");
+        fixture.lastBodyFile = bodyFile;
+        return { stdout: fixture.pullRequest.url, stderr: "" };
+      }
+      throw new Error(`Неожиданный вызов gh: ${arguments_.join(" ")}`);
     }
     const result = await execFileAsync(executable, [...arguments_], {
       cwd: commandOptions.cwd,
@@ -254,23 +318,28 @@ test("High Sandbox ждёт scoped MCP и завершает finding тольк�
 
   const [{ url }] = Object.values(createdOptions.config.mcpServers);
   const client = await connectClient(url);
-  assert.deepEqual((await client.listTools()).tools.map(({ name }) => name), [
+  const listedTools = (await client.listTools()).tools;
+  assert.deepEqual(listedTools.map(({ name }) => name), [
     "complete_review_finding",
   ]);
+  const advertisedInput = JSON.stringify(listedTools[0]?.inputSchema);
+  assert.match(advertisedInput, /acknowledge-existing/);
+  assert.match(advertisedInput, /problem/);
+  assert.match(advertisedInput, /resolution/);
 
-  let result = await client.callTool({ name: "complete_review_finding", arguments: {} });
+  let result = await client.callTool({ name: "complete_review_finding", arguments: publishInput });
   assert.equal(result.isError, true);
   assert.match(firstText(result), /F1.*всё ещё присутствует/);
 
   const untrackedPath = join(fixture.workspace, "untracked.txt");
   await writeFile(untrackedPath, "незакоммиченный файл\n");
-  result = await client.callTool({ name: "complete_review_finding", arguments: {} });
+  result = await client.callTool({ name: "complete_review_finding", arguments: publishInput });
   assert.equal(result.isError, true);
   assert.match(firstText(result), /незакоммиченные или неотслеживаемые/);
   await rm(untrackedPath);
 
   await writeFile(fixture.reviewPath, reviewReport(["F3"]));
-  result = await client.callTool({ name: "complete_review_finding", arguments: {} });
+  result = await client.callTool({ name: "complete_review_finding", arguments: publishInput });
   assert.equal(result.isError, true);
   assert.match(firstText(result), /незакоммиченные или неотслеживаемые/);
 
@@ -278,18 +347,24 @@ test("High Sandbox ждёт scoped MCP и завершает finding тольк�
   await execFileAsync("git", ["commit", "-m", findingResolutionCommitSubject("F1")], {
     cwd: fixture.workspace,
   });
-  result = await client.callTool({ name: "complete_review_finding", arguments: {} });
+  result = await client.callTool({ name: "complete_review_finding", arguments: publishInput });
   assert.equal(result.isError, true);
   assert.match(firstText(result), /origin не содержит текущий HEAD/);
 
   await execFileAsync("git", ["push", "origin", branch], { cwd: fixture.workspace });
-  result = await client.callTool({ name: "complete_review_finding", arguments: {} });
+  result = await client.callTool({ name: "complete_review_finding", arguments: publishInput });
   assert.equal(result.isError, undefined);
   await client.close();
 
   const resolution = await running;
   assert.equal(resolution.findingId, "F1");
   assert.deepEqual(resolution.remainingFindingIds, ["F3"]);
+  assert.equal(resolution.outcome, "resolved");
+  assert.deepEqual(resolution.pullRequest, {
+    number: 43,
+    url: "https://github.com/example/project/pull/43",
+  });
+  assert.match(fixture.pullRequest.body, /OpenSpec review `F1` — исправлено/);
   assert.deepEqual(completed, [resolution]);
   assert.equal(drainCalls, 1);
   assert.deepEqual(labels, [["agent-finding", false]]);
@@ -312,7 +387,12 @@ test("accepted risk удаляет finding из активного списка"
         });
         const [{ url }] = Object.values(options.config.mcpServers);
         const client = await connectClient(url);
-        try { return await client.callTool({ name: "complete_review_finding", arguments: {} }); }
+        try {
+          return await client.callTool({
+            name: "complete_review_finding",
+            arguments: publishInput,
+          });
+        }
         finally { await client.close(); }
       })();
       return { id: "agent-risk", async waitForFinish() { await runTool; } };
@@ -334,6 +414,9 @@ test("accepted risk удаляет finding из активного списка"
   assert.match(createdOptions.prompt, /risk acceptance/);
   assert.equal((await runTool).isError, undefined);
   assert.deepEqual(result.remainingFindingIds, []);
+  assert.equal(result.outcome, "accepted-risk");
+  assert.match(fixture.pullRequest.body, /OpenSpec review `F1` — риск принят/);
+  assert.match(fixture.pullRequest.body, /\*\*Итог:\*\* Риск принят:/);
 });
 
 async function rejectedCommitResult(context, kind) {
@@ -384,7 +467,10 @@ async function rejectedCommitResult(context, kind) {
 
   const [{ url }] = Object.values(options.config.mcpServers);
   const client = await connectClient(url);
-  const result = await client.callTool({ name: "complete_review_finding", arguments: {} });
+  const result = await client.callTool({
+    name: "complete_review_finding",
+    arguments: publishInput,
+  });
   await client.close();
   controller.abort();
   await assert.rejects(running, /Операция отменена/);
@@ -443,11 +529,14 @@ test("ошибка checkpoint восстанавливает ntfy и повто�
   assert.match(options.prompt, /do not request the two approvals again/);
   const [{ url }] = Object.values(options.config.mcpServers);
   const client = await connectClient(url);
-  const first = await client.callTool({ name: "complete_review_finding", arguments: {} });
+  const first = await client.callTool({
+    name: "complete_review_finding",
+    arguments: publishInput,
+  });
   assert.equal(first.isError, true);
   const repeated = await Promise.all([
-    client.callTool({ name: "complete_review_finding", arguments: {} }),
-    client.callTool({ name: "complete_review_finding", arguments: {} }),
+    client.callTool({ name: "complete_review_finding", arguments: publishInput }),
+    client.callTool({ name: "complete_review_finding", arguments: publishInput }),
   ]);
   assert.equal(repeated[0].isError, undefined);
   assert.equal(repeated[1].isError, undefined);
@@ -461,6 +550,78 @@ test("ошибка checkpoint восстанавливает ntfy и повто�
   assert.equal(attempts, 2);
 });
 
+test("полный restart подтверждает уже проверенную PR-запись без повторной публикации", async (context) => {
+  const fixture = await createRepository(context, ["F1"]);
+  const { command } = createCommand(fixture);
+  let options;
+  let toolResult;
+  const service = createChangeFindingResolutionService({
+    command,
+    async createAgent(value) {
+      options = value;
+      toolResult = (async () => {
+        const [{ url }] = Object.values(value.config.mcpServers);
+        const client = await connectClient(url);
+        try {
+          return await client.callTool({
+            name: "complete_review_finding",
+            arguments: { mode: "acknowledge-existing" },
+          });
+        } finally {
+          await client.close();
+        }
+      })();
+      return {
+        id: "agent-restart",
+        async waitForFinish() { await toolResult; },
+      };
+    },
+    updateNotificationLabel: async () => {},
+    logger: { error() {}, warn() {} },
+  });
+  const plan = await service.plan(fixture.workspace, changeId, branch);
+  assert.equal(plan.kind, "finding-required");
+  await commitResolution(fixture, { findingIds: [], push: true });
+  const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], {
+    cwd: fixture.workspace,
+  });
+  await publishReviewFindingOutcome(
+    {
+      workspaceDirectory: fixture.workspace,
+      changeId,
+      branch,
+      findingId: "F1",
+      baselineCommit: plan.session.baselineCommit,
+      expectedHead: String(stdout).trim(),
+      kind: "review",
+      outcome: "resolved",
+      input: publishInput,
+    },
+    command,
+  );
+
+  const resolution = await service.run({
+    workspaceDirectory: fixture.workspace,
+    changeId,
+    branch,
+    profile: highSandboxProfile(),
+    session: plan.session,
+    signal: new AbortController().signal,
+    onAgentCreated() {},
+    async onFindingResolved() {},
+  });
+  assert.equal((await toolResult).isError, undefined);
+  assert.equal(resolution.outcome, "resolved");
+  assert.match(options.prompt, /"mode":"acknowledge-existing"/);
+  assert.doesNotMatch(options.prompt, /git push --set-upstream/);
+  assert.equal(
+    fixture.pullRequest.body.match(
+      /paseo-openspec-orchestrator:finding:review:F1:/gu,
+    )?.length,
+    1,
+  );
+});
+
 test("prompt содержит точный ID, два разрешения и commit+push", () => {
   const prompt = changeFindingResolutionPrompt({
     changeId,
@@ -468,10 +629,25 @@ test("prompt содержит точный ID, два разрешения и co
     branch,
     reviewRepositoryPath: `openspec/changes/${changeId}/review.md`,
     alreadyCommitted: false,
+    publicationAlreadyCompleted: false,
   });
   assert.match(prompt, /F42/);
   assert.match(prompt, /first explicit permission/);
   assert.match(prompt, /separate second explicit permission/);
-  assert.match(prompt, /git push --set-upstream origin feature\/resolve-review-findings/);
+  assert.match(prompt, /git push --set-upstream origin feature\/resolve-review-findings-review/);
   assert.match(prompt, /complete_review_finding/);
+  assert.match(prompt, /"mode":"publish"/);
+  assert.doesNotMatch(prompt, /gh pr/);
+
+  const recoveredPrompt = changeFindingResolutionPrompt({
+    changeId,
+    findingId: "F42",
+    branch,
+    reviewRepositoryPath: `openspec/changes/${changeId}/review.md`,
+    alreadyCommitted: true,
+    publicationAlreadyCompleted: true,
+  });
+  assert.match(recoveredPrompt, /"mode":"acknowledge-existing"/);
+  assert.doesNotMatch(recoveredPrompt, /git push --set-upstream/);
+  assert.doesNotMatch(recoveredPrompt, /Invoke the `openspec-review-change` skill/);
 });

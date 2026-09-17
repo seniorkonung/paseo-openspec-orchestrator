@@ -62,10 +62,11 @@ export function createImplementationFindingResolutionService(
     missingReportMeansNoFindings: true,
     toolName: "complete_implementation_review_finding",
     toolDescription:
-      "Проверить устранение, отдельный Git-коммит и публикацию выбранной finding implementation review",
+      "Проверить устранение и Git-публикацию implementation finding, затем опубликовать её итог в review PR",
     agentTitle: (findingId) => `Устранение implementation finding: ${findingId}`,
     logLabel: "implementation review finding",
     completionLabel: "Implementation finding",
+    publicationKind: "implementation-review",
     sessionSchema: pendingImplementationFindingResolutionSessionSchema,
     readReport: async (location) => {
       try {
@@ -101,6 +102,7 @@ export function implementationFindingResolutionPrompt(input: {
   readonly branch: string;
   readonly reviewRepositoryPath: string;
   readonly alreadyCommitted: boolean;
+  readonly publicationAlreadyCompleted: boolean;
 }): string {
   const subject = implementationFindingResolutionCommitSubject(input.findingId);
   const workflowData = JSON.stringify({
@@ -111,10 +113,16 @@ export function implementationFindingResolutionPrompt(input: {
     reviewPath: input.reviewRepositoryPath,
     commitSubject: subject,
     alreadyCommitted: input.alreadyCommitted,
+    publicationAlreadyCompleted: input.publicationAlreadyCompleted,
   });
-  const resolutionInstruction = input.alreadyCommitted
-    ? "This session is recovering an interrupted workflow. The selected implementation finding is already absent from a valid committed resolution. Do not invoke the review skill again, do not request the two approvals again, and do not create or amend a commit. Publish the existing commit if needed and complete the handshake."
-    : `Invoke the \`openspec-review-implementation\` skill for the complete change name \`${input.changeId}\` and ask it to address only finding \`${input.findingId}\`. Do not inspect the agent command catalog first and do not try to prove that the skill exists.`;
+  const resolutionInstruction = input.publicationAlreadyCompleted
+    ? "This session is recovering an interrupted workflow. The selected implementation finding already has a valid committed resolution and a verified entry in the review pull request. Do not invoke the review skill, request approvals, create or amend a commit, push, inspect GitHub, or edit the pull request. Call `complete_implementation_review_finding` with `{\"mode\":\"acknowledge-existing\"}`."
+    : input.alreadyCommitted
+      ? "This session is recovering an interrupted workflow. The selected implementation finding is already absent from a valid committed resolution, but its review pull request entry is not complete. Do not invoke the review skill again, do not request the two approvals again, and do not create or amend a commit. Publish the existing commit if needed, derive concise Russian problem and resolution summaries from the selected finding and committed diff, and call `complete_implementation_review_finding` in `publish` mode."
+      : `Invoke the \`openspec-review-implementation\` skill for the complete change name \`${input.changeId}\` and ask it to address only finding \`${input.findingId}\`. Do not inspect the agent command catalog first and do not try to prove that the skill exists.`;
+  const completionInstruction = input.publicationAlreadyCompleted
+    ? "Call the orchestrator MCP tool `complete_implementation_review_finding` with `{\"mode\":\"acknowledge-existing\"}`. If it reports an error, follow its feedback without invoking `gh` and retry the tool."
+    : `Publish the current branch with \`git push --set-upstream origin ${input.branch}\` without force and without pushing tags. Do not run \`gh\`, inspect GitHub, or edit any pull request yourself. After publication, call the orchestrator MCP tool \`complete_implementation_review_finding\` without asking a third permission, using \`{\"mode\":\"publish\",\"problem\":\"<краткая проблема>\",\"resolution\":\"<краткий итог>\"}\`. Both summaries must be truthful Russian single-line text no longer than 500 characters. For an accepted risk, describe the acceptance and rationale in \`resolution\`; the tool derives the status from the validated report. The tool owns pull request discovery and editing. If it reports an error, follow its feedback without invoking \`gh\` and retry the tool.`;
 
   return `You are responsible only for resolving one selected finding from an OpenSpec implementation review.
 
@@ -133,5 +141,5 @@ When the resolution is not already committed, follow this interaction contract:
 5. Show the resulting artifact changes, report state, validation, and implementation handoff to the user. Obtain a separate second explicit permission to create the commit and publish it. If content changes after this permission, show the new result and obtain the second permission again.
 6. After the second permission, stage only files inside the selected change root and create exactly one commit with subject \`${subject}\`. Do not amend, rebase, merge, force-push, push tags, archive the change, spawn agents or workspaces, or invoke another workflow.
 
-Publish the current branch with \`git push --set-upstream origin ${input.branch}\` without force and without pushing tags. After publication, call the orchestrator MCP tool \`complete_implementation_review_finding\` with an empty object without asking a third permission. If it reports an error, fix only the selected finding's review/commit/publication state and retry the tool. Your task ends after \`complete_implementation_review_finding\` succeeds. Do not archive the agent or workspace.`;
+${completionInstruction} Your task ends after \`complete_implementation_review_finding\` succeeds. Do not archive the agent or workspace.`;
 }

@@ -33,7 +33,7 @@ export interface McpStructuredToolResult<Output> extends McpTextToolResult {
   readonly data: Output;
 }
 
-export interface TextMcpToolDefinition<InputSchema extends z.ZodObject> {
+export interface TextMcpToolDefinition<InputSchema extends z.ZodType> {
   readonly description: string;
   readonly inputSchema: InputSchema;
   readonly outputSchema?: never;
@@ -44,7 +44,7 @@ export interface TextMcpToolDefinition<InputSchema extends z.ZodObject> {
 }
 
 export interface StructuredMcpToolDefinition<
-  InputSchema extends z.ZodObject,
+  InputSchema extends z.ZodType,
   OutputSchema extends z.ZodObject,
 > {
   readonly description: string;
@@ -82,7 +82,7 @@ export interface DefinedMcpTool {
 }
 
 export function defineMcpTool<
-  InputSchema extends z.ZodObject,
+  InputSchema extends z.ZodType,
   OutputSchema extends z.ZodObject = z.ZodObject,
 >(
   definition:
@@ -103,8 +103,8 @@ export function defineMcpTool<
         name: ToolName,
         context: ToolRegistrationContext,
       ) {
-        const runtimeInputSchema: z.ZodObject = inputSchema;
-        const callback: ToolCallback<z.ZodObject> = async (input, serverContext) => {
+        const runtimeInputSchema: z.ZodType = inputSchema;
+        const callback: ToolCallback<z.ZodType> = async (input, serverContext) => {
           try {
             const result = await execute(input as z.output<InputSchema>, {
               signal: serverContext.mcpReq.signal,
@@ -132,9 +132,9 @@ export function defineMcpTool<
       name: ToolName,
       context: ToolRegistrationContext,
     ) {
-      const runtimeInputSchema: z.ZodObject = inputSchema;
+      const runtimeInputSchema: z.ZodType = inputSchema;
       const runtimeOutputSchema: z.ZodObject = outputSchema;
-      const callback: ToolCallback<z.ZodObject> = async (input, serverContext) => {
+      const callback: ToolCallback<z.ZodType> = async (input, serverContext) => {
         try {
           const result = await execute(input as z.output<InputSchema>, {
             signal: serverContext.mcpReq.signal,

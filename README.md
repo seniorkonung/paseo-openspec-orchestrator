@@ -115,7 +115,8 @@ The main boundaries are:
   a workspace-local agent performs the push and PR create/edit operations.
 - `server/change-review.ts` owns the review agent session and review-commit
   verification. `server/change-review-publication.ts` owns the immutable
-  parent/child branch target, GitHub PR boundary, and restart reconciliation.
+  parent/child branch target, the GitHub PR boundary, accumulated finding
+  outcomes, and restart reconciliation. Finding agents never invoke `gh`.
 - `server/change-review-report.ts` and
   `server/implementation-review-report.ts` validate their versioned report
   contracts fail closed. `server/review-finding-resolution.ts` owns the shared
@@ -249,15 +250,29 @@ change. The user must explicitly approve the artifact change or risk acceptance
 and, after re-review, separately approve the commit and push.
 
 Each successful iteration creates exactly one
-`docs(openspec): resolve <F-id> review finding` commit, pushes the current branch
-to `origin`, and calls the sole `complete_review_finding {}` tool. The tool
-independently reparses the report, requires the selected ID to be absent,
+`docs(openspec): resolve <F-id> review finding` commit and pushes the current
+branch to `origin`. The agent does not inspect or edit GitHub. It calls the sole
+`complete_review_finding` tool with `mode: "publish"` and concise Russian
+`problem` and `resolution` lines. The tool independently reparses the report,
+derives either `resolved` or `accepted-risk` from the accepted-risk origin,
 checks the branch, clean worktree, baseline ancestry, one exact-subject commit,
-the `review.md` diff, change-root path boundary, and exact local/remote HEAD. It
-then disables `ntfy` and atomically clears the pending session; a checkpoint
-failure restores `ntfy=true`. Remaining findings loop back through the same
-step, one agent per finding. Recovery keeps the selected ID and baseline, and a
-valid existing commit is only pushed and acknowledged rather than recreated.
+the `review.md` diff, change-root path boundary, and exact local/remote HEAD.
+
+The same tool resolves `origin` to a GitHub repository, requires exactly one
+open Ready non-fork review PR with the expected base, head, title, and remote
+OID, then appends the outcome to an orchestrator-managed section without
+changing existing body content or earlier outcomes. It writes the body through
+a protected temporary file, rereads GitHub, and verifies the exact body and
+metadata before disabling `ntfy` and clearing the pending session. The marker
+includes review kind, finding ID, and baseline commit, so a retry cannot create
+a duplicate and ordinary and implementation `F1` remain distinct. A checkpoint
+failure restores `ntfy=true`.
+
+Remaining findings loop back through the same step, one agent per finding.
+Recovery keeps the selected ID and baseline: a valid existing commit skips the
+skill and approvals and only publishes the summary; if the verified PR entry
+already exists, the agent calls `mode: "acknowledge-existing"` without repeating
+GitHub work.
 
 `resolve-implementation-review-findings` then applies the same one-finding-per-
 agent lifecycle to the canonical `implementation-review.md`. The absence of
@@ -283,17 +298,18 @@ implementation or test code. Accepted residual risk moves from `F<n>` to
 Each successful iteration creates exactly one
 `docs(openspec): resolve <F-id> implementation finding` commit (or the stable
 length fallback), pushes the current branch to `origin` without force or tags,
-and calls only `complete_implementation_review_finding {}`. The scoped tool
-reparses the report, requires the selected ID to be absent from all active
-findings, and enforces a tracked report, clean tree without untracked files,
-the saved branch, baseline ancestry, one exact-subject commit, report inclusion
-in the diff, change-root path boundaries, and exact local/remote HEAD. Failed
-checks return actionable feedback and keep `ntfy=true`; checkpoint failure
-restores it. Success disables the label, atomically clears the pending session,
-and either loops for the next report-ordered finding or completes the workflow.
-A restart preserves the selected ID and baseline. If the local commit is
-already valid, recovery skips the skill and both approvals and only finishes
-push plus the MCP handshake.
+and calls only `complete_implementation_review_finding` with the same publish or
+acknowledgement contract. The scoped tool reparses the report, requires the
+selected ID to be absent from all active findings, derives accepted-risk status
+from `Originating finding`, and enforces a tracked report, clean tree without
+untracked files, the saved branch, baseline ancestry, one exact-subject commit,
+report inclusion in the diff, change-root path boundaries, exact local/remote
+HEAD, and the same verified accumulated review-PR publication. Failed checks
+return actionable feedback and keep `ntfy=true`; checkpoint failure restores
+it. Success returns the outcome and verified PR number and URL, disables the
+label, atomically clears the pending session, and either loops for the next
+report-ordered finding or completes the workflow. A restart preserves the
+selected ID and baseline and uses the same idempotent recovery modes.
 
 Implementation code for the selected change remains outside the current
 workflow endpoint; both finding resolvers are restricted to planning artifacts

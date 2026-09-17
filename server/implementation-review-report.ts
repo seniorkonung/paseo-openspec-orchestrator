@@ -27,6 +27,7 @@ export interface ParsedImplementationReviewReport {
   readonly result: ImplementationReviewResult;
   readonly coverageStatus: CoverageStatus;
   readonly findings: readonly ImplementationReviewFinding[];
+  readonly acceptedRisks: readonly ImplementationReviewAcceptedRisk[];
   readonly acceptedRiskIds: readonly string[];
 }
 
@@ -34,6 +35,11 @@ export interface ImplementationReviewFinding {
   readonly id: ReviewFindingId;
   readonly severity: ReviewFindingSeverity;
   readonly title: string;
+}
+
+export interface ImplementationReviewAcceptedRisk {
+  readonly id: string;
+  readonly originatingFindingId: string;
 }
 
 export interface ReadImplementationReviewReportRequest {
@@ -347,6 +353,12 @@ export function parseImplementationReviewReport(
     coverageStatus,
     findings: Object.freeze(
       findings.map(({ id, severity, title }) => Object.freeze({ id, severity, title })),
+    ),
+    acceptedRisks: Object.freeze(
+      acceptedRisks.map(({ id, fields }) => Object.freeze({
+        id,
+        originatingFindingId: valueAsString(fields, "Originating finding"),
+      })),
     ),
     acceptedRiskIds: Object.freeze(acceptedRisks.map(({ id }) => id)),
   });

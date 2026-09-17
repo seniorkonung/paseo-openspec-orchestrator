@@ -26,11 +26,17 @@ export interface ChangeReviewFinding {
   readonly title: string;
 }
 
+export interface ChangeReviewAcceptedRisk {
+  readonly id: string;
+  readonly originatingFindingId: string;
+}
+
 export interface ParsedChangeReviewReport {
   readonly changeId: string;
   readonly result: "Changes needed" | "Review incomplete" | "No unresolved findings";
   readonly coverageStatus: "Complete" | "Incomplete";
   readonly findings: readonly ChangeReviewFinding[];
+  readonly acceptedRisks: readonly ChangeReviewAcceptedRisk[];
   readonly acceptedRiskIds: readonly string[];
 }
 
@@ -219,6 +225,12 @@ export function parseChangeReviewReport(
     coverageStatus,
     findings: Object.freeze(findings.map(({ id, severity, title }) =>
       Object.freeze({ id, severity, title }),
+    )),
+    acceptedRisks: Object.freeze(acceptedRisks.map(({ id, fields }) =>
+      Object.freeze({
+        id,
+        originatingFindingId: fields.values.get("Originating finding") ?? "",
+      }),
     )),
     acceptedRiskIds: Object.freeze(acceptedRisks.map(({ id }) => id)),
   });

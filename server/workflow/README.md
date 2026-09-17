@@ -329,21 +329,63 @@ review-, обычной finding- или implementation finding-сессии. З�
 `docs(openspec): resolve <F-id> review finding`, включающий только файлы внутри
 выбранного change root и обязательно изменение `review.md`, выполняет обычный
 `git push --set-upstream origin <branch>` без force и без третьего вопроса
-вызывает единственный scoped-инструмент `complete_review_finding {}`.
+вызывает единственный scoped-инструмент `complete_review_finding` с одним из
+двух типизированных входов:
+
+```ts
+{ mode: "publish", problem: string, resolution: string }
+{ mode: "acknowledge-existing" }
+```
+
+При обычном завершении агент передаёт `publish`: непустые русскоязычные
+однострочные формулировки до 500 символов без управляющих символов и служебных
+markers. Агент не запускает `gh`, не ищет PR и не изменяет его body. Второе
+разрешение пользователя уже покрывает автоматическую публикацию результата в
+PR; третье разрешение не требуется.
 
 Инструмент заново читает отчёт тем же parser и отклоняет вызов, если выбранный
 ID всё ещё находится в `Findings`. Также он независимо проверяет текущую ветку,
 чистое дерево без untracked-файлов, наследование baseline, ровно один новый
 коммит с точным subject, изменение `review.md`, отсутствие путей вне change
 root и совпадение локального и remote HEAD. После успеха инструмент отключает
-`ntfy`, атомарно очищает pending-сессию и возвращает опубликованный commit и
-оставшиеся ID. Ошибка записи checkpoint восстанавливает `ntfy=true`.
+`ntfy`, атомарно очищает pending-сессию и возвращает опубликованный commit,
+outcome, проверенные номер/URL PR и оставшиеся ID. Outcome вычисляется из
+валидированного отчёта: accepted risk с `Originating finding`, равным выбранному
+ID, даёт `accepted-risk`; иначе результат считается `resolved`.
+
+Перед завершением MCP сам разрешает GitHub-репозиторий из `origin` и требует
+ровно один открытый Ready PR без fork из текущей review-ветки в её parent-ветку.
+Он сверяет repository, base/head, стабильный title и `headRefOid` с remote HEAD,
+перечитывает актуальный body и сохраняет всё существующее содержимое. Итог
+хронологически добавляется в управляемую секцию:
+
+```markdown
+<!-- paseo-openspec-orchestrator:findings:start -->
+## Результаты устранения замечаний
+
+- **OpenSpec review `F1` — исправлено**
+  - **Проблема:** Краткое описание.
+  - **Итог:** Исправлено: краткое описание решения.
+  <!-- paseo-openspec-orchestrator:finding:review:F1:<baseline-commit> -->
+<!-- paseo-openspec-orchestrator:findings:end -->
+```
+
+Для принятого риска статус меняется на `риск принят`, а итог получает префикс
+`Риск принят:`. Body передаётся `gh pr edit --body-file` через защищённый
+временный файл вне репозитория с гарантированной очисткой. После изменения MCP
+ещё раз читает PR и проверяет точный body, metadata и remote HEAD. Только после
+этого отключаются `ntfy` и pending-сессия. Ошибка записи checkpoint
+восстанавливает `ntfy=true`.
 
 Непустой список оставшихся ID возвращает переход на этот же шаг; следующая
 итерация снова выбирает первую finding из актуального отчёта. Если процесс
 перезапущен с pending-сессией, сохраняются тот же finding ID и baseline. Уже
-корректный локальный commit не создаётся повторно: восстановительный агент лишь
-завершает push и MCP-handshake.
+корректный локальный commit не создаётся повторно: восстановительный агент не
+повторяет skill и разрешения, а формулирует итог и вызывает `publish`. Marker из
+вида review, finding ID и baseline commit делает повторный вызов после ошибки
+MCP или checkpoint идемпотентным. Если проверенная запись уже существует в PR,
+агент вызывает `acknowledge-existing`; синхронизация GitHub никогда не становится
+обязанностью агента.
 
 Оба успешных исхода этого этапа — отсутствие findings и устранение последней
 finding — переходят в `resolve-implementation-review-findings`.
@@ -367,7 +409,8 @@ review target, coverage, findings, accepted risks и их cross-field инвар
 и baseline commit, затем перечитывает профиль `High Sandbox` и создаёт агента в
 текущем Paseo workspace через `workspace.agents.create` без `cwd`. Агент
 получает `ntfy=true`, единственный scoped-инструмент
-`complete_implementation_review_finding {}` и прямое требование вызвать
+`complete_implementation_review_finding` с тем же типизированным publish/
+acknowledge-контрактом и прямое требование вызвать
 `openspec-review-implementation` для точных change ID и finding ID. Оркестратор
 не проверяет каталог или наличие skills.
 
@@ -386,7 +429,8 @@ review target, coverage, findings, accepted risks и их cross-field инвар
 один commit `docs(openspec): resolve <F-id> implementation finding` (для subject
 длиннее 72 символов используется
 `docs(openspec): resolve implementation review finding`), публикует текущую
-ветку в `origin` без force и tags и без третьего разрешения вызывает MCP.
+ветку в `origin` без force и tags и без третьего разрешения вызывает MCP с
+краткими `problem` и `resolution`. Агент не запускает `gh` и не редактирует PR.
 
 Инструмент повторно разбирает отчёт тем же parser и возвращает ошибку, пока
 выбранный ID остаётся среди активных findings. Он также требует существующий
@@ -394,15 +438,21 @@ tracked `implementation-review.md`, чистое дерево без untracked-�
 сохранённую ветку, наследование baseline, ровно один commit с точным subject,
 изменение отчёта, отсутствие путей вне change root и точное совпадение локального
 HEAD с `origin/<branch>`. Ошибка содержит feedback для агента, сохраняет
-`ntfy=true` и допускает повторный вызов. Успех выключает `ntfy`, атомарно очищает
-pending-сессию и возвращает commit и оставшиеся ID. Ошибка checkpoint снова
-включает `ntfy`.
+`ntfy=true` и допускает повторный вызов. Затем MCP проверяет тот же Ready review
+PR и накопительно добавляет запись с источником `OpenSpec implementation
+review`. Поэтому одинаковые `F1` из двух видов review имеют разные markers.
+Принятый риск определяется только по `Originating finding` валидированного
+отчёта и публикуется со статусом `риск принят`. Успех выключает `ntfy`, атомарно
+очищает pending-сессию и возвращает commit, outcome, PR и оставшиеся ID. Ошибка
+checkpoint снова включает `ntfy`.
 
 При оставшихся findings этап рекурсивно запускает себя, каждый раз выбирая
 первую актуальную finding отчёта и отдельного агента. После перезапуска
 сохраняются исходные finding ID и baseline. Если корректный локальный commit уже
 есть, recovery не повторяет skill и два подтверждения, а завершает только push и
-MCP-handshake. Удаление всего отчёта после выбора finding считается ошибкой.
+MCP-handshake в режиме `publish`; уже существующая проверенная PR-запись требует
+`acknowledge-existing`. Удаление всего отчёта после выбора finding считается
+ошибкой.
 
 ## Уведомления
 

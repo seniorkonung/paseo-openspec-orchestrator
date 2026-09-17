@@ -1641,6 +1641,11 @@ test("findings устраняются по одной отдельными High 
         findingId: request.session.findingId,
         remainingFindingIds: [...pendingFindingIds],
         commit: request.session.findingId === "F1" ? "a".repeat(40) : "b".repeat(40),
+        outcome: "resolved",
+        pullRequest: {
+          number: 43,
+          url: "https://github.com/example/project/pull/43",
+        },
       };
       await request.onFindingResolved(completed);
       return completed;
@@ -1672,8 +1677,14 @@ test("findings устраняются по одной отдельными High 
   assert.deepEqual(plannedFindingIds, ["F1", "F3"]);
   assert.deepEqual(resolvedFindingIds, ["F1", "F3"]);
   assert.deepEqual(resolutionProfiles, ["High Sandbox", "High Sandbox"]);
-  assert.equal(snapshot.history.at(-3)?.text, "Устранена finding F1; осталось 1");
-  assert.equal(snapshot.history.at(-2)?.text, "Устранена последняя finding review: F3");
+  assert.equal(
+    snapshot.history.at(-3)?.text,
+    "Обработана finding F1 в PR #43; осталось 1",
+  );
+  assert.equal(
+    snapshot.history.at(-2)?.text,
+    "Обработана последняя finding review F3; обновлён PR #43",
+  );
   assert.deepEqual(snapshot.history.at(-3)?.links, [
     {
       kind: "agent",
@@ -1729,6 +1740,11 @@ test("implementation findings устраняются по одной отдел�
         findingId: request.session.findingId,
         remainingFindingIds: [...pendingFindingIds],
         commit: request.session.findingId === "F2" ? "a".repeat(40) : "b".repeat(40),
+        outcome: "resolved",
+        pullRequest: {
+          number: 43,
+          url: "https://github.com/example/project/pull/43",
+        },
       };
       await request.onFindingResolved(completed);
       return completed;
@@ -1765,11 +1781,11 @@ test("implementation findings устраняются по одной отдел�
   assert.deepEqual(resolvedFindingIds, ["F2", "F4"]);
   assert.equal(
     snapshot.history.at(-2)?.text,
-    "Устранена implementation finding F2; осталось 1",
+    "Обработана implementation finding F2 в PR #43; осталось 1",
   );
   assert.equal(
     snapshot.history.at(-1)?.text,
-    "Устранена последняя implementation finding: F4",
+    "Обработана последняя implementation finding F4; обновлён PR #43",
   );
   assert.deepEqual(snapshot.history.at(-2)?.links, [
     {
@@ -1830,6 +1846,11 @@ test("после reload finding продолжает сохранённую base
         findingId: request.session.findingId,
         remainingFindingIds: [],
         commit: "e".repeat(40),
+        outcome: "resolved",
+        pullRequest: {
+          number: 43,
+          url: "https://github.com/example/project/pull/43",
+        },
       };
       await request.onFindingResolved(completed);
       return completed;
@@ -1914,6 +1935,11 @@ test("после reload implementation finding продолжает сохран
         findingId: request.session.findingId,
         remainingFindingIds: [],
         commit: "e".repeat(40),
+        outcome: "resolved",
+        pullRequest: {
+          number: 43,
+          url: "https://github.com/example/project/pull/43",
+        },
       };
       await request.onFindingResolved(completed);
       return completed;

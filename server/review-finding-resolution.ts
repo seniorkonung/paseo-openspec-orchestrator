@@ -14,6 +14,18 @@ import {
 import { runBoundedCommand, type BoundedCommandRunner } from "./bounded-command.ts";
 import { commitHashSchema } from "./change-artifact-model.ts";
 import {
+  ChangeReviewPublicationError,
+  assertActiveReviewPullRequest,
+  findingCompletionInputSchema,
+  inspectReviewFindingPublication,
+  parseFindingCompletionInput,
+  publishReviewFindingOutcome,
+  reviewFindingOutcomeSchema,
+  type CompletedFindingPullRequest,
+  type ReviewFindingOutcome,
+  type ReviewFindingPublicationKind,
+} from "./change-review-publication.ts";
+import {
   reviewFindingIdSchema,
   type ReviewFindingId,
 } from "./change-review-report.ts";
@@ -100,6 +112,16 @@ export interface CompletedReviewFindingResolution {
   readonly findingId: ReviewFindingId;
   readonly remainingFindingIds: readonly ReviewFindingId[];
   readonly commit: string;
+  readonly outcome: ReviewFindingOutcome;
+  readonly pullRequest: CompletedFindingPullRequest;
+}
+
+interface VerifiedReviewFindingResolution {
+  readonly changeId: string;
+  readonly findingId: ReviewFindingId;
+  readonly remainingFindingIds: readonly ReviewFindingId[];
+  readonly commit: string;
+  readonly outcome: ReviewFindingOutcome;
 }
 
 export interface ReviewFindingResolutionRequest<
@@ -162,6 +184,10 @@ export interface ReviewFindingReportLocation {
 
 export interface ActiveReviewFindingReport {
   readonly findings: readonly { readonly id: ReviewFindingId }[];
+  readonly acceptedRisks: readonly {
+    readonly id: string;
+    readonly originatingFindingId: string;
+  }[];
 }
 
 export interface ReviewFindingPromptInput {
@@ -170,6 +196,7 @@ export interface ReviewFindingPromptInput {
   readonly branch: string;
   readonly reviewRepositoryPath: string;
   readonly alreadyCommitted: boolean;
+  readonly publicationAlreadyCompleted: boolean;
 }
 
 export interface ReviewFindingResolutionBehavior<
@@ -182,6 +209,7 @@ export interface ReviewFindingResolutionBehavior<
   readonly agentTitle: (findingId: ReviewFindingId) => string;
   readonly logLabel: string;
   readonly completionLabel: string;
+  readonly publicationKind: ReviewFindingPublicationKind;
   readonly sessionSchema: z.ZodType<Session>;
   readonly readReport: (
     location: ReviewFindingReportLocation,
@@ -301,6 +329,23 @@ export function createReviewFindingResolutionService<
       await assertCleanWorktree(command, context.gitRoot, signal);
       const head = await readHeadCommit(command, context.gitRoot, signal);
       await assertRemoteHead(command, context.gitRoot, parsedBranch, head, signal);
+      try {
+        await assertActiveReviewPullRequest(
+          context.gitRoot,
+          context.changeId,
+          parsedBranch,
+          signal,
+          command,
+        );
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        if (error instanceof ChangeReviewPublicationError) {
+          throw new ReviewFindingResolutionError(error.message);
+        }
+        throw new ReviewFindingResolutionError(
+          "Не удалось проверить review pull request текущей ветки",
+        );
+      }
 
       if (
         behavior.missingReportMeansNoFindings &&
@@ -358,7 +403,7 @@ export function createReviewFindingResolutionService<
         request.signal,
       );
 
-      const resolutionAlreadyCommitted = await isLocalResolutionReady(
+      const existingLocalResolution = await readLocalResolutionIfReady(
         command,
         context,
         session,
@@ -366,6 +411,38 @@ export function createReviewFindingResolutionService<
         readReport,
         request.signal,
       );
+      let publicationAlreadyCompleted: boolean;
+      try {
+        publicationAlreadyCompleted = (
+          await inspectReviewFindingPublication(
+            {
+              workspaceDirectory: context.gitRoot,
+              changeId,
+              branch,
+              findingId: session.findingId,
+              baselineCommit: session.baselineCommit,
+              kind: behavior.publicationKind,
+              expectedHead: existingLocalResolution?.commit,
+              expectedOutcome: existingLocalResolution?.outcome,
+              signal: request.signal,
+            },
+            command,
+          )
+        ).entryExists;
+      } catch (error) {
+        if (request.signal.aborted) throw error;
+        if (error instanceof ChangeReviewPublicationError) {
+          throw new ReviewFindingResolutionError(error.message);
+        }
+        throw new ReviewFindingResolutionError(
+          "Не удалось проверить публикацию finding в review pull request",
+        );
+      }
+      if (publicationAlreadyCompleted && !existingLocalResolution) {
+        throw new ReviewFindingResolutionError(
+          "Review pull request содержит результат finding без корректного локального коммита",
+        );
+      }
       const host = await mcpHost.listen();
       let agent: PaseoAgent | null = null;
       let notificationsDisabled = false;
@@ -383,13 +460,20 @@ export function createReviewFindingResolutionService<
           findingId: reviewFindingIdSchema,
           remainingFindingIds: z.array(reviewFindingIdSchema).max(256),
           commit: commitHashSchema,
+          outcome: reviewFindingOutcomeSchema,
+          pullRequest: z
+            .object({
+              number: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+              url: z.string().url().max(2_048),
+            })
+            .strict(),
         })
         .strict();
       const tool = defineMcpTool({
         description: behavior.toolDescription,
-        inputSchema: z.object({}).strict(),
+        inputSchema: findingCompletionInputSchema,
         outputSchema: completedResolutionSchema,
-        execute: (_input, toolContext) =>
+        execute: (input, toolContext) =>
           serialize(async () => {
             if (completedResolution) {
               return completionToolResult(completedResolution, behavior.completionLabel);
@@ -398,9 +482,9 @@ export function createReviewFindingResolutionService<
             const { signal } = combined;
             try {
               const activeAgent = await waitForPromise(agentReady.promise, signal);
-              let verified: CompletedReviewFindingResolution;
+              let localResolution: VerifiedReviewFindingResolution;
               try {
-                verified = await verifyCompletedResolution(
+                localResolution = await verifyCompletedResolution(
                   command,
                   context,
                   session,
@@ -419,6 +503,39 @@ export function createReviewFindingResolutionService<
                   code: errorCode(error),
                 });
                 throw new McpToolError(`Не удалось проверить ${behavior.logLabel}`);
+              }
+
+              let verified: CompletedReviewFindingResolution;
+              try {
+                const pullRequest = await publishReviewFindingOutcome(
+                  {
+                    workspaceDirectory: context.gitRoot,
+                    changeId,
+                    branch,
+                    findingId: session.findingId,
+                    baselineCommit: session.baselineCommit,
+                    expectedHead: localResolution.commit,
+                    kind: behavior.publicationKind,
+                    outcome: localResolution.outcome,
+                    input: parseFindingCompletionInput(input),
+                    signal,
+                  },
+                  command,
+                );
+                verified = { ...localResolution, pullRequest };
+              } catch (error) {
+                if (error instanceof ChangeReviewPublicationError) {
+                  throw new McpToolError(error.message);
+                }
+                if (signal.aborted) throw error;
+                logger.error(`[OpenSpec] Не удалось опубликовать ${behavior.logLabel}`, {
+                  changeId,
+                  findingId: session.findingId,
+                  code: errorCode(error),
+                });
+                throw new McpToolError(
+                  "Не удалось обновить review pull request результатом finding",
+                );
               }
 
               try {
@@ -484,7 +601,8 @@ export function createReviewFindingResolutionService<
             findingId: session.findingId,
             branch,
             reviewRepositoryPath: context.reviewRepositoryPath,
-            alreadyCommitted: resolutionAlreadyCommitted,
+            alreadyCommitted: existingLocalResolution !== null,
+            publicationAlreadyCompleted,
           }),
           labels: { ntfy: "true" },
         });
@@ -551,7 +669,9 @@ async function pathExists(
   }
 }
 
-async function isLocalResolutionReady<Session extends ReviewFindingResolutionSession>(
+async function readLocalResolutionIfReady<
+  Session extends ReviewFindingResolutionSession,
+>(
   command: BoundedCommandRunner,
   context: FindingResolutionContext,
   session: Session,
@@ -561,13 +681,19 @@ async function isLocalResolutionReady<Session extends ReviewFindingResolutionSes
     signal?: AbortSignal,
   ) => Promise<ActiveReviewFindingReport>,
   signal: AbortSignal,
-): Promise<boolean> {
+): Promise<VerifiedReviewFindingResolution | null> {
   try {
-    await verifyLocalResolution(command, context, session, behavior, readReport, signal);
-    return true;
+    return await verifyLocalResolution(
+      command,
+      context,
+      session,
+      behavior,
+      readReport,
+      signal,
+    );
   } catch (error) {
     if (signal.aborted) throw error;
-    return false;
+    return null;
   }
 }
 
@@ -581,7 +707,7 @@ async function verifyCompletedResolution<Session extends ReviewFindingResolution
     signal?: AbortSignal,
   ) => Promise<ActiveReviewFindingReport>,
   signal: AbortSignal,
-): Promise<CompletedReviewFindingResolution> {
+): Promise<VerifiedReviewFindingResolution> {
   const resolution = await verifyLocalResolution(
     command,
     context,
@@ -604,7 +730,7 @@ async function verifyLocalResolution<Session extends ReviewFindingResolutionSess
     signal?: AbortSignal,
   ) => Promise<ActiveReviewFindingReport>,
   signal: AbortSignal,
-): Promise<CompletedReviewFindingResolution> {
+): Promise<VerifiedReviewFindingResolution> {
   await assertCurrentBranch(command, context.gitRoot, session.branch, signal);
   await assertCleanWorktree(command, context.gitRoot, signal);
   const report = await readReport(context, signal);
@@ -661,11 +787,18 @@ async function verifyLocalResolution<Session extends ReviewFindingResolutionSess
     );
   }
 
+  const outcome: ReviewFindingOutcome = report.acceptedRisks.some(
+    ({ originatingFindingId }) => originatingFindingId === session.findingId,
+  )
+    ? "accepted-risk"
+    : "resolved";
+
   return {
     changeId: context.changeId,
     findingId: session.findingId,
     remainingFindingIds: Object.freeze(report.findings.map(({ id }) => id)),
     commit: head,
+    outcome,
   };
 }
 
@@ -872,10 +1005,12 @@ function completionToolResult(
     readonly findingId: ReviewFindingId;
     readonly remainingFindingIds: ReviewFindingId[];
     readonly commit: string;
+    readonly outcome: ReviewFindingOutcome;
+    readonly pullRequest: CompletedFindingPullRequest;
   };
 } {
   return {
-    text: `${completionLabel} «${resolution.findingId}» устранена и опубликована`,
+    text: `${completionLabel} «${resolution.findingId}» обработана и опубликована в PR #${resolution.pullRequest.number}`,
     data: {
       ...resolution,
       remainingFindingIds: [...resolution.remainingFindingIds],

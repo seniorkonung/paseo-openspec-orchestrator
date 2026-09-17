@@ -118,7 +118,7 @@ export async function resolveImplementationReviewFindingsStep(
       return {
         kind: "complete",
         state: { pendingImplementationFindingResolutionSession: null },
-        summary: `Устранена последняя implementation finding: ${completed.findingId}`,
+        summary: `Обработана последняя implementation finding ${completed.findingId}; обновлён PR #${completed.pullRequest.number}`,
       };
     }
     return {
@@ -126,7 +126,7 @@ export async function resolveImplementationReviewFindingsStep(
       next: "resolve-implementation-review-findings",
       state: { pendingImplementationFindingResolutionSession: null },
       summary:
-        `Устранена implementation finding ${completed.findingId}; осталось ${completed.remainingFindingIds.length}`,
+        `Обработана implementation finding ${completed.findingId} в PR #${completed.pullRequest.number}; осталось ${completed.remainingFindingIds.length}`,
     };
   } catch (error) {
     return findingFailure(

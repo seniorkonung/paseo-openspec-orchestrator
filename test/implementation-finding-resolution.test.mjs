@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,12 +11,22 @@ import {
   implementationFindingResolutionCommitSubject,
   implementationFindingResolutionPrompt,
 } from "../server/implementation-finding-resolution.ts";
+import {
+  reviewPullRequestBody,
+  reviewPullRequestTitle,
+} from "../server/change-review-publication.ts";
 
 const execFileAsync = promisify(execFile);
-const branch = "feature/resolve-implementation-findings";
+const parentBranch = "feature/resolve-implementation-findings";
+const branch = `${parentBranch}-review`;
 const changeId = "resolve-implementation-findings";
 const reviewedBase = "a".repeat(40);
 const reviewedHead = "b".repeat(40);
+const publishInput = {
+  mode: "publish",
+  problem: "Implementation нарушала проверяемый контракт.",
+  resolution: "Implementation и её проверка приведены к контракту.",
+};
 
 function highSandboxProfile() {
   return {
@@ -150,7 +160,25 @@ async function createRepository(context, findingIds = ["F1", "F3"], { report = t
   await execFileAsync("git", ["init", "--bare", remote], { cwd: root });
   await execFileAsync("git", ["remote", "add", "origin", remote], { cwd: workspace });
   await execFileAsync("git", ["push", "--set-upstream", "origin", branch], { cwd: workspace });
-  return { workspace, changeRoot, reviewPath, baselineCommit };
+  return {
+    workspace,
+    remote,
+    changeRoot,
+    reviewPath,
+    baselineCommit,
+    pullRequest: {
+      number: 44,
+      url: "https://github.com/example/project/pull/44",
+      state: "OPEN",
+      isDraft: false,
+      isCrossRepository: false,
+      baseRefName: parentBranch,
+      headRefName: branch,
+      headRefOid: baselineCommit,
+      title: reviewPullRequestTitle(changeId),
+      body: reviewPullRequestBody(changeId),
+    },
+  };
 }
 
 function createCommand(fixture) {
@@ -176,6 +204,41 @@ function createCommand(fixture) {
         }),
         stderr: "",
       };
+    }
+    if (executable === "git" && arguments_[0] === "remote" && arguments_[1] === "get-url") {
+      return { stdout: "git@github.com:example/project.git\n", stderr: "" };
+    }
+    if (executable === "gh") {
+      const { stdout } = await execFileAsync(
+        "git",
+        ["ls-remote", "--heads", fixture.remote, `refs/heads/${branch}`],
+        { encoding: "utf8" },
+      );
+      const remoteHead = String(stdout).trim().split(/\s+/u)[0];
+      if (remoteHead) fixture.pullRequest.headRefOid = remoteHead;
+      if (arguments_[0] === "auth") return { stdout: "", stderr: "" };
+      if (arguments_[0] === "repo") {
+        return {
+          stdout: JSON.stringify({
+            nameWithOwner: "example/project",
+            url: "https://github.com/example/project",
+          }),
+          stderr: "",
+        };
+      }
+      if (arguments_[0] === "pr" && arguments_[1] === "list") {
+        return { stdout: JSON.stringify([fixture.pullRequest]), stderr: "" };
+      }
+      if (arguments_[0] === "pr" && arguments_[1] === "view") {
+        return { stdout: JSON.stringify(fixture.pullRequest), stderr: "" };
+      }
+      if (arguments_[0] === "pr" && arguments_[1] === "edit") {
+        const bodyFile = arguments_[arguments_.indexOf("--body-file") + 1];
+        fixture.pullRequest.body = await readFile(bodyFile, "utf8");
+        fixture.lastBodyFile = bodyFile;
+        return { stdout: fixture.pullRequest.url, stderr: "" };
+      }
+      throw new Error(`Неожиданный вызов gh: ${arguments_.join(" ")}`);
     }
     const result = await execFileAsync(executable, [...arguments_], {
       cwd: commandOptions.cwd,
@@ -281,7 +344,7 @@ test("High Sandbox завершает implementation finding только пос
 
   let result = await client.callTool({
     name: "complete_implementation_review_finding",
-    arguments: {},
+    arguments: publishInput,
   });
   assert.equal(result.isError, true);
   assert.match(firstText(result), /F1.*всё ещё присутствует/);
@@ -290,7 +353,7 @@ test("High Sandbox завершает implementation finding только пос
   await writeFile(untrackedPath, "неотслеживаемый файл\n");
   result = await client.callTool({
     name: "complete_implementation_review_finding",
-    arguments: {},
+    arguments: publishInput,
   });
   assert.equal(result.isError, true);
   assert.match(firstText(result), /незакоммиченные или неотслеживаемые/);
@@ -299,7 +362,7 @@ test("High Sandbox завершает implementation finding только пос
   await writeFile(fixture.reviewPath, reviewReport(["F3"]));
   result = await client.callTool({
     name: "complete_implementation_review_finding",
-    arguments: {},
+    arguments: publishInput,
   });
   assert.equal(result.isError, true);
   assert.match(firstText(result), /незакоммиченные или неотслеживаемые/);
@@ -310,7 +373,7 @@ test("High Sandbox завершает implementation finding только пос
   });
   result = await client.callTool({
     name: "complete_implementation_review_finding",
-    arguments: {},
+    arguments: publishInput,
   });
   assert.equal(result.isError, true);
   assert.match(firstText(result), /origin не содержит текущий HEAD/);
@@ -318,7 +381,7 @@ test("High Sandbox завершает implementation finding только пос
   await execFileAsync("git", ["push", "origin", branch], { cwd: fixture.workspace });
   result = await client.callTool({
     name: "complete_implementation_review_finding",
-    arguments: {},
+    arguments: publishInput,
   });
   assert.equal(result.isError, undefined);
   await client.close();
@@ -326,6 +389,15 @@ test("High Sandbox завершает implementation finding только пос
   const resolution = await running;
   assert.equal(resolution.findingId, "F1");
   assert.deepEqual(resolution.remainingFindingIds, ["F3"]);
+  assert.equal(resolution.outcome, "resolved");
+  assert.deepEqual(resolution.pullRequest, {
+    number: 44,
+    url: "https://github.com/example/project/pull/44",
+  });
+  assert.match(
+    fixture.pullRequest.body,
+    /OpenSpec implementation review `F1` — исправлено/,
+  );
   assert.deepEqual(labels, [["agent-implementation-finding", false]]);
 });
 
@@ -347,7 +419,7 @@ test("explicit accepted risk удаляет implementation finding из акти
         try {
           return await client.callTool({
             name: "complete_implementation_review_finding",
-            arguments: {},
+            arguments: publishInput,
           });
         } finally {
           await client.close();
@@ -371,6 +443,11 @@ test("explicit accepted risk удаляет implementation finding из акти
   });
   assert.equal((await runTool).isError, undefined);
   assert.deepEqual(result.remainingFindingIds, []);
+  assert.equal(result.outcome, "accepted-risk");
+  assert.match(
+    fixture.pullRequest.body,
+    /OpenSpec implementation review `F1` — риск принят/,
+  );
 });
 
 async function rejectedCommitResult(context, kind) {
@@ -431,7 +508,7 @@ async function rejectedCommitResult(context, kind) {
   const client = await connectClient(url);
   const result = await client.callTool({
     name: "complete_implementation_review_finding",
-    arguments: {},
+    arguments: publishInput,
   });
   await client.close();
   controller.abort();
@@ -497,12 +574,12 @@ test("ошибка checkpoint восстанавливает ntfy и recovery н
   const client = await connectClient(url);
   const first = await client.callTool({
     name: "complete_implementation_review_finding",
-    arguments: {},
+    arguments: publishInput,
   });
   assert.equal(first.isError, true);
   const second = await client.callTool({
     name: "complete_implementation_review_finding",
-    arguments: {},
+    arguments: publishInput,
   });
   assert.equal(second.isError, undefined);
   await client.close();
@@ -521,15 +598,36 @@ test("prompt содержит точный skill, два разрешения, c
     branch,
     reviewRepositoryPath: `openspec/changes/${changeId}/implementation-review.md`,
     alreadyCommitted: false,
+    publicationAlreadyCompleted: false,
   });
   assert.match(prompt, /openspec-review-implementation/);
   assert.match(prompt, /F42/);
   assert.match(prompt, /first explicit permission/);
   assert.match(prompt, /separate second explicit permission/);
-  assert.match(prompt, /git push --set-upstream origin feature\/resolve-implementation-findings/);
+  assert.match(
+    prompt,
+    /git push --set-upstream origin feature\/resolve-implementation-findings-review/,
+  );
   assert.match(prompt, /complete_implementation_review_finding/);
+  assert.match(prompt, /"mode":"publish"/);
+  assert.doesNotMatch(prompt, /gh pr/);
   assert.equal(
     implementationFindingResolutionCommitSubject(`F${"1".repeat(31)}`),
     "docs(openspec): resolve implementation review finding",
+  );
+
+  const recoveredPrompt = implementationFindingResolutionPrompt({
+    changeId,
+    findingId: "F42",
+    branch,
+    reviewRepositoryPath: `openspec/changes/${changeId}/implementation-review.md`,
+    alreadyCommitted: true,
+    publicationAlreadyCompleted: true,
+  });
+  assert.match(recoveredPrompt, /"mode":"acknowledge-existing"/);
+  assert.doesNotMatch(recoveredPrompt, /git push --set-upstream/);
+  assert.doesNotMatch(
+    recoveredPrompt,
+    /Invoke the `openspec-review-implementation` skill/,
   );
 });

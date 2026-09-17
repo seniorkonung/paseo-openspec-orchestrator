@@ -115,14 +115,14 @@ export async function resolveReviewFindingsStep(
         kind: "continue",
         next: "resolve-implementation-review-findings",
         state: { pendingFindingResolutionSession: null },
-        summary: `Устранена последняя finding review: ${completed.findingId}`,
+        summary: `Обработана последняя finding review ${completed.findingId}; обновлён PR #${completed.pullRequest.number}`,
       };
     }
     return {
       kind: "continue",
       next: "resolve-review-findings",
       state: { pendingFindingResolutionSession: null },
-      summary: `Устранена finding ${completed.findingId}; осталось ${completed.remainingFindingIds.length}`,
+      summary: `Обработана finding ${completed.findingId} в PR #${completed.pullRequest.number}; осталось ${completed.remainingFindingIds.length}`,
     };
   } catch (error) {
     return findingFailure(context, error, "Не удалось завершить устранение finding");

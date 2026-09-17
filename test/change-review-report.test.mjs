@@ -81,6 +81,9 @@ test("parser сохраняет порядок активных findings и иг
   );
 
   assert.deepEqual(parsed.findings.map(({ id }) => id), ["F7", "F2"]);
+  assert.deepEqual(parsed.acceptedRisks, [
+    { id: "AR1", originatingFindingId: "F9" },
+  ]);
   assert.deepEqual(parsed.acceptedRiskIds, ["AR1"]);
   assert.equal(parsed.result, "Changes needed");
 });
