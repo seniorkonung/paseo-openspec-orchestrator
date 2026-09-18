@@ -1,4 +1,5 @@
 import type { GitBranchDecision, GitBranchProbe } from "../../git-branch.ts";
+import { ChangeBranchError, parseChangeBranch } from "../../change-branch.ts";
 import type {
   WorkflowStepDefinition,
   WorkflowStepContext,
@@ -64,12 +65,26 @@ async function checkGitBranchStep(
           "Git-ветка не определена; создайте или переключите ветку и нажмите «Повторить»",
       };
     case "non-main":
-      return {
-        kind: "continue",
-        next: "check-git-worktree",
-        state: { branch: decision.name },
-        summary: branchSummary(decision),
-      };
+      try {
+        const changeBranch = parseChangeBranch(decision.name);
+        return {
+          kind: "continue",
+          next: "check-git-worktree",
+          state: {
+            changeBranch,
+            activeBranch: changeBranch,
+          },
+          summary: `Корневая change-ветка: ${changeBranch}`,
+        };
+      } catch (error) {
+        if (!(error instanceof ChangeBranchError)) throw error;
+        return {
+          kind: "halt",
+          summary: error.message,
+          message:
+            "Переключитесь на корневую ветку change/<change-id> и нажмите «Повторить»",
+        };
+      }
   }
 }
 

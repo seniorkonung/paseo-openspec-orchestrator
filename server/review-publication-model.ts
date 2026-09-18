@@ -14,7 +14,6 @@ export {
 
 export const REVIEW_REMOTE = "origin";
 export const REVIEW_PARENT_BRANCH = "main";
-export const REVIEW_BRANCH_SUFFIX = "-review";
 export const MAX_REVIEW_PR_TITLE_LENGTH = 256;
 export const MAX_REVIEW_PR_BODY_LENGTH = 65_536;
 

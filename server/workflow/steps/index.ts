@@ -3,12 +3,15 @@ import type { ChangeArtifactCreationService } from "../../change-artifact-creati
 import type { ChangeFindingResolutionService } from "../../change-finding-resolution.ts";
 import type { ChangePublicationService } from "../../change-publication.ts";
 import type { ChangeReviewService } from "../../change-review.ts";
-import type { ChangeSelectionService } from "../../change-selection.ts";
+import type { ChangeInitializationService } from "../../change-initialization.ts";
 import type { ChangeTaskExecutionService } from "../../change-task-execution.ts";
 import type { GitBranchProbe } from "../../git-branch.ts";
 import type { GitWorktreeProbe } from "../../git-worktree.ts";
 import type { ImplementationFindingResolutionService } from "../../implementation-finding-resolution.ts";
 import type { MiseToolchainProbe } from "../../mise-toolchain.ts";
+import type { OpenSpecChangeVerifier } from "../../openspec-change.ts";
+import type { PlanningBranchService } from "../../planning-branch.ts";
+import type { PlanningMergeService } from "../../planning-merge.ts";
 import type { WorkflowDefinition } from "../types.ts";
 import { createCheckAgentProfilesStep } from "./check-agent-profiles.ts";
 import { createCheckGitBranchStep } from "./check-git-branch.ts";
@@ -20,7 +23,10 @@ import { createPublishChangeStep } from "./publish-change.ts";
 import { createResolveImplementationReviewFindingsStep } from "./resolve-implementation-review-findings.ts";
 import { createResolveReviewFindingsStep } from "./resolve-review-findings.ts";
 import { createReviewChangeStep } from "./review-change.ts";
-import { createSelectChangeStep } from "./select-change.ts";
+import { createInitializeChangeStep } from "./initialize-change.ts";
+import { createPreparePlanningBranchStep } from "./prepare-planning-branch.ts";
+import { createInspectChangeStep } from "./inspect-change.ts";
+import { createAwaitPlanningMergeStep } from "./await-planning-merge.ts";
 
 /**
  * Все конкретные зависимости стандартного OpenSpec workflow.
@@ -35,7 +41,10 @@ export interface OpenSpecWorkflowDependencies {
   readonly gitBranch: GitBranchProbe;
   readonly gitWorktree: GitWorktreeProbe;
   readonly miseToolchain: MiseToolchainProbe;
-  readonly changeSelection: ChangeSelectionService;
+  readonly changeInitialization: ChangeInitializationService;
+  readonly planningBranch: PlanningBranchService;
+  readonly planningMerge: PlanningMergeService;
+  readonly verifyChange: OpenSpecChangeVerifier;
   readonly changeArtifacts: ChangeArtifactCreationService;
   readonly changePublication: ChangePublicationService;
   readonly changeReview: ChangeReviewService;
@@ -69,10 +78,17 @@ export function createOpenSpecWorkflow(
         workspaceDirectory: dependencies.workspaceDirectory,
         inspectToolchain: dependencies.miseToolchain,
       }),
-      createSelectChangeStep({
+      createInitializeChangeStep({
         workspaceDirectory: dependencies.workspaceDirectory,
-        readAgentProfiles: dependencies.readAgentProfiles,
-        changeSelection: dependencies.changeSelection,
+        changeInitialization: dependencies.changeInitialization,
+      }),
+      createPreparePlanningBranchStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        planningBranch: dependencies.planningBranch,
+      }),
+      createInspectChangeStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        verifyChange: dependencies.verifyChange,
         changeArtifacts: dependencies.changeArtifacts,
       }),
       createChangeArtifactsStep({
@@ -85,7 +101,7 @@ export function createOpenSpecWorkflow(
         readAgentProfiles: dependencies.readAgentProfiles,
         inspectBranch: dependencies.gitBranch,
         inspectWorktree: dependencies.gitWorktree,
-        changeSelection: dependencies.changeSelection,
+        verifyChange: dependencies.verifyChange,
         changeArtifacts: dependencies.changeArtifacts,
         changePublication: dependencies.changePublication,
       }),
@@ -103,6 +119,11 @@ export function createOpenSpecWorkflow(
         workspaceDirectory: dependencies.workspaceDirectory,
         readAgentProfiles: dependencies.readAgentProfiles,
         findingResolution: dependencies.implementationFindingResolution,
+      }),
+      createAwaitPlanningMergeStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        planningMerge: dependencies.planningMerge,
+        verifyChange: dependencies.verifyChange,
       }),
       createExecuteChangeTasksStep({
         workspaceDirectory: dependencies.workspaceDirectory,

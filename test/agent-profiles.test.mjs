@@ -29,8 +29,14 @@ test("разрешает все обязательные профили без �
 
   assert.equal(result.kind, "available");
   assert.deepEqual(Object.keys(result.profiles), [...REQUIRED_AGENT_PROFILE_NAMES]);
-  assert.equal(result.profiles.Ultra.id, "profile-8");
-  assert.equal(result.profiles["Ultra Sandbox"].name, "  ultra sandbox  ");
+  assert.equal(
+    result.profiles.Ultra.id,
+    `profile-${REQUIRED_AGENT_PROFILE_NAMES.length - 1}`,
+  );
+  assert.equal(
+    result.profiles["Ultra Sandbox"].name.trim().toLowerCase(),
+    "ultra sandbox",
+  );
 });
 
 test("возвращает все отсутствующие профили и не нормализует внутренние пробелы", () => {

@@ -26,8 +26,8 @@ async function resolveImplementationReviewFindingsStep(
   dependencies: ResolveImplementationReviewFindingsDependencies,
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
-  const { branch, change } = context.state;
-  if (!branch || !change) {
+  const { activeBranch, change } = context.state;
+  if (!activeBranch || !change) {
     return {
       kind: "halt",
       summary: "Недостаточно данных для устранения implementation findings",
@@ -52,13 +52,13 @@ async function resolveImplementationReviewFindingsStep(
       const plan = await dependencies.findingResolution.plan(
         dependencies.workspaceDirectory,
         change.id,
-        branch,
+        activeBranch,
         context.signal,
       );
       if (plan.kind === "no-findings") {
         return {
           kind: "continue",
-          next: "execute-change-tasks",
+          next: "await-planning-merge",
           state: { pendingImplementationFindingResolutionSession: null },
           summary: `В implementation review нет нерешённых findings: ${plan.reviewPath}`,
         };
@@ -108,7 +108,7 @@ async function resolveImplementationReviewFindingsStep(
     const completed = await dependencies.findingResolution.run({
       workspaceDirectory: dependencies.workspaceDirectory,
       changeId: change.id,
-      branch,
+      branch: activeBranch,
       profile: resolution.profile,
       session,
       signal: context.signal,
@@ -132,7 +132,7 @@ async function resolveImplementationReviewFindingsStep(
     if (completed.remainingFindingIds.length === 0) {
       return {
         kind: "continue",
-        next: "execute-change-tasks",
+        next: "await-planning-merge",
         state: { pendingImplementationFindingResolutionSession: null },
         summary: `Обработана последняя implementation finding ${completed.findingId}; обновлён PR #${completed.pullRequest.number}`,
       };

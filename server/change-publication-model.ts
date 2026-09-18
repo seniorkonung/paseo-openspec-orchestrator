@@ -120,7 +120,8 @@ export interface PublicationTarget {
   readonly repository: string;
   readonly repositoryUrl: string;
   readonly expectedHead: string;
-  readonly existingPullRequest: z.output<typeof openPullRequestSchema> | null;
+  readonly expectedChangeHead: string;
+  readonly existingPullRequest: z.output<typeof openPullRequestSchema>;
 }
 
 export type PublicationCompletionInput = z.output<

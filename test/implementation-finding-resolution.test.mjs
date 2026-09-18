@@ -17,9 +17,9 @@ import {
 } from "../server/change-review-publication.ts";
 
 const execFileAsync = promisify(execFile);
-const parentBranch = "feature/resolve-implementation-findings";
-const branch = `${parentBranch}-review`;
 const changeId = "resolve-implementation-findings";
+const parentBranch = `change/${changeId}`;
+const branch = `planning/${changeId}`;
 const reviewedBase = "a".repeat(40);
 const reviewedHead = "b".repeat(40);
 const publishInput = {
@@ -606,7 +606,7 @@ test("prompt содержит точный skill, два разрешения, c
   assert.match(prompt, /separate second explicit permission/);
   assert.match(
     prompt,
-    /git push --set-upstream origin feature\/resolve-implementation-findings-review/,
+    /git push --set-upstream origin planning\/resolve-implementation-findings/,
   );
   assert.match(prompt, /complete_implementation_review_finding/);
   assert.match(prompt, /"mode":"publish"/);

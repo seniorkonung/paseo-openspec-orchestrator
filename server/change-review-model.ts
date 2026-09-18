@@ -5,12 +5,28 @@ import {
   type CompletedReviewPullRequest,
 } from "./change-review-publication.ts";
 import type { RepoLocalChangePaths } from "./repo-local-change.ts";
+import { changeBranchFor, planningBranchFor } from "./change-branch.ts";
 
 const FALLBACK_COMMIT_SUBJECT = "docs(openspec): add change review";
 
-export const pendingReviewSessionSchema = reviewPublicationTargetSchema.safeExtend({
-  changeId: openSpecChangeIdSchema,
-});
+export const pendingReviewSessionSchema = reviewPublicationTargetSchema
+  .safeExtend({ changeId: openSpecChangeIdSchema })
+  .superRefine((session, context) => {
+    if (session.parentBranch !== changeBranchFor(session.changeId)) {
+      context.addIssue({
+        code: "custom",
+        path: ["parentBranch"],
+        message: "Корневая ветка review не соответствует change",
+      });
+    }
+    if (session.reviewBranch !== planningBranchFor(session.changeId)) {
+      context.addIssue({
+        code: "custom",
+        path: ["reviewBranch"],
+        message: "Planning-ветка review не соответствует change",
+      });
+    }
+  });
 
 export type PendingReviewSession = z.infer<typeof pendingReviewSessionSchema>;
 
@@ -45,6 +61,7 @@ export function reviewPublicationTarget(
   return reviewPublicationTargetSchema.parse({
     parentBranch: session.parentBranch,
     reviewBranch: session.reviewBranch,
+    parentBaselineCommit: session.parentBaselineCommit,
     baselineCommit: session.baselineCommit,
     repositoryHost: session.repositoryHost,
     repositoryNameWithOwner: session.repositoryNameWithOwner,

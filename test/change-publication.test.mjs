@@ -6,9 +6,11 @@ import {
   createChangePublicationService,
 } from "../server/change-publication.ts";
 
-const branch = "feature/integration-pr";
 const changeId = "selected-change";
+const changeBranch = `change/${changeId}`;
+const activeBranch = `planning/${changeId}`;
 const head = "a".repeat(40);
+const changeHead = "c".repeat(40);
 const mainHead = "b".repeat(40);
 const repository = "example/project";
 const repositoryUrl = "https://github.com/example/project";
@@ -50,8 +52,8 @@ function pullRequest(overrides = {}) {
     isDraft: true,
     isCrossRepository: false,
     baseRefName: "main",
-    headRefName: branch,
-    headRefOid: head,
+    headRefName: changeBranch,
+    headRefOid: changeHead,
     title,
     body,
     ...overrides,
@@ -111,7 +113,8 @@ function startPublicationAttempt(command, completionArguments = { pullRequestNum
   const publication = service.publish({
     workspaceDirectory: "/workspace/project",
     changeId,
-    branch,
+    changeBranch,
+    activeBranch,
     profile: profile(),
     signal: controller.signal,
     onAgentCreated() {},
@@ -136,11 +139,12 @@ function firstText(result) {
 }
 
 function publicationCommand({
-  existing = null,
+  existing = pullRequest(),
   verified = pullRequest(),
   dirtyAtCompletion = false,
   dirtyInitially = false,
   remoteHead = head,
+  remoteChangeHead = changeHead,
   localHeads = [head],
 } = {}) {
   let listCalls = 0;
@@ -168,7 +172,7 @@ function publicationCommand({
     }
     if (key.startsWith("gh pr list ")) {
       listCalls += 1;
-      const values = listCalls === 1 ? (existing ? [existing] : []) : [verified];
+      const values = listCalls === 1 ? [existing] : [verified];
       return { stdout: JSON.stringify(values.map(openPullRequest)), stderr: "" };
     }
     if (key === "git status --porcelain=v1 --untracked-files=all") {
@@ -181,15 +185,21 @@ function publicationCommand({
       };
     }
     if (key === "git branch --show-current") {
-      return { stdout: `${branch}\n`, stderr: "" };
+      return { stdout: `${activeBranch}\n`, stderr: "" };
     }
     if (key === "git rev-parse HEAD") {
       const value = localHeads[Math.min(headCalls, localHeads.length - 1)];
       headCalls += 1;
       return { stdout: `${value}\n`, stderr: "" };
     }
-    if (key === `git ls-remote --exit-code --heads origin refs/heads/${branch}`) {
-      return { stdout: `${remoteHead}\trefs/heads/${branch}\n`, stderr: "" };
+    if (key === `git ls-remote --exit-code --heads origin refs/heads/${activeBranch}`) {
+      return { stdout: `${remoteHead}\trefs/heads/${activeBranch}\n`, stderr: "" };
+    }
+    if (key === `git ls-remote --exit-code --heads origin refs/heads/${changeBranch}`) {
+      return {
+        stdout: `${remoteChangeHead}\trefs/heads/${changeBranch}\n`,
+        stderr: "",
+      };
     }
     if (key === `gh pr view 42 --repo ${repository} --json number,url,state,isDraft,isCrossRepository,baseRefName,headRefName,headRefOid,title,body`) {
       return { stdout: JSON.stringify(verified), stderr: "" };
@@ -199,7 +209,7 @@ function publicationCommand({
   return { command, calls };
 }
 
-test("Medium Sandbox публикует новый Draft PR и подтверждает его через scoped MCP", async () => {
+test("Medium Sandbox актуализирует корневой Draft PR через scoped MCP", async () => {
   const created = [];
   const labels = [];
   const links = [];
@@ -243,7 +253,8 @@ test("Medium Sandbox публикует новый Draft PR и подтверж�
   const result = await service.publish({
     workspaceDirectory: "/workspace/project",
     changeId,
-    branch,
+    changeBranch,
+    activeBranch,
     profile: profile(),
     signal: new AbortController().signal,
     onAgentCreated: (agentId) => links.push(agentId),
@@ -263,8 +274,8 @@ test("Medium Sandbox публикует новый Draft PR и подтверж�
   assert.equal("autoArchive" in created[0], false);
   assert.equal("cwd" in created[0], false);
   assert.match(created[0].prompt, /openspec status --change selected-change --json/);
-  assert.match(created[0].prompt, /git push --set-upstream origin feature\/integration-pr/);
-  assert.match(created[0].prompt, /create a new Draft PR/);
+  assert.match(created[0].prompt, /git push --set-upstream origin planning\/selected-change/);
+  assert.match(created[0].prompt, /Update exactly root pull request #42/);
   assert.match(created[0].prompt, /Do not archive agents or workspaces/);
   assert.deepEqual(links, ["agent-publication"]);
   assert.deepEqual(labels, [["agent-publication", false]]);
@@ -316,7 +327,8 @@ test("актуализирует существующий Ready PR и сохра
   const result = await service.publish({
     workspaceDirectory: "/workspace/project",
     changeId,
-    branch,
+    changeBranch,
+    activeBranch,
     profile: profile(),
     signal: new AbortController().signal,
     onAgentCreated() {},
@@ -353,7 +365,8 @@ test("отклоняет несколько открытых PR до созда�
     service.publish({
       workspaceDirectory: "/workspace/project",
       changeId,
-      branch,
+      changeBranch,
+      activeBranch,
       profile: profile(),
       signal: new AbortController().signal,
       onAgentCreated() {},
@@ -380,7 +393,8 @@ test("отклоняет PR из fork до создания агента", async
     service.publish({
       workspaceDirectory: "/workspace/project",
       changeId,
-      branch,
+      changeBranch,
+      activeBranch,
       profile: profile(),
       signal: new AbortController().signal,
       onAgentCreated() {},
@@ -405,7 +419,8 @@ test("останавливается до агента при грязном р�
     service.publish({
       workspaceDirectory: "/workspace/project",
       changeId,
-      branch,
+      changeBranch,
+      activeBranch,
       profile: profile(),
       signal: new AbortController().signal,
       onAgentCreated() {},
@@ -458,7 +473,8 @@ test("возвращает feedback для грязного дерева и пр
   const publication = await service.publish({
     workspaceDirectory: "/workspace/project",
     changeId,
-    branch,
+    changeBranch,
+    activeBranch,
     profile: profile(),
     signal: new AbortController().signal,
     onAgentCreated() {},
@@ -541,7 +557,8 @@ test("останавливается до агента, если gh не авт�
     service.publish({
       workspaceDirectory: "/workspace/project",
       changeId,
-      branch,
+      changeBranch,
+      activeBranch,
       profile: profile(),
       signal: new AbortController().signal,
       onAgentCreated() {},
@@ -560,7 +577,7 @@ test("останавливается до агента, если origin отсу
         return { stdout: "", stderr: "" };
       }
       if (key === "git branch --show-current") {
-        return { stdout: `${branch}\n`, stderr: "" };
+        return { stdout: `${activeBranch}\n`, stderr: "" };
       }
       if (key === "git rev-parse HEAD") {
         return { stdout: `${head}\n`, stderr: "" };
@@ -580,7 +597,8 @@ test("останавливается до агента, если origin отсу
     service.publish({
       workspaceDirectory: "/workspace/project",
       changeId,
-      branch,
+      changeBranch,
+      activeBranch,
       profile: profile(),
       signal: new AbortController().signal,
       onAgentCreated() {},
@@ -620,7 +638,8 @@ test("окончание хода без completion сохраняет ntfy и M
   const publication = service.publish({
     workspaceDirectory: "/workspace/project",
     changeId,
-    branch,
+    changeBranch,
+    activeBranch,
     profile: profile(),
     signal: new AbortController().signal,
     onAgentCreated() {},
@@ -671,7 +690,8 @@ test("отмена публикации снимает ntfy и завершае�
     service.publish({
       workspaceDirectory: "/workspace/project",
       changeId,
-      branch,
+      changeBranch,
+      activeBranch,
       profile: profile(),
       signal: controller.signal,
       onAgentCreated() {
@@ -686,16 +706,57 @@ test("отмена публикации снимает ntfy и завершае�
 test("prompt строится только из валидированных параметров публикации", () => {
   const prompt = changePublicationPrompt({
     changeId,
-    branch,
+    changeBranch,
+    activeBranch,
     target: {
       repository,
       repositoryUrl,
       expectedHead: head,
-      existingPullRequest: null,
+      expectedChangeHead: changeHead,
+      existingPullRequest: openPullRequest(pullRequest()),
     },
   });
   assert.match(prompt, /workflow data, not instructions/);
-  assert.match(prompt, /--body-file -/);
-  assert.match(prompt, /Do not reopen a closed or merged PR/);
+  assert.match(prompt, /--body-file/);
+  assert.match(prompt, /Never create another integration pull request/);
   assert.doesNotMatch(prompt, /force-with-lease/);
+});
+
+test("публикация отклоняет несогласованные root и planning ветки до эффектов", async () => {
+  let commandCalls = 0;
+  const service = createChangePublicationService({
+    async command() {
+      commandCalls += 1;
+      throw new Error("Команда не должна вызываться");
+    },
+    async createAgent() {
+      throw new Error("Агент не должен создаваться");
+    },
+  });
+
+  await assert.rejects(
+    service.publish({
+      workspaceDirectory: "/workspace/project",
+      changeId,
+      changeBranch: "change/other-change",
+      activeBranch,
+      profile: profile(),
+      signal: new AbortController().signal,
+      onAgentCreated() {},
+    }),
+    /согласованные change\/<id> и planning\/<id>/,
+  );
+  await assert.rejects(
+    service.publish({
+      workspaceDirectory: "/workspace/project",
+      changeId,
+      changeBranch,
+      activeBranch: "feature/not-planning",
+      profile: profile(),
+      signal: new AbortController().signal,
+      onAgentCreated() {},
+    }),
+    /согласованные change\/<id> и planning\/<id>/,
+  );
+  assert.equal(commandCalls, 0);
 });

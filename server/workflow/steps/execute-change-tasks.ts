@@ -23,8 +23,8 @@ async function executeChangeTasksStep(
   dependencies: ExecuteChangeTasksDependencies,
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
-  const { branch, change } = context.state;
-  if (!branch || !change) {
+  const { activeBranch, change } = context.state;
+  if (!activeBranch || !change) {
     return {
       kind: "halt",
       summary: "Недостаточно данных для выполнения OpenSpec-задач",
@@ -50,7 +50,7 @@ async function executeChangeTasksStep(
       const plan = await dependencies.taskExecution.plan(
         dependencies.workspaceDirectory,
         change.id,
-        branch,
+        activeBranch,
         context.signal,
       );
       if (plan.kind === "complete") {
@@ -114,7 +114,7 @@ async function executeChangeTasksStep(
       onTaskCompleted: async (task) => {
         await context.checkpointState({
           ...context.state,
-          branch: task.branch,
+          activeBranch: task.branch,
           pendingTaskExecutionSession: null,
         });
       },
@@ -123,7 +123,7 @@ async function executeChangeTasksStep(
       kind: "continue",
       next: "execute-change-tasks",
       state: {
-        branch: completed.branch,
+        activeBranch: completed.branch,
         pendingTaskExecutionSession: null,
       },
       summary:

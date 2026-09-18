@@ -21,8 +21,8 @@ async function reviewChangeStep(
   dependencies: ReviewChangeDependencies,
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
-  const { branch, change } = context.state;
-  if (!branch || !change) {
+  const { changeBranch, activeBranch, change } = context.state;
+  if (!changeBranch || !activeBranch || !change) {
     return {
       kind: "halt",
       summary: "Недостаточно данных для review change",
@@ -43,7 +43,8 @@ async function reviewChangeStep(
       session = await dependencies.changeReview.plan(
         dependencies.workspaceDirectory,
         change.id,
-        branch,
+        changeBranch,
+        activeBranch,
         context.signal,
       );
       await context.checkpointState({
@@ -100,7 +101,7 @@ async function reviewChangeStep(
     return {
       kind: "continue",
       next: "resolve-review-findings",
-      state: { branch: review.branch, pendingReviewSession: null },
+      state: { activeBranch: review.branch, pendingReviewSession: null },
       summary: `Review OpenSpec change опубликован в PR #${review.pullRequest.number}: ${review.pullRequest.url}`,
     };
   } catch (error) {

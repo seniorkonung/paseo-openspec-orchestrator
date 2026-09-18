@@ -82,7 +82,7 @@ async function checkMiseToolchainStep(
   if (decision.kind !== "available") return haltFor(decision);
   return {
     kind: "continue",
-    next: "select-change",
+    next: "initialize-change",
     summary: "Mise toolchain доступен",
   };
 }

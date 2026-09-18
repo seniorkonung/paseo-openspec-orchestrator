@@ -18,9 +18,9 @@ import {
 import { publishReviewFindingOutcome } from "../server/review-finding-publication.ts";
 
 const execFileAsync = promisify(execFile);
-const parentBranch = "feature/resolve-review-findings";
-const branch = `${parentBranch}-review`;
 const changeId = "resolve-review-findings";
+const parentBranch = `change/${changeId}`;
+const branch = `planning/${changeId}`;
 const publishInput = {
   mode: "publish",
   problem: "Артефакты не фиксировали обязательное поведение.",
@@ -634,7 +634,7 @@ test("prompt содержит точный ID, два разрешения и co
   assert.match(prompt, /F42/);
   assert.match(prompt, /first explicit permission/);
   assert.match(prompt, /separate second explicit permission/);
-  assert.match(prompt, /git push --set-upstream origin feature\/resolve-review-findings-review/);
+  assert.match(prompt, /git push --set-upstream origin planning\/resolve-review-findings/);
   assert.match(prompt, /complete_review_finding/);
   assert.match(prompt, /"mode":"publish"/);
   assert.doesNotMatch(prompt, /gh pr/);

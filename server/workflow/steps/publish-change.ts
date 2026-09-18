@@ -11,10 +11,12 @@ import {
   ChangePublicationError,
   type ChangePublicationService,
 } from "../../change-publication.ts";
-import type { ChangeSelectionService } from "../../change-selection.ts";
 import type { GitBranchProbe } from "../../git-branch.ts";
 import type { GitWorktreeProbe } from "../../git-worktree.ts";
-import { OpenSpecChangeError } from "../../openspec-change.ts";
+import {
+  OpenSpecChangeError,
+  type OpenSpecChangeVerifier,
+} from "../../openspec-change.ts";
 import type {
   WorkflowStepContext,
   WorkflowStepDefinition,
@@ -26,7 +28,7 @@ export interface PublishChangeDependencies {
   readonly readAgentProfiles: AgentProfileReader;
   readonly inspectBranch: GitBranchProbe;
   readonly inspectWorktree: GitWorktreeProbe;
-  readonly changeSelection: Pick<ChangeSelectionService, "verify">;
+  readonly verifyChange: OpenSpecChangeVerifier;
   readonly changeArtifacts: Pick<ChangeArtifactCreationService, "inspect" | "verifyApply">;
   readonly changePublication: Pick<ChangePublicationService, "publish">;
 }
@@ -35,8 +37,8 @@ async function publishChangeStep(
   dependencies: PublishChangeDependencies,
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
-  const { branch, change } = context.state;
-  if (!branch || !change) {
+  const { changeBranch, activeBranch, change } = context.state;
+  if (!changeBranch || !activeBranch || !change) {
     return {
       kind: "halt",
       summary: "Недостаточно данных для публикации change",
@@ -49,11 +51,11 @@ async function publishChangeStep(
       dependencies.workspaceDirectory,
       context.signal,
     );
-    if (currentBranch.kind !== "non-main" || currentBranch.name !== branch) {
+    if (currentBranch.kind !== "non-main" || currentBranch.name !== activeBranch) {
       return {
         kind: "halt",
         summary: "Git-ветка изменилась после начала workflow",
-        message: `Вернитесь в ветку «${branch}» и нажмите «Повторить»`,
+        message: `Вернитесь в ветку «${activeBranch}» и нажмите «Повторить»`,
       };
     }
   } catch (error) {
@@ -94,7 +96,7 @@ async function publishChangeStep(
   }
 
   try {
-    await dependencies.changeSelection.verify(
+    await dependencies.verifyChange(
       dependencies.workspaceDirectory,
       change.id,
       context.signal,
@@ -167,7 +169,8 @@ async function publishChangeStep(
     const publication = await dependencies.changePublication.publish({
       workspaceDirectory: dependencies.workspaceDirectory,
       changeId: change.id,
-      branch,
+      changeBranch,
+      activeBranch,
       profile: resolution.profile,
       signal: context.signal,
       onAgentCreated: (agentId) => {

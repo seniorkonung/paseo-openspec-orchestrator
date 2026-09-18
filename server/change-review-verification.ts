@@ -12,10 +12,8 @@ import {
   type PendingReviewSession,
   type ReviewContext,
 } from "./change-review-model.ts";
-import {
-  reviewBranchSchema,
-  verifyReviewPullRequest,
-} from "./change-review-publication.ts";
+import { planningBranchSchema } from "./change-branch.ts";
+import { verifyReviewPullRequest } from "./change-review-publication.ts";
 import { runWorkspaceMiseCommand } from "./mise-toolchain.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import { resolveRepoLocalChangePaths } from "./repo-local-change.ts";
@@ -297,7 +295,7 @@ async function assertCurrentBranch(
       cwd: gitRoot,
       signal,
     });
-    const current = reviewBranchSchema.parse(result.stdout);
+    const current = planningBranchSchema.parse(result.stdout.trim());
     if (current !== branch) {
       throw new ChangeReviewError(
         `Текущая Git-ветка изменилась с «${branch}» на «${current}»`,

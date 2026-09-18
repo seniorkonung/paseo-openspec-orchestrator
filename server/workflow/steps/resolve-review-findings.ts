@@ -23,8 +23,8 @@ async function resolveReviewFindingsStep(
   dependencies: ResolveReviewFindingsDependencies,
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
-  const { branch, change } = context.state;
-  if (!branch || !change) {
+  const { activeBranch, change } = context.state;
+  if (!activeBranch || !change) {
     return {
       kind: "halt",
       summary: "Недостаточно данных для устранения findings",
@@ -49,7 +49,7 @@ async function resolveReviewFindingsStep(
       const plan = await dependencies.findingResolution.plan(
         dependencies.workspaceDirectory,
         change.id,
-        branch,
+        activeBranch,
         context.signal,
       );
       if (plan.kind === "no-findings") {
@@ -100,7 +100,7 @@ async function resolveReviewFindingsStep(
     const completed = await dependencies.findingResolution.run({
       workspaceDirectory: dependencies.workspaceDirectory,
       changeId: change.id,
-      branch,
+      branch: activeBranch,
       profile: resolution.profile,
       session,
       signal: context.signal,

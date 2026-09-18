@@ -24,7 +24,8 @@ import {
 export async function inspectPublicationTarget(
   command: BoundedCommandRunner,
   workspaceDirectory: string,
-  branch: string,
+  changeBranch: string,
+  activeBranch: string,
   signal: AbortSignal,
 ): Promise<PublicationTarget> {
   await assertCleanWorktree(command, workspaceDirectory, signal);
@@ -32,9 +33,9 @@ export async function inspectPublicationTarget(
     readCurrentBranch(command, workspaceDirectory, signal),
     readHeadCommit(command, workspaceDirectory, signal),
   ]);
-  if (currentBranch !== branch) {
+  if (currentBranch !== activeBranch) {
     throw new ChangePublicationError(
-      `Текущая Git-ветка изменилась с «${branch}» на «${currentBranch}»`,
+      `Текущая Git-ветка изменилась с «${activeBranch}» на «${currentBranch}»`,
     );
   }
 
@@ -89,35 +90,43 @@ export async function inspectPublicationTarget(
     );
   }
 
-  await readRemoteCommit(command, workspaceDirectory, PUBLICATION_BASE_BRANCH, signal).catch(
-    (error) => {
+  await readRemoteCommit(command, workspaceDirectory, PUBLICATION_BASE_BRANCH, signal)
+    .catch((error) => {
       if (signal.aborted) throw error;
       throw new ChangePublicationError(
         "Ветка main отсутствует или недоступна в Git remote origin",
       );
-    },
+    });
+  const expectedChangeHead = await readRemoteCommit(
+    command,
+    workspaceDirectory,
+    changeBranch,
+    signal,
   );
 
   const openPullRequests = await listOpenPullRequests(
     command,
     workspaceDirectory,
     repositoryArgument,
-    branch,
+    changeBranch,
     signal,
   );
   if (openPullRequests.length > 1) {
     throw new ChangePublicationError(
-      `Для ветки «${branch}» найдено несколько открытых pull request`,
+      `Для корневой ветки «${changeBranch}» найдено несколько открытых pull request`,
     );
   }
-  const existingPullRequest = openPullRequests[0] ?? null;
-  if (existingPullRequest) {
-    assertPullRequestRepository(existingPullRequest, repository.url);
-    if (existingPullRequest.headRefName !== branch) {
-      throw new ChangePublicationError(
-        `GitHub CLI вернул pull request другой ветки вместо «${branch}»`,
-      );
-    }
+  const existingPullRequest = openPullRequests[0];
+  if (!existingPullRequest) {
+    throw new ChangePublicationError(
+      `Для корневой ветки «${changeBranch}» отсутствует открытый pull request`,
+    );
+  }
+  assertPullRequestRepository(existingPullRequest, repository.url);
+  if (existingPullRequest.headRefName !== changeBranch) {
+    throw new ChangePublicationError(
+      `GitHub CLI вернул pull request другой ветки вместо «${changeBranch}»`,
+    );
   }
   if (existingPullRequest?.isCrossRepository) {
     throw new ChangePublicationError(
@@ -129,6 +138,7 @@ export async function inspectPublicationTarget(
     repository: repositoryArgument,
     repositoryUrl: repository.url,
     expectedHead,
+    expectedChangeHead,
     existingPullRequest,
   };
 }
@@ -138,7 +148,8 @@ export async function verifyPublication(
   request: {
     readonly workspaceDirectory: string;
     readonly changeId: string;
-    readonly branch: string;
+    readonly changeBranch: string;
+    readonly activeBranch: string;
     readonly target: PublicationTarget;
     readonly input: PublicationCompletionInput;
     readonly signal: AbortSignal;
@@ -149,9 +160,9 @@ export async function verifyPublication(
     readCurrentBranch(command, request.workspaceDirectory, request.signal),
     readHeadCommit(command, request.workspaceDirectory, request.signal),
   ]);
-  if (currentBranch !== request.branch) {
+  if (currentBranch !== request.activeBranch) {
     throw new ChangePublicationError(
-      `Текущая Git-ветка изменилась с «${request.branch}» на «${currentBranch}»`,
+      `Текущая Git-ветка изменилась с «${request.activeBranch}» на «${currentBranch}»`,
     );
   }
   if (head !== request.target.expectedHead) {
@@ -163,17 +174,29 @@ export async function verifyPublication(
   const remoteHead = await readRemoteCommit(
     command,
     request.workspaceDirectory,
-    request.branch,
+    request.activeBranch,
     request.signal,
   );
   if (remoteHead !== head) {
     throw new ChangePublicationError(
-      `Git remote origin не содержит текущий HEAD ветки «${request.branch}»`,
+      `Git remote origin не содержит текущий HEAD ветки «${request.activeBranch}»`,
     );
   }
 
-  const expectedNumber = request.target.existingPullRequest?.number;
-  if (expectedNumber !== undefined && expectedNumber !== request.input.pullRequestNumber) {
+  const changeHead = await readRemoteCommit(
+    command,
+    request.workspaceDirectory,
+    request.changeBranch,
+    request.signal,
+  );
+  if (changeHead !== request.target.expectedChangeHead) {
+    throw new ChangePublicationError(
+      `Корневая ветка «${request.changeBranch}» изменилась во время planning`,
+    );
+  }
+
+  const expectedNumber = request.target.existingPullRequest.number;
+  if (expectedNumber !== request.input.pullRequestNumber) {
     throw new ChangePublicationError(
       `Нужно актуализировать существующий pull request #${expectedNumber}`,
     );
@@ -198,18 +221,15 @@ export async function verifyPublication(
   if (pullRequest.baseRefName !== PUBLICATION_BASE_BRANCH) {
     throw new ChangePublicationError("Pull request должен быть направлен в ветку main");
   }
-  if (pullRequest.headRefName !== request.branch || pullRequest.headRefOid !== head) {
+  if (
+    pullRequest.headRefName !== request.changeBranch ||
+    pullRequest.headRefOid !== changeHead
+  ) {
     throw new ChangePublicationError(
-      "Pull request не содержит текущий HEAD выбранной Git-ветки",
+      "Интеграционный pull request не содержит текущий HEAD корневой change-ветки",
     );
   }
-  if (request.target.existingPullRequest === null && !pullRequest.isDraft) {
-    throw new ChangePublicationError("Новый интеграционный pull request должен быть Draft");
-  }
-  if (
-    request.target.existingPullRequest &&
-    pullRequest.isDraft !== request.target.existingPullRequest.isDraft
-  ) {
+  if (pullRequest.isDraft !== request.target.existingPullRequest.isDraft) {
     throw new ChangePublicationError(
       "Статус Draft существующего pull request не должен изменяться",
     );
@@ -226,14 +246,15 @@ export async function verifyPublication(
     request.input.title,
     request.input.body,
     request.changeId,
-    request.branch,
+    request.changeBranch,
+    request.activeBranch,
   );
 
   const openPullRequests = await listOpenPullRequests(
     command,
     request.workspaceDirectory,
     request.target.repository,
-    request.branch,
+    request.changeBranch,
     request.signal,
   );
   if (
@@ -246,7 +267,7 @@ export async function verifyPublication(
   }
   assertPullRequestRepository(openPullRequests[0], request.target.repositoryUrl);
   if (
-    openPullRequests[0].headRefName !== request.branch ||
+    openPullRequests[0].headRefName !== request.changeBranch ||
     openPullRequests[0].isCrossRepository
   ) {
     throw new ChangePublicationError(
@@ -410,14 +431,16 @@ function assertStablePullRequestContent(
   title: string,
   body: string,
   changeId: string,
-  branch: string,
+  changeBranch: string,
+  activeBranch: string,
 ): void {
   const unstableTitle =
     /\b(?:wip|draft)\b|чернов|#\d+|\b(?:task|issue|задач[аи])\s*[-#:]?\s*\d+/iu;
   if (
     unstableTitle.test(title) ||
     title.toLowerCase().includes(changeId.toLowerCase()) ||
-    title.toLowerCase().includes(branch.toLowerCase())
+    title.toLowerCase().includes(changeBranch.toLowerCase()) ||
+    title.toLowerCase().includes(activeBranch.toLowerCase())
   ) {
     throw new ChangePublicationError(
       "Название pull request должно описывать стабильный результат change",

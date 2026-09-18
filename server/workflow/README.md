@@ -1,589 +1,255 @@
 # Workflow OpenSpec
 
-Workflow состоит из последовательности независимых шагов. Само выполнение, история
-действий, пауза, повторный запуск и восстановление после перезапуска находятся в
-`OpenSpecOrchestratorEngine`; в файлах шагов остаётся только бизнес-логика.
-Сейчас workflow проверяет обязательные профили агентов Paseo, Git-ветку, чистоту
-рабочего дерева и локальный toolchain mise, после чего запускает интерактивный
-выбор OpenSpec change и рекурсивно создаёт его planning-артефакты до готовности
-к apply, после чего публикует ветку и интеграционный pull request change и
-проводит review всех артефактов выбранного change, а затем по одной устраняет
-активные findings обычного и implementation review и рекурсивно выполняет все
-OpenSpec-задачи отдельными агентами и stacked pull requests.
+Workflow — граф независимых шагов. `OpenSpecOrchestratorEngine` отвечает за
+жизненный цикл, историю, паузу, retry и восстановление; модули в `steps/`
+содержат только сценарную логику.
 
 ## Границы и контракты
 
-Workflow разделён на четыре уровня с разной ответственностью:
+- `types.ts` определяет `WorkflowState`, результат шага, runtime-контекст и
+  готовый `WorkflowDefinition`.
+- Каждый модуль `steps/*.ts` объявляет собственный узкий интерфейс
+  `*Dependencies` из потребностей сценария.
+- `steps/index.ts` — единственная точка сборки стандартного workflow.
+- Engine исполняет уже собранный граф и не знает о Git, OpenSpec, GitHub или
+  агентах конкретного шага.
 
-- `types.ts` определяет только контракт исполнения: состояние, результат шага,
-  runtime-контекст и готовый `WorkflowDefinition`. Предметных сервисов OpenSpec в
-  этом файле нет.
-- Каждый модуль в `steps/` определяет предоставляемое поведение одного сценария и
-  собственный интерфейс `*Dependencies`. В нём перечислены только возможности,
-  необходимые этому шагу. По реализации шага и этому интерфейсу должно быть
-  возможно проверить сценарий, не открывая реализации зависимостей.
-- `steps/index.ts` — единственная точка сборки стандартного OpenSpec workflow. Она
-  получает конкретные сервисы, передаёт каждому шагу его узкий контракт и
-  возвращает готовый `WorkflowDefinition`.
-- `OpenSpecOrchestratorEngine` исполняет готовое определение, управляет жизненным
-  циклом и checkpoint. Он не знает, какие Git-, OpenSpec-, агентские или GitHub-
-  сервисы использует конкретный шаг.
+`WorkflowStepContext` содержит `signal`, read-only `state`, durable
+`checkpointState`, ссылки текущего действия и best-effort `notify`. Workspace и
+предметные сервисы связываются до запуска.
 
-`WorkflowStepContext` содержит только общие возможности движка: `signal`,
-read-only `state`, durable `checkpointState`, обновление ссылок текущего действия
-и best-effort `notify`. Workspace и предметные сервисы в контекст не входят:
-они связываются с шагом до запуска.
+Результат шага:
+
+- `continue` сохраняет состояние и переходит по явному `next`;
+- `complete` успешно заканчивает workflow;
+- `halt` сохраняет текущий durable checkpoint и разрешает «Повторить».
+
+Внешний эффект нельзя считать сохранённым только потому, что команда успешно
+вернулась. Перед первой мутацией шаг записывает pending-сессию полным вызовом
+`checkpointState(nextState)`, а при повторе сверяет уже созданные файлы,
+коммиты, refs, push и PR.
+
+## Durable state версии 3
+
+Состояние хранит две разные ветки:
+
+```ts
+interface WorkflowState {
+  changeBranch: string | null; // неизменяемая change/<id>
+  activeBranch: string | null; // planning/root/task branch текущего шага
+  change: OrchestratorChange | null;
+  // не более одной pending-сессии внешнего эффекта
+}
+```
+
+`changeBranch` и `activeBranch` устанавливаются вместе. Если `change` известен,
+корневая ветка обязана быть точной `change/<change.id>`. Pending-сессии
+инициализации, planning-ветки, артефакта, review, findings, planning merge и
+задачи взаимоисключающие.
+
+Checkpoint имеет версию 3. Версия 2 не мигрируется: её поле `branch` не
+позволяет доказать, какая ветка была корневой. Такой ledger открывается в
+read-only degraded-состоянии, исходный файл сохраняется; пользователь может
+только явно очистить состояние и начать заново из `change/<id>`.
+
+## Граф веток и PR
+
+```text
+main
+  ^  root PR (новый всегда Draft)
+change/<id>
+  ^  Ready planning PR, ручной merge
+planning/<id>
+  |  planning artifacts, review.md, finding fixes
+
+После merge planning PR:
+
+main
+  ^  root PR
+change/<id>              activeBranch после fetch + ff-only
+  ^
+<id>-task-1
+  ^
+<id>-task-2 ...
+```
+
+Task PR сливаются в обратном порядке до `change/<id>`, затем root PR — в
+`main`.
+
+## Последовательность шагов
+
+```text
+check-agent-profiles
+  -> check-git-branch
+  -> check-git-worktree
+  -> check-mise-toolchain
+  -> initialize-change
+  -> prepare-planning-branch
+  -> inspect-change
+       -> create-change-artifacts --+
+       |                            |
+       +----------------------------+
+       -> publish-change
+  -> review-change
+  -> resolve-review-findings -------+
+  -> resolve-implementation-review-findings --+
+  -> await-planning-merge
+  -> execute-change-tasks ----------+
+```
+
+Циклы создают один артефакт, устраняют одну finding или выполняют одну задачу за
+итерацию.
+
+## Preflight и определение change
+
+`check-git-branch` допускает только точное `change/<kebab-case-id>`. `main`,
+detached HEAD, произвольная ветка, `planning/<id>` и дополнительный сегмент
+отклоняются. Change ID всегда извлекается из suffix; агента выбора и инструмента
+`set_change` нет.
+
+`check-git-worktree` требует пустой `git status --porcelain=v1
+--untracked-files=all`. `check-mise-toolchain` проверяет доступный и уже
+установленный `npm:@fission-ai/openspec`, но ничего не устанавливает.
+
+## Инициализация root
+
+`initialize-change` сначала сохраняет `pendingChangeInitializationSession` с
+change ID, root branch, исходным commit, repo-local OpenSpec root и признаком
+существования change, а также snapshot ранее открытого root PR. Поэтому PR,
+существовавший до запуска, сохраняет Ready/Draft, а созданный запуском PR
+остаётся Draft и после recovery.
+
+Сервис запускает только официальные JSON-команды через
+`mise exec --no-deps -- openspec`:
+
+- `list --json`;
+- `new change <id> --json` только для отсутствующего change;
+- `status --change <id> --json`.
+
+Во всех JSON-ответах проверяется `root`; смена root между командами или root за
+пределами workspace отклоняются. Для нового change сверяются `path`,
+`metadataPath` и фактический `changeRoot`.
+Все changed и staged paths обязаны лежать внутри repo-local change root. Затем
+создаётся один коммит `docs(openspec): add <id> change` либо короткий fallback,
+root ветка публикуется без force и создаётся Draft PR в `main`.
+
+Ровно один существующий открытый root PR переиспользуется. Неверная base
+исправляется на `main`; Draft/Ready-состояние сохраняется. Закрытый PR не
+переоткрывается. После каждого аварийного окна повтор проверяет scaffold,
+commit, remote head и PR, а не дублирует их.
+
+## Planning-ветка и артефакты
+
+`prepare-planning-branch` сохраняет root baseline, проверяет одинаковые local и
+origin root HEAD и отсутствие local/remote/historical занятости
+`planning/<id>`. Ветка создаётся через `git switch -c planning/<id> <baseline>`.
+Recovery разрешает только сохранённую root или уже активную planning-ветку.
+
+`inspect-change` читает schema-defined граф OpenSpec. Первый `ready` артефакт
+создаётся отдельным Ultra Sandbox агентом и одним коммитом. `complete_artifact`
+проверяет точные output paths, чистое дерево, один commit после baseline и
+subject. Цикл заканчивается только после успешного `instructions apply --json`.
+
+## Публикация root PR
+
+`publish-change` работает при активной `planning/<id>`. Medium Sandbox агент
+читает завершённые артефакты, публикует planning-ветку и полностью заменяет
+русские title/body уже существующего root PR `change/<id> -> main`. Он не
+создаёт новый root PR и не публикует root-ветку.
+
+`complete_change_publication` проверяет:
+
+- неизменность local planning HEAD во время работы агента;
+- точный remote planning HEAD;
+- неизменность remote root HEAD;
+- тот же GitHub repository и номер root PR;
+- `change/<id> -> main`, отсутствие fork и сохранённое Draft/Ready-состояние;
+- стабильный title и четыре обязательных раздела body.
+
+## Review и findings на одной ветке
+
+`review-change` не создаёт новую ветку. Pending-сессия сохраняет root branch и
+её immutable commit, planning branch и baseline артефактов, repository identity
+и номер root PR.
+
+Ultra Sandbox агент запускает `openspec-review-change`, записывает `review.md`
+и дополнительные новые review-файлы внутри change root, создаёт ровно один
+review-коммит и публикует его в `planning/<id>`. Затем он создаёт единственный
+Ready non-fork PR `planning/<id> -> change/<id>` с точными title/body.
+
+Completion проверяет неизменность root local/remote HEAD и root PR, ancestry
+planning baseline, ровно один review-коммит, отсутствие изменений существующих
+planning-артефактов, точный remote HEAD и Ready planning PR.
+
+Оба finding-контура продолжают коммитить и push в `planning/<id>`. Каждая
+итерация выбирает первый активный `F<n>`, требует отдельное разрешение на
+исправление/принятие риска и отдельное разрешение на commit+push. MCP повторно
+валидирует отчёт, commit, remote head и тот же Ready planning PR, после чего
+идемпотентно добавляет результат в управляемую секцию body. Review и
+implementation-review findings различаются в marker.
+
+## Merge-gate planning PR
+
+После последней finding `await-planning-merge` читает ровно один PR с head
+`planning/<id>` и проверяет repository, Ready, non-fork и base `change/<id>`:
+
+- `OPEN` — recoverable `halt` с URL и просьбой выполнить merge и нажать
+  «Повторить»;
+- `CLOSED` — ошибка, замена PR автоматически не создаётся;
+- `MERGED` — сохраняется `pendingPlanningMergeSession`.
+
+Завершение сессии повторно проверяет тот же merged PR и planning head, требует
+чистое дерево, выполняет `git fetch --no-tags origin
+refs/heads/change/<id>`, переключается на сохранённую root-ветку и вызывает
+только `git merge --ff-only <FETCH_HEAD>`. Recovery принимает как planning, так
+и уже переключённую root-ветку. После сверки root с origin OpenSpec change
+проверяется ещё раз, `activeBranch` становится `change/<id>`.
+
+## Выполнение задач
+
+`execute-change-tasks` читает `instructions apply --change <id> --json` и
+выбирает первую незавершённую задачу. Первая task-ветка создаётся от обновлённой
+`change/<id>`, последующие — от предыдущей task-ветки.
+
+Одна итерация сохраняет полный task checkpoint, запускает High Sandbox агента,
+создаёт и публикует ветку, выполняет только выбранную задачу, создаёт один
+Conventional Commit и Ready PR в сохранённую parent-ветку. Completion проверяет
+parent immutability, один commit, единственное допустимое изменение task-state,
+progress, точные local/remote heads и GitHub metadata. Успех делает task-ветку
+активной и повторяет шаг.
+
+## Профили, MCP и уведомления
+
+Обязательные профили определены в `server/agent-profiles.ts`. Preflight требует
+полные provider/model/mode/thinking settings. Конкретный шаг перечитывает профиль
+непосредственно перед запуском агента и не сохраняет его в checkpoint.
+
+Каждая агентская сессия получает только свой scoped MCP-инструмент:
+
+- `complete_artifact`;
+- `complete_change_publication`;
+- `complete_change_review`;
+- `complete_review_finding`;
+- `complete_implementation_review_finding`;
+- `complete_change_task`.
+
+Завершение отдельного хода не завершает workflow: MCP scope и `ntfy=true`
+остаются активными. Успешный completion отключает метку после всех проверок.
+Ошибка checkpoint возвращает метку и допускает retry.
+
+Engine отправляет best-effort уведомления `retry` после halt и `completed` после
+успеха. Ошибка доставки не меняет результат шага.
 
 ## Как добавить шаг
 
-1. Создайте файл `server/workflow/steps/<имя-шага>.ts`.
-2. Опишите рядом интерфейс зависимостей из потребностей сценария. Не передавайте
-   весь `OpenSpecWorkflowDependencies` и не создавайте локатор сервисов.
-3. Реализуйте сценарий через `WorkflowStepContext` и этот интерфейс.
-4. Экспортируйте фабрику, которая связывает зависимости с
-   `WorkflowStepDefinition` с уникальными `id` и `label`.
-5. Вызовите фабрику в `createOpenSpecWorkflow()` в `steps/index.ts`.
-
-Пример:
-
-```ts
-import type {
-  WorkflowStepContext,
-  WorkflowStepDefinition,
-  WorkflowStepResult,
-} from "../types.ts";
-
-interface InspectChangeDependencies {
-  readonly inspectChange: (signal: AbortSignal) => Promise<{ title: string } | null>;
-}
-
-async function inspectChangeStep(
-  dependencies: InspectChangeDependencies,
-  context: WorkflowStepContext,
-): Promise<WorkflowStepResult> {
-  const change = await dependencies.inspectChange(context.signal);
-
-  if (!change) {
-    return {
-      kind: "halt",
-      summary: "Change не найден",
-      message: "Создайте change и нажмите «Повторить»",
-    };
-  }
-
-  return {
-    kind: "continue",
-    next: "review-change",
-    summary: `Change: ${change.title}`,
-  };
-}
-
-export function createInspectChangeStep(
-  dependencies: InspectChangeDependencies,
-): WorkflowStepDefinition {
-  return {
-    id: "inspect-change",
-    label: "Проверяю текущий change",
-    run: (context) => inspectChangeStep(dependencies, context),
-  };
-}
-```
-
-`context.state` содержит результаты предыдущих шагов и доступен только для чтения.
-Если следующему шагу нужно передать новые данные, сначала добавьте типизированное
-поле в `WorkflowState` и такое же поле в `workflowStateSchema` в `types.ts`, затем
-верните его в `state`. После успешного шага engine атомарно сохраняет checkpoint
-со следующим `stepId` и полным состоянием. Начальный checkpoint сохраняется до
-выполнения первого шага. При перезапуске плагина команда «Запустить» продолжит
-workflow с durable checkpoint, а команда «Повторить» заново вызовет с первой
-строки именно ошибочный шаг с последним надёжно сохранённым состоянием. С первого
-шага workflow начинается после успешного завершения или явной очистки состояния.
-
-Если внешний участник должен подтвердить результат до возврата шага, используйте
-`context.checkpointState(nextState)`. Метод валидирует полное состояние, сохраняет
-checkpoint текущего шага и только после успешной записи обновляет in-memory
-состояние и публичный change. Не обновляйте только отдельное поле: в checkpoint
-всегда передаётся целый `WorkflowState`.
-Результат `continue` запускает следующий шаг, а `halt` завершает текущее выполнение
-со статусом `failed`; пользователь сможет исправить причину и выполнить `retry`.
-`halt` не принимает новое состояние: данные, которые должны пережить повтор или
-перезапуск процесса, заранее сохраняйте через `checkpointState`. Результат
-`complete` завершает workflow успешно. Массив `steps` внутри
-`WorkflowDefinition` является реестром: порядок элементов не определяет
-выполнение, переходы задаются через `next` по идентификатору шага.
-
-Переход может образовывать ветвление или цикл:
-
-```ts
-return {
-  kind: "continue",
-  next: state.issues.length > 0 ? "resolve-issues" : "review-result",
-};
-```
-
-Шаг `resolve-issues` может после исправления вернуть `next: "execute-task"`, а
-`review-result` — `kind: "complete"`.
-
-Для внешних вызовов используйте `context.signal`: engine отменяет его при retry,
-остановке плагина или уничтожении workflow. Не запускайте агент или MCP-сервер на
-уровне модуля — создавайте и закрывайте их внутри соответствующего шага.
-Checkpoint не устраняет аварийное окно между внешним эффектом и его записью,
-поэтому такие операции должны оставаться идемпотентными или уметь согласовывать
-уже созданный результат.
-
-## Профили агентов
-
-Обязательные имена профилей определены один раз в
-`server/agent-profiles.ts`. Следующие шаги не должны повторять эти строки или
-искать профиль самостоятельно: объявите `readAgentProfiles` в локальном
-dependency-контракте шага и передайте общую реализацию из `steps/index.ts`.
-Для общей preflight-проверки передайте результат в
-`resolveRequiredAgentProfiles()`, а для конкретной сессии — в
-`resolveRequiredAgentProfile()` с типизированным `RequiredAgentProfileName`.
-
-Resolver сравнивает имена после удаления крайних пробелов без учёта регистра,
-отклоняет неоднозначные совпадения и требует, чтобы каждый обязательный профиль
-явно задавал непустые `provider`, `model`, `modeId` и `thinkingOptionId`.
-`featureValues` остаётся необязательным. Успешный результат содержит
-`CompleteRequiredAgentProfile`, поэтому следующие шаги не должны добавлять
-fallback-настройки или выполнять provider discovery. Не сохраняйте профиль в
-checkpoint: перечитывайте конфигурацию Paseo непосредственно перед созданием
-агента.
-
-Paseo не принимает `profileId` в `agents.create`: шаг разворачивает поля
-`Low Sandbox`, `Medium Sandbox`, `High Sandbox` или `Ultra Sandbox` в конфигурацию агента согласно
-[официальной документации Paseo](https://paseo.sh/docs/mcp#agent-profiles).
-
-## Выбор change
-
-Перед выбором высокоуровневый шаг `check-mise-toolchain` проверяет, что команда
-`mise` доступна процессу Paseo и все обязательные tools объявлены конфигурацией
-mise внутри текущего workspace, уже скачаны и разрешаются через `mise which`.
-Сейчас в набор входит `npm:@fission-ai/openspec`; его конкретная версия не
-проверяется и не отображается. Набор можно дополнять внутри модуля mise toolchain
-без изменения интерфейса engine или шага. Проверка не выполняет установку. Если
-tool только настроен, пользователь должен выполнить `mise install` в workspace
-и нажать «Повторить».
-
-Шаг `select-change` создаёт агента `Low Sandbox` в текущем Paseo
-workspace через `workspace.agents.create`, устанавливает метку `ntfy=true` и
-добавляет ссылку на него в текущее действие. Оркестратор не включает
-автоархивирование и не архивирует агента или workspace после завершения шага:
-сессия остаётся открытой, пока пользователь сам не закроет её в Paseo. Глобальный
-`agents.create` для этого не подходит: он создаёт новый workspace для переданного
-`cwd`. Агент перечисляет все активные repo-local changes, требует явный выбор
-пользователя либо создаёт только scaffold нового change через
-`openspec-new-change`. Новый scaffold должен быть зафиксирован отдельным
-Git-коммитом; создание proposal, specs, design, tasks и других артефактов на этом
-этапе запрещено.
-
-Агент получает единственный orchestrator-owned MCP-инструмент `set_change` через
-`OrchestratorMcpToolHost`. Все команды OpenSpec агент и инструмент выполняют из
-директории workspace как `mise exec --no-deps -- openspec ...`. Инструмент
-получает фактический `changeRoot` из `openspec status --change <id> --json`,
-проверяет его границы, чистоту рабочего дерева и присутствие в `HEAD`. После
-успешной проверки он меняет метку агента на `ntfy=false`, надёжно сохраняет
-change вместе с checkpoint и только затем подтверждает успех. При reload уже
-сохранённый change проверяется заново без поиска или архивации старого агента.
-
-После выбора шаг читает `openspec status --change <id> --json`. Завершённый
-planning проверяется через `openspec instructions apply --change <id> --json`:
-допустимы только `ready` и `all_done`, а `blocked` считается несогласованным
-состоянием. Незавершённый planning переводит workflow в
-`create-change-artifacts`.
-
-## Создание артефактов change
-
-`create-change-artifacts` — self-loop: одна итерация соответствует одному
-planning-артефакту и одной агентской сессии. Следующим считается первый
-`ready`-элемент массива `artifacts` в порядке, возвращённом OpenSpec. Имена
-артефактов и граф зависимостей берутся только из текущей схемы; `tasks` не имеет
-специального значения. Статусы, зависимости, `artifactPaths`, `changeRoot` и
-границы workspace/Git валидируются до запуска агента.
-
-Перед каждой сессией профили перечитываются из Paseo. Шаг использует полный
-профиль `Ultra Sandbox`, создаёт idle-агента через `workspace.agents.create` без
-`cwd`, не включает автоархивирование, включает `ntfy=true` и добавляет ссылку на
-агента в текущее действие. Завершение итерации не архивирует агента или workspace.
-Затем `agent.commands()` должен подтвердить наличие
-`openspec-continue-change`; ошибка catalog или отсутствие skill останавливает
-итерацию до отправки задания.
-
-Агент вызывает skill ровно один раз, создаёт только ожидаемый артефакт, показывает
-его пользователю и ждёт явного одобрения завершить этап. После одобрения он
-коммитит только пути из `artifactPaths[artifactId].existingOutputPaths` сообщением
-`docs(openspec): add <artifact-id> artifact` (для слишком длинного subject —
-`docs(openspec): add planning artifact`) и вызывает единственный scoped
-MCP-инструмент `complete_artifact` без аргументов.
-
-До запуска агента checkpoint сохраняет `pendingArtifactSession` с `artifactId`,
-`schemaName` и исходным Git commit. `complete_artifact` сериализует повторные
-вызовы и независимо проверяет, что ожидаемый артефакт получил статус `done`,
-рабочее дерево чисто, от baseline появился ровно один коммит и в нём нет файлов
-за пределами ожидаемого артефакта. После проверки инструмент выключает `ntfy`,
-атомарно очищает pending-сессию и только затем отвечает успехом. Если запись
-checkpoint не удалась, `ntfy` восстанавливается, а агент может повторить вызов.
-
-При перезапуске с непустой pending-сессией шаг не выбирает следующий артефакт и
-не вызывает skill повторно, если ожидаемый файл уже создан. Он создаёт новую
-агентскую сессию для проверки того же артефакта, повторного пользовательского
-одобрения и завершения прежнего MCP-контракта. Если `complete_artifact` уже успел
-очистить checkpoint, следующий запуск либо создаст следующий `ready`-артефакт,
-либо завершится после проверки apply.
-
-## Публикация change и pull request
-
-Завершённый planning из `select-change` и последняя итерация
-`create-change-artifacts` переходят в единый шаг `publish-change`.
-Перед любыми внешними изменениями шаг подтверждает сохранённые change и ветку,
-совпадение текущей non-main ветки, чистоту рабочего дерева, завершённый planning
-и готовность apply. Незакоммиченные либо неотслеживаемые файлы являются ошибкой
-и не допускают запуска агента. Профиль `Medium Sandbox` перечитывается
-непосредственно перед сессией.
-
-Публикация требует Git remote `origin` с веткой `main`, а также установленный и
-авторизованный для соответствующего host GitHub CLI `gh`. В отличие от OpenSpec,
-`gh` является системной зависимостью наподобие Git и не добавляется в обязательные
-mise tools. Read-only preflight разрешает `origin` в конкретный GitHub-репозиторий
-и проверяет, что для текущей head-ветки существует не более одного открытого PR.
-
-Workspace-local агент читает через `mise exec --no-deps -- openspec status ...`
-пути всех завершённых артефактов, формирует из их содержания стабильные русские
-title и body, выполняет обычный `git push --set-upstream origin <branch>` без
-force и затем работает только с PR этого репозитория. Существующий открытый PR
-полностью обновляется и переводится на base `main`, сохраняя свой Draft/Ready
-статус. При его отсутствии создаётся новый Draft PR; закрытые и merged PR не
-переоткрываются.
-
-Агент запускается с `ntfy=true` и получает единственный scoped-инструмент
-`complete_change_publication`. Завершение отдельного agent turn не завершает
-и не проваливает шаг: workflow продолжает ждать MCP-подтверждение, scope остаётся
-доступным, а метка `ntfy=true` позволяет уведомить пользователя. Инструмент
-повторно проверяет чистоту дерева, текущие branch и HEAD, точное совпадение remote
-HEAD, единственность открытого PR, origin-репозиторий, base `main`, head
-branch/SHA, Draft-политику и точное содержимое title/body. Ошибка возвращается
-агенту как feedback и допускает повторный вызов в той же сессии. Только после
-успешной проверки инструмент отключает `ntfy` и завершает шаг. Если процесс
-прервался после push или создания PR, checkpoint остаётся на `publish-change`,
-а следующая сессия идемпотентно актуализирует тот же открытый PR.
-
-Успешная публикация всегда переходит в `review-change`.
-
-## Review change
-
-`review-change` считает `WorkflowState.branch` активной вершиной цепочки PR.
-Перед любыми изменениями шаг получает фактический `changeRoot`, требует полностью
-чистое дерево, сохранённую parent-ветку как текущую, одинаковый локальный и
-`origin` HEAD parent-ветки и ровно один открытый PR `parent → main`. Будущее имя
-`<parent>-review` не должно быть занято локальной или remote-веткой либо любым
-историческим PR.
-
-До запуска агента checkpoint сохраняет `pendingReviewSession`: полный change ID,
-parent- и review-ветки, baseline commit, GitHub repository identity и номер
-parent PR. Существующий `review.md` не пропускает этап: каждая новая review-сессия
-обязана создать новый review-коммит. Одновременно может существовать только одна
-агентская pending-сессия. Checkpoint version 2 намеренно не читает старый формат
-review-сессии.
-
-Шаг перечитывает профиль `Ultra Sandbox` и сразу создаёт workspace-local агента
-через `workspace.agents.create` с готовым prompt, единственным scoped-инструментом
-`complete_change_review` и меткой `ntfy=true`. Оркестратор намеренно не вызывает
-`agent.commands()` и не проверяет наличие `openspec-review-change`: способы
-обнаружения и запуска skill являются частью среды конкретного агента. Prompt
-передаёт точное полное имя change. Агент создаёт `<parent>-review` строго от
-baseline, сразу публикует ветку, вызывает skill, записывает законченный
-`review.md`, не исправляет findings или planning-файлы, создаёт ровно один commit
-`docs(openspec): add <change-id> review` и повторно публикует ветку без force.
-Существующий `review.md` разрешено изменить; остальные существующие файлы менять
-нельзя. Для слишком длинного subject используется
-`docs(openspec): add change review`.
-
-После push агент создаёт или согласует ровно один Ready PR
-`<parent>-review → <parent>` в сохранённом origin-репозитории. Title равен
-`Первичное ревью OpenSpec change «<change-id>»` с коротким fallback для лимита
-GitHub, body кратко обозначает первичное ревью артефактов. Draft, fork и PR с
-другими base/head запрещены.
-
-Агент вызывает `complete_change_review {}` после завершения review независимо от
-наличия findings. Если ему нужна помощь или он считает review незаконченным, он
-не вызывает инструмент и продолжает общение с пользователем в той же сессии.
-Завершение отдельного agent turn не завершает шаг и не считается ошибкой:
-workflow ждёт MCP-подтверждение, scope остаётся доступным, а `ntfy=true` позволяет
-уведомить пользователя.
-
-Инструмент сериализует повторные вызовы и независимо проверяет неизменность
-parent HEAD и parent PR, непустой обычный `review.md`, чистое дерево, активную
-review-ветку и наследование baseline, ровно один новый коммит, наличие review в
-diff, отсутствие путей вне change root и изменений существующих planning-файлов,
-точный subject и remote HEAD. Затем он требует единственный открытый Ready PR в
-том же репозитории с точными base/head/SHA/title/body и без fork.
-
-Только после успешной проверки атомарный workflow-переход меняет активную
-`state.branch` на review-ветку и очищает `pendingReviewSession`. Если запись
-перехода не удалась, durable checkpoint сохраняет сессию для retry. При reload
-локальная ветка, первый push, review-коммит и уже созданный PR согласуются по
-сохранённой сессии без дублирования. Правильный существующий review-коммит не
-создаётся повторно. Затем `review-change` переходит в
-`resolve-review-findings`, и все commits устранения findings публикуются в
-review-ветку.
-
-После выполнения задач merge начинается с вершины task-стека; полный порядок
-описан в разделе «Выполнение OpenSpec-задач».
-
-## Устранение review findings
-
-`resolve-review-findings` — self-loop, где одна итерация отвечает ровно за одну
-активную finding и одну агентскую сессию. До чтения профиля этап снова получает
-фактический `changeRoot` через OpenSpec, проверяет сохранённую ветку, чистое
-рабочее дерево, tracked `review.md` и точное совпадение локального и `origin`
-HEAD. Затем repo-owned parser читает только обычный файл без symlink, не больше
-1 MiB, требует корректный UTF-8 и полностью валидирует `review.md` Format
-version 1. Допускается не больше 256 активных findings. Активными считаются
-только записи `F<n>` раздела `Findings` в порядке отчёта; `AR<n>` из
-`Accepted risks` являются уже принятыми рисками. Неизвестный или повреждённый
-формат останавливает этап с feedback, а пустой список findings сразу успешно
-переходит к `resolve-implementation-review-findings`.
-
-Если finding существует, checkpoint до создания агента сохраняет
-`pendingFindingResolutionSession`: change ID, ветку, первый finding ID и
-baseline commit. Одновременно может существовать не больше одной artifact-,
-review-, обычной finding- или implementation finding-сессии. Затем этап
-перечитывает профиль `High Sandbox` и
-создаёт workspace-local агента с `ntfy=true`. Он не вызывает `agent.commands()`
-и не проверяет наличие skill, а прямо предписывает агенту вызвать
-`openspec-review-change` для точных change ID и finding ID.
-
-Агент общается с пользователем по-русски и объясняет проблему, её влияние и
-предлагаемое решение без предположения, что пользователь видел finding. Для
-продуктового, поведенческого или контрактного решения он показывает варианты,
-компромиссы и рекомендацию. Для очевидного технического исправления он кратко
-поясняет, почему изменение planning-артефакта не меняет поведение продукта.
-Первое явное разрешение обязательно до изменения planning-артефактов или
-принятия риска. После исправления и повторной проверки агент показывает итог и
-получает отдельное второе разрешение на commit и push.
-
-После второго разрешения агент создаёт ровно один commit
-`docs(openspec): resolve <F-id> review finding`, включающий только файлы внутри
-выбранного change root и обязательно изменение `review.md`, выполняет обычный
-`git push --set-upstream origin <branch>` без force и без третьего вопроса
-вызывает единственный scoped-инструмент `complete_review_finding` с одним из
-двух типизированных входов:
-
-```ts
-{ mode: "publish", problem: string, resolution: string }
-{ mode: "acknowledge-existing" }
-```
-
-При обычном завершении агент передаёт `publish`: непустые русскоязычные
-однострочные формулировки до 500 символов без управляющих символов и служебных
-markers. Агент не запускает `gh`, не ищет PR и не изменяет его body. Второе
-разрешение пользователя уже покрывает автоматическую публикацию результата в
-PR; третье разрешение не требуется.
-
-Инструмент заново читает отчёт тем же parser и отклоняет вызов, если выбранный
-ID всё ещё находится в `Findings`. Также он независимо проверяет текущую ветку,
-чистое дерево без untracked-файлов, наследование baseline, ровно один новый
-коммит с точным subject, изменение `review.md`, отсутствие путей вне change
-root и совпадение локального и remote HEAD. После успеха инструмент отключает
-`ntfy`, атомарно очищает pending-сессию и возвращает опубликованный commit,
-outcome, проверенные номер/URL PR и оставшиеся ID. Outcome вычисляется из
-валидированного отчёта: accepted risk с `Originating finding`, равным выбранному
-ID, даёт `accepted-risk`; иначе результат считается `resolved`.
-
-Перед завершением MCP сам разрешает GitHub-репозиторий из `origin` и требует
-ровно один открытый Ready PR без fork из текущей review-ветки в её parent-ветку.
-Он сверяет repository, base/head, стабильный title и `headRefOid` с remote HEAD,
-перечитывает актуальный body и сохраняет всё существующее содержимое. Итог
-хронологически добавляется в управляемую секцию:
-
-```markdown
-<!-- paseo-openspec-orchestrator:findings:start -->
-## Результаты устранения замечаний
-
-- **OpenSpec review `F1` — исправлено**
-  - **Проблема:** Краткое описание.
-  - **Итог:** Исправлено: краткое описание решения.
-  <!-- paseo-openspec-orchestrator:finding:review:F1:<baseline-commit> -->
-<!-- paseo-openspec-orchestrator:findings:end -->
-```
-
-Для принятого риска статус меняется на `риск принят`, а итог получает префикс
-`Риск принят:`. Body передаётся `gh pr edit --body-file` через защищённый
-временный файл вне репозитория с гарантированной очисткой. После изменения MCP
-ещё раз читает PR и проверяет точный body, metadata и remote HEAD. Только после
-этого отключаются `ntfy` и pending-сессия. Ошибка записи checkpoint
-восстанавливает `ntfy=true`.
-
-Непустой список оставшихся ID возвращает переход на этот же шаг; следующая
-итерация снова выбирает первую finding из актуального отчёта. Если процесс
-перезапущен с pending-сессией, сохраняются тот же finding ID и baseline. Уже
-корректный локальный commit не создаётся повторно: восстановительный агент не
-повторяет skill и разрешения, а формулирует итог и вызывает `publish`. Marker из
-вида review, finding ID и baseline commit делает повторный вызов после ошибки
-MCP или checkpoint идемпотентным. Если проверенная запись уже существует в PR,
-агент вызывает `acknowledge-existing`; синхронизация GitHub никогда не становится
-обязанностью агента.
-
-Оба успешных исхода этого этапа — отсутствие findings и устранение последней
-finding — переходят в `resolve-implementation-review-findings`.
-
-## Устранение implementation review findings
-
-`resolve-implementation-review-findings` — второй self-loop цепочки. До чтения
-профиля он выполняет общий Git preflight и разбирает канонический
-`implementation-review.md` внутри фактического `changeRoot`. Отсутствие файла
-разрешено только при первичном planning и означает пустой список findings;
-workflow тогда переходит к выполнению задач без создания finding-агента.
-Существующий файл должен быть
-обычным файлом без symlink, находиться внутри change root, иметь размер не более
-1 MiB и корректную кодировку UTF-8. Repo-owned parser полностью и fail-closed
-валидирует OpenSpec Implementation Review Format version 1, включая assessment,
-review target, coverage, findings, accepted risks и их cross-field инварианты.
-Он допускает не более 256 активных `F<n>`, сохраняет их порядок из `Findings` и
-не считает активными `AR<n>` из `Accepted risks`.
-
-При наличии finding этап сохраняет
-`pendingImplementationFindingResolutionSession` с change ID, веткой, первым ID
-и baseline commit, затем перечитывает профиль `High Sandbox` и создаёт агента в
-текущем Paseo workspace через `workspace.agents.create` без `cwd`. Агент
-получает `ntfy=true`, единственный scoped-инструмент
-`complete_implementation_review_finding` с тем же типизированным publish/
-acknowledge-контрактом и прямое требование вызвать
-`openspec-review-implementation` для точных change ID и finding ID. Оркестратор
-не проверяет каталог или наличие skills.
-
-Пользователь не обязан заранее знать содержание finding. Для продуктового,
-поведенческого или контрактного вопроса агент объясняет влияние на продукт,
-варианты, компромиссы и свою рекомендацию. Для очевидной технической проблемы
-он объясняет исходную ситуацию с нулевого контекста, предлагает конкретную
-корректировку и подтверждает отсутствие изменения продуктового поведения.
-Первое явное разрешение требуется до изменения planning-артефактов либо явного
-принятия остаточного риска. После изменения и повторной проверки агент показывает
-результат и получает отдельное второе разрешение перед commit и push.
-
-Этот этап не изменяет implementation и тесты. Remediation либо создаёт
-устойчивого владельца исправления в planning/tracked work, либо переносит явно
-принятый риск из `F<n>` в `AR<n>`. После второго разрешения агент создаёт ровно
-один commit `docs(openspec): resolve <F-id> implementation finding` (для subject
-длиннее 72 символов используется
-`docs(openspec): resolve implementation review finding`), публикует текущую
-ветку в `origin` без force и tags и без третьего разрешения вызывает MCP с
-краткими `problem` и `resolution`. Агент не запускает `gh` и не редактирует PR.
-
-Инструмент повторно разбирает отчёт тем же parser и возвращает ошибку, пока
-выбранный ID остаётся среди активных findings. Он также требует существующий
-tracked `implementation-review.md`, чистое дерево без untracked-файлов,
-сохранённую ветку, наследование baseline, ровно один commit с точным subject,
-изменение отчёта, отсутствие путей вне change root и точное совпадение локального
-HEAD с `origin/<branch>`. Ошибка содержит feedback для агента, сохраняет
-`ntfy=true` и допускает повторный вызов. Затем MCP проверяет тот же Ready review
-PR и накопительно добавляет запись с источником `OpenSpec implementation
-review`. Поэтому одинаковые `F1` из двух видов review имеют разные markers.
-Принятый риск определяется только по `Originating finding` валидированного
-отчёта и публикуется со статусом `риск принят`. Успех выключает `ntfy`, атомарно
-очищает pending-сессию и возвращает commit, outcome, PR и оставшиеся ID. Ошибка
-checkpoint снова включает `ntfy`.
-
-При оставшихся findings этап рекурсивно запускает себя, каждый раз выбирая
-первую актуальную finding отчёта и отдельного агента. После перезапуска
-сохраняются исходные finding ID и baseline. Если корректный локальный commit уже
-есть, recovery не повторяет skill и два подтверждения, а завершает только push и
-MCP-handshake в режиме `publish`; уже существующая проверенная PR-запись требует
-`acknowledge-existing`. Удаление всего отчёта после выбора finding считается
-ошибкой.
-
-Оба успешных исхода этапа переходят в `execute-change-tasks`.
-
-## Выполнение OpenSpec-задач
-
-`execute-change-tasks` — self-loop, где одна итерация отвечает ровно за одну
-незавершённую задачу, отдельную task-ветку, один High-агент и один Ready PR.
-Этап читает `openspec instructions apply --change <id> --json` и выбирает первый
-элемент с `done: false` в порядке OpenSpec. Внутренний позиционный `tasks[].id`
-сохраняется только для последующей проверки; агент и имя ветки получают
-человекочитаемый номер из начала `description`, например `1.1` или `1.1.1`.
-Отсутствующая или повторяющаяся нумерация незавершённых задач, состояние
-`blocked` и противоречивый progress останавливают этап. `all_done` завершает
-workflow без агента.
-
-Текущая `state.branch` является непосредственной parent-веткой следующей
-итерации. Preflight требует чистое дерево, текущий локальный HEAD этой ветки,
-точно такой же `origin` HEAD и единственный открытый Ready non-fork parent PR.
-Имя `<change-id>-task-<task-number>` должно отсутствовать среди локальных и
-remote refs и во всей истории PR. До создания агента checkpoint сохраняет
-change/schema, внутренний ID и номер задачи, полное описание, parent/task refs,
-baseline, SHA-256 снимки списка задач до и после единственного допустимого
-переключения `done`, progress, GitHub repository identity и parent PR. Как и у
-остальных сессий, одновременно допускается только одно pending-состояние.
-
-После checkpoint этап перечитывает профиль `High`, создаёт idle-агента в том же
-workspace с `ntfy=true` и единственным scoped-инструментом
-`complete_change_task`. До первого prompt каталог команд должен содержать оба
-skill: `openspec-apply-change` и `change-summary`. Агент создаёт task-ветку
-строго от baseline и сразу публикует её, затем вызывает
-`$openspec-apply-change <change-id> Выполни задачу <номер>. К другим задачам не
-приступай.` Он реализует только выбранную задачу, выполняет проверки, меняет
-только её checkbox, создаёт ровно один Conventional Commit subject короче 72
-символов и публикует его без force и tags.
-
-Затем агент явно вызывает `$change-summary` для `baseline..HEAD` и использует
-полученный текст непосредственно как body без дополнительной секции. Он создаёт
-ровно один Ready non-fork PR из task-ветки в сохранённую parent-ветку и передаёт
-MCP его номер, фактические title и body. Русский title должен содержать точный
-номер задачи. После успешного MCP агент ничего больше не сообщает и завершает
-ход.
-
-Инструмент независимо проверяет неизменность parent-ветки и parent PR, чистое
-дерево, текущую task-ветку и ancestry, ровно один commit, единственное изменение
-task-state, неизменность остальных задач, progress, Conventional Commit subject,
-точное совпадение local/remote HEAD и единственный Ready PR с сохранёнными
-repository/base/head/OID. Переданные title/body должны байт-в-байт совпасть с
-GitHub. Ошибка возвращается агенту как feedback и допускает повторный вызов.
-Успех сначала выключает `ntfy`, затем атомарно очищает pending-сессию и делает
-task-ветку активной; ошибка checkpoint восстанавливает `ntfy=true`.
-
-Если ход агента закончился без MCP, workflow продолжает ждать: scope и
-`ntfy=true` остаются активными. Отмена этапа закрывает scope и выключает метку.
-Recovery принимает сохранённую parent- или task-ветку и согласует уже
-опубликованный baseline, готовый единственный commit, частичный push или уже
-созданный Ready PR. Если список задач уже равен ожидаемому снимку после
-выполнения, skill и новый commit запрещены.
-
-PR образуют стек: первая task-ветка направлена в review-ветку, каждая следующая
-— в предыдущую task-ветку. Merge выполняется от последней task-ветки назад,
-затем review PR вливается в change-ветку, а change PR — в `main`.
-
-## Уведомления
-
-Шаг может отправить короткое типизированное уведомление через runtime-контекст:
-
-```ts
-await context.notify({
-  kind: "progress",
-  message: "Начинаю проверку результата агента",
-});
-```
-
-Доступны четыре простых вида: `retry` сообщает, что нужно исправить причину и
-нажать «Повторить», `completed` означает завершение workflow, `progress` подходит
-для проактивных сообщений во время долгого шага, а `manual` — для явного вызова.
-Доставка не является частью бизнес-логики шага: ошибка ntfy записывается в лог и
-не переводит сам шаг в ошибочное состояние.
-
-Оркестратор автоматически отправляет `retry` при любом `halt` или неожиданной
-ошибке шага и `completed` после успешного завершения. Настройки находятся в
-Settings → Plugins → «Уведомления OpenSpec» и не зависят от paseo-ntfy. Пустая
-тема или выключатель отключают доставку.
-
-В заголовке ntfy сначала указываются название проекта и человекочитаемое имя
-workspace (`Проект / Workspace — Событие`). Идентификатор workspace и ссылка на
-агента в уведомление не добавляются. Перед каждой отправкой оркестратор заново
-получает данные workspace из Paseo, поэтому переименование применяется без
-перезапуска плагина.
-
-Кнопка «Очистить состояние» удаляет из ledger историю, change и checkpoint, а
-затем следующий запуск проходит все шаги заново. Engine не угадывает, нужно ли
-повторять внешнюю работу: каждый шаг сам проверяет актуальное состояние и может
-сразу вернуть переход к нужной ветке графа. Поэтому шаги, вызывающие агентов или
-изменяющие файлы, должны быть идемпотентными либо уметь безопасно обнаруживать
-уже выполненный результат.
+1. Создайте `server/workflow/steps/<step>.ts`.
+2. Опишите рядом минимальный `*Dependencies`.
+3. Добавьте durable поля одновременно в `WorkflowState` и
+   `workflowStateSchema`.
+4. Сохраните pending-сессию до внешнего эффекта и реализуйте reconciliation.
+5. Зарегистрируйте фабрику в `createOpenSpecWorkflow()`.
+6. Добавьте переходы и тесты normal/retry/restart/fail-closed.
+
+Передаваемый `AbortSignal` обязателен для команд, агентов и ожиданий. Не
+запускайте agent или MCP host на уровне модуля и не делайте force/reset как
+способ восстановления.

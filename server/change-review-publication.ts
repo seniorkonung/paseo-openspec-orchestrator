@@ -1,9 +1,16 @@
 import { z } from "zod";
 import {
+  assertPlanningBranchFor,
+  changeBranchFor,
+  changeBranchSchema,
+  planningBranchFor,
+  planningBranchSchema,
+} from "./change-branch.ts";
+import { commitHashSchema } from "./change-artifact-model.ts";
+import {
   runBoundedCommand,
   type BoundedCommandRunner,
 } from "./bounded-command.ts";
-import { commitHashSchema } from "./change-artifact-model.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import {
   assertCleanReviewWorktree,
@@ -19,16 +26,13 @@ import {
 } from "./review-publication-gateway.ts";
 import {
   ChangeReviewPublicationError,
-  REVIEW_BRANCH_SUFFIX,
   REVIEW_PARENT_BRANCH,
   assertPullRequestRepository,
   githubHostSchema,
   httpsUrlSchema,
-  parseReviewBranch,
   pullRequestNumberSchema,
   repositoryArgument,
   repositoryNameWithOwnerSchema,
-  reviewBranchSchema,
   reviewPullRequestBody,
   reviewPullRequestTitle,
   type ReviewPullRequest,
@@ -36,31 +40,22 @@ import {
 
 export {
   ChangeReviewPublicationError,
-  reviewBranchSchema,
   reviewPullRequestBody,
   reviewPullRequestTitle,
 } from "./review-publication-model.ts";
 
 export const reviewPublicationTargetSchema = z
   .object({
-    parentBranch: reviewBranchSchema,
-    reviewBranch: reviewBranchSchema,
+    parentBranch: changeBranchSchema,
+    reviewBranch: planningBranchSchema,
+    parentBaselineCommit: commitHashSchema,
     baselineCommit: commitHashSchema,
     repositoryHost: githubHostSchema,
     repositoryNameWithOwner: repositoryNameWithOwnerSchema,
     repositoryUrl: httpsUrlSchema,
     parentPullRequestNumber: pullRequestNumberSchema,
   })
-  .strict()
-  .superRefine((target, context) => {
-    if (target.reviewBranch !== `${target.parentBranch}${REVIEW_BRANCH_SUFFIX}`) {
-      context.addIssue({
-        code: "custom",
-        path: ["reviewBranch"],
-        message: "Review-ветка не соответствует сохранённой parent-ветке",
-      });
-    }
-  });
+  .strict();
 
 export type ReviewPublicationTarget = z.infer<typeof reviewPublicationTargetSchema>;
 
@@ -72,94 +67,90 @@ export interface CompletedReviewPullRequest {
 
 export async function prepareReviewPublication(
   workspaceDirectory: string,
-  parentBranch: string,
+  changeIdInput: string,
+  parentBranchInput: string,
+  reviewBranchInput: string,
   signal?: AbortSignal,
   command: BoundedCommandRunner = runBoundedCommand,
 ): Promise<ReviewPublicationTarget> {
-  const parsedParent = parseReviewBranch(parentBranch);
+  const changeId = openSpecChangeIdSchema.parse(changeIdInput);
+  const parentBranch = changeBranchSchema.parse(parentBranchInput);
+  const reviewBranch = planningBranchSchema.parse(reviewBranchInput);
+  if (parentBranch !== changeBranchFor(changeId)) {
+    throw new ChangeReviewPublicationError(
+      "Корневая Git-ветка не соответствует OpenSpec change",
+    );
+  }
+  assertPlanningBranchFor(reviewBranch, changeId);
   await assertCleanReviewWorktree(command, workspaceDirectory, signal);
-  const [currentBranch, baselineCommit, repository] = await Promise.all([
-    readCurrentReviewBranch(command, workspaceDirectory, signal),
-    readReviewHeadCommit(command, workspaceDirectory, signal),
-    resolveReviewRepository(command, workspaceDirectory, signal),
-  ]);
-  if (currentBranch !== parsedParent) {
+
+  const [currentBranch, baselineCommit, parentBaselineCommit, repository] =
+    await Promise.all([
+      readCurrentReviewBranch(command, workspaceDirectory, signal),
+      readReviewHeadCommit(command, workspaceDirectory, signal),
+      readLocalReviewBranchCommit(command, workspaceDirectory, parentBranch, signal),
+      resolveReviewRepository(command, workspaceDirectory, signal),
+    ]);
+  if (currentBranch !== reviewBranch) {
     throw new ChangeReviewPublicationError(
-      `Текущая Git-ветка изменилась с «${parsedParent}» на «${currentBranch}»`,
+      `Перед review должна быть активна planning-ветка «${reviewBranch}»`,
+    );
+  }
+  if (parentBaselineCommit === null) {
+    throw new ChangeReviewPublicationError(
+      `Корневая ветка «${parentBranch}» отсутствует среди локальных refs`,
     );
   }
 
-  const remoteParent = await readRemoteReviewBranchCommit(
-    command,
-    workspaceDirectory,
-    parsedParent,
-    signal,
-  );
-  if (remoteParent !== baselineCommit) {
+  const [remoteParent, remoteReview, parentPullRequests, previousReviewPullRequests] =
+    await Promise.all([
+      readRemoteReviewBranchCommit(command, workspaceDirectory, parentBranch, signal),
+      readRemoteReviewBranchCommit(command, workspaceDirectory, reviewBranch, signal),
+      listReviewPullRequests(
+        command,
+        workspaceDirectory,
+        repositoryArgument(repository),
+        parentBranch,
+        "open",
+        signal,
+      ),
+      listReviewPullRequests(
+        command,
+        workspaceDirectory,
+        repositoryArgument(repository),
+        reviewBranch,
+        "all",
+        signal,
+      ),
+    ]);
+  if (remoteParent !== parentBaselineCommit) {
     throw new ChangeReviewPublicationError(
-      `Git remote origin не содержит текущий HEAD ветки «${parsedParent}»`,
+      `Корневая ветка «${parentBranch}» расходится с origin`,
     );
   }
-
-  const parentPullRequests = await listReviewPullRequests(
-    command,
-    workspaceDirectory,
-    repositoryArgument(repository),
-    parsedParent,
-    "open",
-    signal,
-  );
+  if (remoteReview !== baselineCommit) {
+    throw new ChangeReviewPublicationError(
+      `Git remote origin не содержит текущий HEAD planning-ветки «${reviewBranch}»`,
+    );
+  }
   if (parentPullRequests.length !== 1) {
     throw new ChangeReviewPublicationError(
-      `Для предыдущей ветки «${parsedParent}» должен существовать ровно один открытый pull request`,
+      `Для корневой ветки «${parentBranch}» должен существовать ровно один открытый pull request`,
     );
   }
   const parentPullRequest = parentPullRequests[0]!;
   assertPullRequestRepository(parentPullRequest, repository.url);
-  assertParentPullRequest(parentPullRequest, parsedParent, baselineCommit);
-
-  const reviewBranch = deriveReviewBranch(parsedParent);
-  if (
-    (await readLocalReviewBranchCommit(
-      command,
-      workspaceDirectory,
-      reviewBranch,
-      signal,
-    )) !== null
-  ) {
-    throw new ChangeReviewPublicationError(
-      `Локальная review-ветка «${reviewBranch}» уже существует`,
-    );
-  }
-  if (
-    (await readOptionalRemoteReviewBranchCommit(
-      command,
-      workspaceDirectory,
-      reviewBranch,
-      signal,
-    )) !== null
-  ) {
-    throw new ChangeReviewPublicationError(
-      `Review-ветка «${reviewBranch}» уже существует в Git remote origin`,
-    );
-  }
-  const previousReviewPullRequests = await listReviewPullRequests(
-    command,
-    workspaceDirectory,
-    repositoryArgument(repository),
-    reviewBranch,
-    "all",
-    signal,
-  );
+  assertParentPullRequest(parentPullRequest, parentBranch, parentBaselineCommit);
   if (previousReviewPullRequests.length > 0) {
     throw new ChangeReviewPublicationError(
-      `Для review-ветки «${reviewBranch}» уже существует pull request`,
+      `Для planning-ветки «${reviewBranch}» уже существует pull request`,
     );
   }
 
   return reviewPublicationTargetSchema.parse({
-    parentBranch: parsedParent,
+    parentBranch,
     reviewBranch,
+    parentBaselineCommit,
     baselineCommit,
     repositoryHost: repository.host,
     repositoryNameWithOwner: repository.nameWithOwner,
@@ -177,6 +168,7 @@ export async function assertReviewPublicationRecovery(
 ): Promise<void> {
   const target = reviewPublicationTargetSchema.parse(targetInput);
   const changeId = openSpecChangeIdSchema.parse(changeIdInput);
+  assertTargetBranches(target, changeId);
   await assertCleanReviewWorktree(command, workspaceDirectory, signal);
   await assertParentPublication(command, workspaceDirectory, target, signal);
 
@@ -185,33 +177,30 @@ export async function assertReviewPublicationRecovery(
     workspaceDirectory,
     signal,
   );
-  if (currentBranch !== target.parentBranch && currentBranch !== target.reviewBranch) {
+  if (currentBranch !== target.reviewBranch) {
     throw new ChangeReviewPublicationError(
-      `Для восстановления review требуется ветка «${target.parentBranch}» или «${target.reviewBranch}», активна «${currentBranch}»`,
+      `Для восстановления review требуется planning-ветка «${target.reviewBranch}»`,
     );
   }
-
   const localReviewHead = await readLocalReviewBranchCommit(
     command,
     workspaceDirectory,
     target.reviewBranch,
     signal,
   );
-  if (currentBranch === target.reviewBranch && localReviewHead === null) {
+  if (localReviewHead === null) {
     throw new ChangeReviewPublicationError(
-      "Активная review-ветка отсутствует среди локальных refs",
+      "Активная planning-ветка отсутствует среди локальных refs",
     );
   }
-  if (localReviewHead !== null) {
-    await assertReviewCommitDescendsFrom(
-      command,
-      workspaceDirectory,
-      target.baselineCommit,
-      localReviewHead,
-      "Review-ветка больше не продолжает baseline предыдущей ветки",
-      signal,
-    );
-  }
+  await assertReviewCommitDescendsFrom(
+    command,
+    workspaceDirectory,
+    target.baselineCommit,
+    localReviewHead,
+    "Planning-ветка больше не продолжает baseline артефактов",
+    signal,
+  );
 
   const remoteReviewHead = await readOptionalRemoteReviewBranchCommit(
     command,
@@ -220,20 +209,11 @@ export async function assertReviewPublicationRecovery(
     signal,
   );
   if (
-    currentBranch === target.parentBranch &&
-    (localReviewHead !== null || remoteReviewHead !== null)
-  ) {
-    throw new ChangeReviewPublicationError(
-      "Сохранённая review-ветка существует, но не является текущей; автоматическое переключение запрещено",
-    );
-  }
-  if (
-    remoteReviewHead !== null &&
     remoteReviewHead !== target.baselineCommit &&
     remoteReviewHead !== localReviewHead
   ) {
     throw new ChangeReviewPublicationError(
-      `Git remote origin содержит неожиданное состояние review-ветки «${target.reviewBranch}»`,
+      `Git remote origin содержит неожиданное состояние planning-ветки «${target.reviewBranch}»`,
     );
   }
 
@@ -247,7 +227,7 @@ export async function assertReviewPublicationRecovery(
   );
   if (openReviewPullRequests.length > 1) {
     throw new ChangeReviewPublicationError(
-      `Для review-ветки «${target.reviewBranch}» найдено несколько открытых pull request`,
+      `Для planning-ветки «${target.reviewBranch}» найдено несколько открытых pull request`,
     );
   }
   const existing = openReviewPullRequests[0];
@@ -260,20 +240,7 @@ export async function assertReviewPublicationRecovery(
       signal,
     );
     assertPullRequestRepository(pullRequest, target.repositoryUrl);
-    if (
-      pullRequest.state !== "OPEN" ||
-      pullRequest.isDraft ||
-      pullRequest.isCrossRepository ||
-      pullRequest.headRefName !== target.reviewBranch ||
-      pullRequest.baseRefName !== target.parentBranch ||
-      pullRequest.headRefOid !== remoteReviewHead ||
-      pullRequest.title !== reviewPullRequestTitle(changeId) ||
-      pullRequest.body !== reviewPullRequestBody(changeId)
-    ) {
-      throw new ChangeReviewPublicationError(
-        "Существующий review pull request не соответствует сохранённой Ready-публикации",
-      );
-    }
+    assertReadyReviewPullRequest(pullRequest, target, changeId, remoteReviewHead);
   } else {
     const previousPullRequests = await listReviewPullRequests(
       command,
@@ -285,7 +252,7 @@ export async function assertReviewPublicationRecovery(
     );
     if (previousPullRequests.length > 0) {
       throw new ChangeReviewPublicationError(
-        "Созданный review pull request больше не открыт; автоматическое создание замены запрещено",
+        "Созданный planning pull request больше не открыт; автоматическое создание замены запрещено",
       );
     }
   }
@@ -302,6 +269,7 @@ export async function verifyReviewPullRequest(
   const target = reviewPublicationTargetSchema.parse(targetInput);
   const changeId = openSpecChangeIdSchema.parse(changeIdInput);
   const head = commitHashSchema.parse(expectedHead);
+  assertTargetBranches(target, changeId);
   await assertParentPublication(command, workspaceDirectory, target, signal);
 
   const currentBranch = await readCurrentReviewBranch(
@@ -311,7 +279,7 @@ export async function verifyReviewPullRequest(
   );
   if (currentBranch !== target.reviewBranch) {
     throw new ChangeReviewPublicationError(
-      `Текущая Git-ветка должна быть review-веткой «${target.reviewBranch}»`,
+      `Текущая Git-ветка должна быть planning-веткой «${target.reviewBranch}»`,
     );
   }
   const remoteHead = await readRemoteReviewBranchCommit(
@@ -322,7 +290,7 @@ export async function verifyReviewPullRequest(
   );
   if (remoteHead !== head) {
     throw new ChangeReviewPublicationError(
-      `Git remote origin не содержит текущий HEAD review-ветки «${target.reviewBranch}»`,
+      `Git remote origin не содержит текущий HEAD planning-ветки «${target.reviewBranch}»`,
     );
   }
 
@@ -336,7 +304,7 @@ export async function verifyReviewPullRequest(
   );
   if (openPullRequests.length !== 1) {
     throw new ChangeReviewPublicationError(
-      `Для review-ветки «${target.reviewBranch}» должен существовать ровно один открытый pull request`,
+      `Для planning-ветки «${target.reviewBranch}» должен существовать ровно один открытый pull request`,
     );
   }
   const pullRequest = await readReviewPullRequest(
@@ -347,34 +315,7 @@ export async function verifyReviewPullRequest(
     signal,
   );
   assertPullRequestRepository(pullRequest, target.repositoryUrl);
-  if (pullRequest.state !== "OPEN") {
-    throw new ChangeReviewPublicationError("Review pull request должен быть открыт");
-  }
-  if (pullRequest.isDraft) {
-    throw new ChangeReviewPublicationError("Review pull request должен быть Ready");
-  }
-  if (pullRequest.isCrossRepository) {
-    throw new ChangeReviewPublicationError(
-      "Review pull request должен использовать ветку из origin",
-    );
-  }
-  if (
-    pullRequest.baseRefName !== target.parentBranch ||
-    pullRequest.headRefName !== target.reviewBranch ||
-    pullRequest.headRefOid !== head
-  ) {
-    throw new ChangeReviewPublicationError(
-      "Review pull request не соответствует сохранённым base/head refs",
-    );
-  }
-  const expectedTitle = reviewPullRequestTitle(changeId);
-  const expectedBody = reviewPullRequestBody(changeId);
-  if (pullRequest.title !== expectedTitle || pullRequest.body !== expectedBody) {
-    throw new ChangeReviewPublicationError(
-      "Название или описание review pull request не совпадает с ожидаемым содержимым",
-    );
-  }
-
+  assertReadyReviewPullRequest(pullRequest, target, changeId, head);
   return {
     number: pullRequest.number,
     url: pullRequest.url,
@@ -382,17 +323,20 @@ export async function verifyReviewPullRequest(
   };
 }
 
-function deriveReviewBranch(parentBranch: string): string {
-  const parsedParent = parseReviewBranch(parentBranch);
-  const parsedReview = reviewBranchSchema.safeParse(
-    `${parsedParent}${REVIEW_BRANCH_SUFFIX}`,
-  );
-  if (!parsedReview.success) {
+function assertTargetBranches(
+  target: ReviewPublicationTarget,
+  changeId: string,
+): void {
+  if (target.parentBranch !== changeBranchFor(changeId)) {
     throw new ChangeReviewPublicationError(
-      `Не удалось получить безопасное имя review-ветки из «${parsedParent}»`,
+      "Сохранённая корневая ветка не соответствует OpenSpec change",
     );
   }
-  return parsedReview.data;
+  if (target.reviewBranch !== planningBranchFor(changeId)) {
+    throw new ChangeReviewPublicationError(
+      "Сохранённая planning-ветка не соответствует OpenSpec change",
+    );
+  }
 }
 
 async function assertParentPublication(
@@ -401,11 +345,7 @@ async function assertParentPublication(
   target: ReviewPublicationTarget,
   signal?: AbortSignal,
 ): Promise<void> {
-  const repository = await resolveReviewRepository(
-    command,
-    workspaceDirectory,
-    signal,
-  );
+  const repository = await resolveReviewRepository(command, workspaceDirectory, signal);
   if (
     repository.host !== target.repositoryHost ||
     repository.nameWithOwner.toLowerCase() !==
@@ -416,27 +356,16 @@ async function assertParentPublication(
       "Git remote origin больше не соответствует сохранённому GitHub-репозиторию",
     );
   }
-
   const [localParent, remoteParent] = await Promise.all([
-    readLocalReviewBranchCommit(
-      command,
-      workspaceDirectory,
-      target.parentBranch,
-      signal,
-    ),
-    readRemoteReviewBranchCommit(
-      command,
-      workspaceDirectory,
-      target.parentBranch,
-      signal,
-    ),
+    readLocalReviewBranchCommit(command, workspaceDirectory, target.parentBranch, signal),
+    readRemoteReviewBranchCommit(command, workspaceDirectory, target.parentBranch, signal),
   ]);
   if (
-    localParent !== target.baselineCommit ||
-    remoteParent !== target.baselineCommit
+    localParent !== target.parentBaselineCommit ||
+    remoteParent !== target.parentBaselineCommit
   ) {
     throw new ChangeReviewPublicationError(
-      `Предыдущая ветка «${target.parentBranch}» изменилась после начала review`,
+      `Корневая ветка «${target.parentBranch}» изменилась после начала review`,
     );
   }
 
@@ -453,7 +382,7 @@ async function assertParentPublication(
     openParentPullRequests[0]!.number !== target.parentPullRequestNumber
   ) {
     throw new ChangeReviewPublicationError(
-      "Открытый pull request предыдущей ветки изменился после начала review",
+      "Открытый pull request корневой ветки изменился после начала review",
     );
   }
   const parentPullRequest = await readReviewPullRequest(
@@ -467,7 +396,7 @@ async function assertParentPublication(
   assertParentPullRequest(
     parentPullRequest,
     target.parentBranch,
-    target.baselineCommit,
+    target.parentBaselineCommit,
   );
 }
 
@@ -484,7 +413,30 @@ function assertParentPullRequest(
     pullRequest.headRefOid !== baselineCommit
   ) {
     throw new ChangeReviewPublicationError(
-      `Pull request предыдущей ветки должен быть открыт из «${parentBranch}» в «${REVIEW_PARENT_BRANCH}» и содержать её текущий HEAD`,
+      `Pull request корневой ветки должен быть открыт из «${parentBranch}» в «${REVIEW_PARENT_BRANCH}» и содержать её текущий HEAD`,
+    );
+  }
+}
+
+function assertReadyReviewPullRequest(
+  pullRequest: ReviewPullRequest,
+  target: ReviewPublicationTarget,
+  changeId: string,
+  expectedHead: string | null,
+): void {
+  if (
+    expectedHead === null ||
+    pullRequest.state !== "OPEN" ||
+    pullRequest.isDraft ||
+    pullRequest.isCrossRepository ||
+    pullRequest.headRefName !== target.reviewBranch ||
+    pullRequest.baseRefName !== target.parentBranch ||
+    pullRequest.headRefOid !== expectedHead ||
+    pullRequest.title !== reviewPullRequestTitle(changeId) ||
+    pullRequest.body !== reviewPullRequestBody(changeId)
+  ) {
+    throw new ChangeReviewPublicationError(
+      "Planning pull request не соответствует сохранённой Ready-публикации",
     );
   }
 }

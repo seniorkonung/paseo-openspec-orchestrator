@@ -2,7 +2,7 @@ import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { OrchestratorWorkspaceDisplay } from "../shared/orchestrator-notifications.ts";
 import type { ControlCommand, OrchestratorSnapshot } from "../shared/orchestrator.ts";
 import { createChangeArtifactCreationService } from "./change-artifact-creation.ts";
-import { createChangeSelectionService } from "./change-selection.ts";
+import { createChangeInitializationService } from "./change-initialization.ts";
 import { createChangePublicationService } from "./change-publication.ts";
 import { createChangeReviewService } from "./change-review.ts";
 import { createChangeFindingResolutionService } from "./change-finding-resolution.ts";
@@ -12,6 +12,9 @@ import { readGitBranch } from "./git-branch.ts";
 import { readGitWorktreeStatus } from "./git-worktree.ts";
 import { OpenSpecOrchestratorEngine } from "./openspec-orchestrator-engine.ts";
 import { inspectMiseToolchain } from "./mise-toolchain.ts";
+import { verifyOpenSpecChange } from "./openspec-change.ts";
+import { createPlanningBranchService } from "./planning-branch.ts";
+import { createPlanningMergeService } from "./planning-merge.ts";
 import type { OrchestratorEngine } from "./orchestrator-engine.ts";
 import { OrchestratorLedger, type WaitResult } from "./orchestrator-ledger.ts";
 import {
@@ -151,7 +154,10 @@ export class OrchestratorController {
       gitBranch: (directory, signal) => readGitBranch(directory, { signal }),
       gitWorktree: (directory, signal) => readGitWorktreeStatus(directory, { signal }),
       miseToolchain: inspectMiseToolchain,
-      changeSelection: createChangeSelectionService({ createAgent }),
+      changeInitialization: createChangeInitializationService(),
+      planningBranch: createPlanningBranchService(),
+      planningMerge: createPlanningMergeService(),
+      verifyChange: verifyOpenSpecChange,
       changeArtifacts: createChangeArtifactCreationService({ createAgent }),
       changePublication: createChangePublicationService({ createAgent }),
       changeReview: createChangeReviewService({ createAgent }),

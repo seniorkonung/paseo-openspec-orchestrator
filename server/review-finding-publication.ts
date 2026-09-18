@@ -6,6 +6,7 @@ import {
 import { commitHashSchema } from "./change-artifact-model.ts";
 import { reviewFindingIdSchema } from "./change-review-report.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
+import { changeBranchFor, planningBranchFor, planningBranchSchema } from "./change-branch.ts";
 import {
   listReviewPullRequests,
   readRemoteReviewBranchCommit,
@@ -16,11 +17,8 @@ import {
 import {
   ChangeReviewPublicationError,
   MAX_REVIEW_PR_BODY_LENGTH,
-  REVIEW_BRANCH_SUFFIX,
-  REVIEW_PARENT_BRANCH,
   assertPullRequestRepository,
   repositoryArgument,
-  reviewBranchSchema,
   reviewPullRequestTitle,
   type ResolvedReviewRepository,
   type ReviewPullRequest,
@@ -285,7 +283,7 @@ function parseActiveReviewPullRequest(
       request.workspaceDirectory,
     ),
     changeId: openSpecChangeIdSchema.parse(request.changeId),
-    branch: reviewBranchSchema.parse(request.branch),
+    branch: planningBranchSchema.parse(request.branch),
     signal: request.signal,
   };
 }
@@ -342,8 +340,8 @@ async function inspectActiveReviewPullRequest(
     pullRequest.isDraft ||
     pullRequest.isCrossRepository ||
     pullRequest.headRefName !== request.branch ||
-    pullRequest.baseRefName === REVIEW_PARENT_BRANCH ||
-    request.branch !== `${pullRequest.baseRefName}${REVIEW_BRANCH_SUFFIX}` ||
+    request.branch !== planningBranchFor(request.changeId) ||
+    pullRequest.baseRefName !== changeBranchFor(request.changeId) ||
     pullRequest.headRefOid !== remoteHead ||
     pullRequest.title !== reviewPullRequestTitle(request.changeId)
   ) {

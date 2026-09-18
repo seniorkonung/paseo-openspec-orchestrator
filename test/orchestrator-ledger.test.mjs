@@ -27,7 +27,8 @@ function pendingReviewSession(changeId, parentBranch) {
   return {
     changeId,
     parentBranch,
-    reviewBranch: `${parentBranch}-review`,
+    reviewBranch: `planning/${changeId}`,
+    parentBaselineCommit: "a".repeat(40),
     baselineCommit: "b".repeat(40),
     repositoryHost: "github.com",
     repositoryNameWithOwner: "example/project",
@@ -36,42 +37,45 @@ function pendingReviewSession(changeId, parentBranch) {
   };
 }
 
-test("checkpoint версии 1 неподдерживаем, а версия 2 заполняет default", () => {
+function workflowBranches(changeId) {
+  return {
+    changeBranch: `change/${changeId}`,
+    activeBranch: `planning/${changeId}`,
+  };
+}
+
+test("checkpoint версий 1 и 2 не мигрируется, а версия 3 заполняет default", () => {
   assert.throws(
     () =>
       workflowCheckpointSchema.parse({
         version: 1,
-        nextStepId: "select-change",
-        state: { branch: "feature/legacy", change: { id: "legacy-change" } },
+        nextStepId: "initialize-change",
+        state: { ...workflowBranches("legacy-change"), change: { id: "legacy-change" } },
       }),
   );
-  assert.deepEqual(
+  assert.throws(() =>
     workflowCheckpointSchema.parse({
       version: 2,
-      nextStepId: "select-change",
-      state: { branch: "feature/legacy", change: { id: "legacy-change" } },
+      nextStepId: "initialize-change",
+      state: { ...workflowBranches("legacy-change"), change: { id: "legacy-change" } },
     }),
-    {
-      version: 2,
-      nextStepId: "select-change",
-      state: {
-        branch: "feature/legacy",
-        change: { id: "legacy-change" },
-        pendingArtifactSession: null,
-        pendingReviewSession: null,
-        pendingFindingResolutionSession: null,
-        pendingImplementationFindingResolutionSession: null,
-        pendingTaskExecutionSession: null,
-      },
-    },
   );
+  const parsed = workflowCheckpointSchema.parse({
+    version: 3,
+    nextStepId: "initialize-change",
+    state: { ...workflowBranches("legacy-change"), change: { id: "legacy-change" } },
+  });
+  assert.equal(parsed.version, 3);
+  assert.equal(parsed.state.pendingChangeInitializationSession, null);
+  assert.equal(parsed.state.pendingPlanningBranchSession, null);
+  assert.equal(parsed.state.pendingPlanningMergeSession, null);
 });
 
 test("workflow не принимает несколько незавершённых агентских сессий", () => {
   assert.throws(
     () =>
       workflowStateSchema.parse({
-        branch: "feature/conflicting-sessions",
+        ...workflowBranches("conflicting-sessions"),
         change: { id: "conflicting-sessions" },
         pendingArtifactSession: {
           artifactId: "proposal",
@@ -80,7 +84,7 @@ test("workflow не принимает несколько незавершённ
         },
         pendingReviewSession: pendingReviewSession(
           "conflicting-sessions",
-          "feature/conflicting-sessions",
+          "change/conflicting-sessions",
         ),
       }),
     /одновременно восстанавливать несколько агентских сессий/,
@@ -88,19 +92,19 @@ test("workflow не принимает несколько незавершённ
   assert.throws(
     () =>
       workflowStateSchema.parse({
-        branch: "feature/conflicting-sessions",
+        ...workflowBranches("conflicting-sessions"),
         change: { id: "conflicting-sessions" },
         pendingArtifactSession: null,
         pendingReviewSession: null,
         pendingFindingResolutionSession: {
           changeId: "conflicting-sessions",
-          branch: "feature/conflicting-sessions",
+          branch: "planning/conflicting-sessions",
           findingId: "F1",
           baselineCommit: "c".repeat(40),
         },
         pendingImplementationFindingResolutionSession: {
           changeId: "conflicting-sessions",
-          branch: "feature/conflicting-sessions",
+          branch: "planning/conflicting-sessions",
           findingId: "F2",
           baselineCommit: "d".repeat(40),
         },
@@ -110,21 +114,75 @@ test("workflow не принимает несколько незавершённ
   assert.throws(
     () =>
       workflowStateSchema.parse({
-        branch: "feature/conflicting-sessions",
+        ...workflowBranches("conflicting-sessions"),
         change: { id: "conflicting-sessions" },
         pendingArtifactSession: null,
         pendingReviewSession: pendingReviewSession(
           "conflicting-sessions",
-          "feature/conflicting-sessions",
+          "change/conflicting-sessions",
         ),
         pendingFindingResolutionSession: {
           changeId: "conflicting-sessions",
-          branch: "feature/conflicting-sessions",
+          branch: "planning/conflicting-sessions",
           findingId: "F1",
           baselineCommit: "c".repeat(40),
         },
       }),
     /одновременно восстанавливать несколько агентских сессий/,
+  );
+});
+
+test("workflow отклоняет checkpoint-сессии другого change или этапа ветвления", () => {
+  assert.throws(
+    () =>
+      workflowStateSchema.parse({
+        changeBranch: "change/expected-change",
+        activeBranch: "change/expected-change",
+        change: null,
+        pendingChangeInitializationSession: {
+          changeId: "other-change",
+          changeBranch: "change/other-change",
+          baselineCommit: "a".repeat(40),
+          changeExisted: false,
+          openSpecRoot: "/workspace/project",
+          existingRootPullRequest: null,
+        },
+      }),
+    /Сессия инициализации не соответствует/,
+  );
+  assert.throws(
+    () =>
+      workflowStateSchema.parse({
+        ...workflowBranches("expected-change"),
+        activeBranch: "change/expected-change",
+        change: { id: "expected-change" },
+        pendingPlanningBranchSession: {
+          changeId: "other-change",
+          changeBranch: "change/other-change",
+          planningBranch: "planning/other-change",
+          baselineCommit: "b".repeat(40),
+        },
+      }),
+    /Сессия planning-ветки не соответствует/,
+  );
+  assert.throws(
+    () =>
+      workflowStateSchema.parse({
+        ...workflowBranches("expected-change"),
+        activeBranch: "change/expected-change",
+        change: { id: "expected-change" },
+        pendingPlanningMergeSession: {
+          changeId: "expected-change",
+          changeBranch: "change/expected-change",
+          planningBranch: "planning/expected-change",
+          planningPullRequestNumber: 43,
+          mergedPlanningHead: "c".repeat(40),
+          repositoryHost: "github.com",
+          repositoryNameWithOwner: "example/project",
+          repositoryUrl: "https://github.com/example/project",
+        },
+      }),
+    /Сессия merge-gate не соответствует/,
   );
 });
 
@@ -229,24 +287,16 @@ test("ledger сохраняет checkpoint workflow и полностью очи
     ...projection,
     change: { id: "change-a" },
   }));
-  await ledger.saveWorkflowCheckpoint("workspace-checkpoint", {
-    version: 2,
-    nextStepId: "review-change",
-    state: { branch: "feature/checkpoint", change: null },
-  });
-  assert.deepEqual(ledger.getWorkflowCheckpoint("workspace-checkpoint"), {
-    version: 2,
+  const checkpoint = workflowCheckpointSchema.parse({
+    version: 3,
     nextStepId: "review-change",
     state: {
-      branch: "feature/checkpoint",
-      change: null,
-      pendingArtifactSession: null,
-      pendingReviewSession: null,
-      pendingFindingResolutionSession: null,
-      pendingImplementationFindingResolutionSession: null,
-      pendingTaskExecutionSession: null,
+      ...workflowBranches("checkpoint"),
+      change: { id: "checkpoint" },
     },
   });
+  await ledger.saveWorkflowCheckpoint("workspace-checkpoint", checkpoint);
+  assert.deepEqual(ledger.getWorkflowCheckpoint("workspace-checkpoint"), checkpoint);
 
   const cleared = ledger.clear("workspace-checkpoint");
   assert.equal(cleared.change, null);

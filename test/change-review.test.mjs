@@ -17,9 +17,9 @@ import {
 } from "../server/change-review-publication.ts";
 
 const execFileAsync = promisify(execFile);
-const parentBranch = "feature/review-change";
-const reviewBranch = `${parentBranch}-review`;
 const changeId = "complete-review-workflow";
+const parentBranch = `change/${changeId}`;
+const reviewBranch = `planning/${changeId}`;
 const repositoryUrl = "https://github.com/example/project";
 
 function ultraSandboxProfile() {
@@ -62,6 +62,14 @@ async function createRepository(context, options = {}) {
   await git(workspace, ["config", "user.email", "openspec@example.test"]);
   const changeRoot = join(workspace, "openspec", "changes", changeId);
   await mkdir(changeRoot, { recursive: true });
+  await writeFile(join(changeRoot, ".openspec.yaml"), "schema: spec-driven\n");
+  await git(workspace, ["add", "openspec"]);
+  await git(workspace, ["commit", "-m", "docs(openspec): add change scaffold"]);
+  const parentBaselineCommit = await git(workspace, ["rev-parse", "HEAD"]);
+  await git(root, ["init", "--bare", remote]);
+  await git(workspace, ["remote", "add", "origin", remote]);
+  await git(workspace, ["push", "--set-upstream", "origin", parentBranch]);
+  await git(workspace, ["switch", "-c", reviewBranch, parentBaselineCommit]);
   await writeFile(join(changeRoot, "proposal.md"), "# Предложение\n");
   if (options.existingReview) {
     await writeFile(join(changeRoot, "review.md"), "# Предыдущее ревью\n");
@@ -69,14 +77,13 @@ async function createRepository(context, options = {}) {
   await git(workspace, ["add", "openspec"]);
   await git(workspace, ["commit", "-m", "docs(openspec): add change"]);
   const baselineCommit = await git(workspace, ["rev-parse", "HEAD"]);
-  await git(root, ["init", "--bare", remote]);
-  await git(workspace, ["remote", "add", "origin", remote]);
-  await git(workspace, ["push", "--set-upstream", "origin", parentBranch]);
+  await git(workspace, ["push", "--set-upstream", "origin", reviewBranch]);
   const fixture = {
     workspace,
     remote,
     changeRoot,
     reviewPath: join(changeRoot, "review.md"),
+    parentBaselineCommit,
     baselineCommit,
   };
   fixture.github = {
@@ -96,7 +103,7 @@ function parentPullRequest(fixture, overrides = {}) {
     isCrossRepository: false,
     baseRefName: "main",
     headRefName: parentBranch,
-    headRefOid: fixture.baselineCommit,
+    headRefOid: fixture.parentBaselineCommit,
     title: "Опубликовать OpenSpec change",
     body: "Исходный change PR",
     ...overrides,
@@ -181,8 +188,7 @@ function createCommand(fixture) {
 }
 
 async function createReviewBranch(fixture) {
-  await git(fixture.workspace, ["switch", "-c", reviewBranch, fixture.baselineCommit]);
-  await git(fixture.workspace, ["push", "--set-upstream", "origin", reviewBranch]);
+  assert.equal(await git(fixture.workspace, ["branch", "--show-current"]), reviewBranch);
 }
 
 async function commitReview(fixture, options = {}) {
@@ -248,10 +254,11 @@ test("plan сохраняет publication target и не пропускает с
       const fixture = await createRepository(child, { existingReview });
       const { command } = createCommand(fixture);
       const service = createChangeReviewService({ command, async createAgent() {} });
-      assert.deepEqual(await service.plan(fixture.workspace, changeId, parentBranch), {
+      assert.deepEqual(await service.plan(fixture.workspace, changeId, parentBranch, reviewBranch), {
         changeId,
         parentBranch,
         reviewBranch,
+        parentBaselineCommit: fixture.parentBaselineCommit,
         baselineCommit: fixture.baselineCommit,
         repositoryHost: "github.com",
         repositoryNameWithOwner: "example/project",
@@ -268,7 +275,7 @@ test("plan fail-closed проверяет parent publication и коллизии
     const { command } = createCommand(fixture);
     await writeFile(join(fixture.workspace, "untracked.md"), "dirty\n");
     const service = createChangeReviewService({ command, async createAgent() {} });
-    await assert.rejects(service.plan(fixture.workspace, changeId, parentBranch), /незакоммиченные/);
+    await assert.rejects(service.plan(fixture.workspace, changeId, parentBranch, reviewBranch), /незакоммиченные/);
   });
   await context.test("remote HEAD отстаёт", async (child) => {
     const fixture = await createRepository(child);
@@ -277,14 +284,14 @@ test("plan fail-closed проверяет parent publication и коллизии
     await git(fixture.workspace, ["add", "."]);
     await git(fixture.workspace, ["commit", "-m", "docs: add notes"]);
     const service = createChangeReviewService({ command, async createAgent() {} });
-    await assert.rejects(service.plan(fixture.workspace, changeId, parentBranch), /origin не содержит текущий HEAD/);
+    await assert.rejects(service.plan(fixture.workspace, changeId, parentBranch, reviewBranch), /origin не содержит текущий HEAD/);
   });
   await context.test("parent PR отсутствует", async (child) => {
     const fixture = await createRepository(child);
     fixture.github.parentPullRequests = [];
     const { command } = createCommand(fixture);
     const service = createChangeReviewService({ command, async createAgent() {} });
-    await assert.rejects(service.plan(fixture.workspace, changeId, parentBranch), /ровно один открытый pull request/);
+    await assert.rejects(service.plan(fixture.workspace, changeId, parentBranch, reviewBranch), /ровно один открытый pull request/);
   });
   await context.test("parent PR дублируется", async (child) => {
     const fixture = await createRepository(child);
@@ -297,32 +304,14 @@ test("plan fail-closed проверяет parent publication и коллизии
     ];
     const { command } = createCommand(fixture);
     const service = createChangeReviewService({ command, async createAgent() {} });
-    await assert.rejects(service.plan(fixture.workspace, changeId, parentBranch), /ровно один открытый pull request/);
+    await assert.rejects(service.plan(fixture.workspace, changeId, parentBranch, reviewBranch), /ровно один открытый pull request/);
   });
   await context.test("parent PR имеет неверную base", async (child) => {
     const fixture = await createRepository(child);
     fixture.github.parentPullRequests = [parentPullRequest(fixture, { baseRefName: "release" })];
     const { command } = createCommand(fixture);
     const service = createChangeReviewService({ command, async createAgent() {} });
-    await assert.rejects(service.plan(fixture.workspace, changeId, parentBranch), /в .*main/);
-  });
-  await context.test("локальная child-ветка уже занята", async (child) => {
-    const fixture = await createRepository(child);
-    await git(fixture.workspace, ["branch", reviewBranch]);
-    const { command } = createCommand(fixture);
-    const service = createChangeReviewService({ command, async createAgent() {} });
-    await assert.rejects(service.plan(fixture.workspace, changeId, parentBranch), /уже существует/);
-  });
-  await context.test("remote child-ветка уже занята", async (child) => {
-    const fixture = await createRepository(child);
-    await git(fixture.workspace, [
-      "push",
-      "origin",
-      `HEAD:refs/heads/${reviewBranch}`,
-    ]);
-    const { command } = createCommand(fixture);
-    const service = createChangeReviewService({ command, async createAgent() {} });
-    await assert.rejects(service.plan(fixture.workspace, changeId, parentBranch), /remote origin/);
+    await assert.rejects(service.plan(fixture.workspace, changeId, parentBranch, reviewBranch), /в .*main/);
   });
   await context.test("исторический child PR уже существует", async (child) => {
     const fixture = await createRepository(child);
@@ -331,7 +320,7 @@ test("plan fail-closed проверяет parent publication и коллизии
     ];
     const { command } = createCommand(fixture);
     const service = createChangeReviewService({ command, async createAgent() {} });
-    await assert.rejects(service.plan(fixture.workspace, changeId, parentBranch), /уже существует pull request/);
+    await assert.rejects(service.plan(fixture.workspace, changeId, parentBranch, reviewBranch), /уже существует pull request/);
   });
 });
 
@@ -339,27 +328,23 @@ test("completion принимает один review-коммит и Ready PR chi
   const fixture = await createRepository(context);
   const { command } = createCommand(fixture);
   const harness = createServiceHarness(command);
-  const session = await harness.service.plan(fixture.workspace, changeId, parentBranch);
+  const session = await harness.service.plan(fixture.workspace, changeId, parentBranch, reviewBranch);
   const { running, client, agentOptions } = await startRun(harness, fixture, session);
   assert.match(agentOptions.prompt, /openspec-review-change/);
   assert.match(agentOptions.prompt, /gh pr create --repo/);
 
   let result = await client.callTool({ name: "complete_change_review", arguments: {} });
   assert.equal(result.isError, true);
-  assert.match(firstText(result), /Git-ветка изменилась/);
-  await createReviewBranch(fixture);
-  result = await client.callTool({ name: "complete_change_review", arguments: {} });
-  assert.equal(result.isError, true);
   assert.match(firstText(result), /ещё не создал review\.md/);
   const reviewHead = await commitReview(fixture);
   result = await client.callTool({ name: "complete_change_review", arguments: {} });
   assert.equal(result.isError, true);
-  assert.match(firstText(result), /origin не содержит текущий HEAD review-ветки/);
+  assert.match(firstText(result), /origin не содержит текущий HEAD planning-ветки/);
   await git(fixture.workspace, ["push", "origin", reviewBranch]);
   fixture.github.reviewPullRequests = [reviewPullRequest(reviewHead, { isDraft: true })];
   result = await client.callTool({ name: "complete_change_review", arguments: {} });
   assert.equal(result.isError, true);
-  assert.match(firstText(result), /должен быть Ready/);
+  assert.match(firstText(result), /Ready-публикации/);
   fixture.github.reviewPullRequests = [reviewPullRequest(reviewHead)];
   result = await client.callTool({ name: "complete_change_review", arguments: {} });
   assert.equal(result.isError, undefined);
@@ -382,7 +367,7 @@ test("существующий review.md изменяется, а planning-фа�
     const fixture = await createRepository(child, { existingReview: true });
     const { command } = createCommand(fixture);
     const harness = createServiceHarness(command);
-    const session = await harness.service.plan(fixture.workspace, changeId, parentBranch);
+    const session = await harness.service.plan(fixture.workspace, changeId, parentBranch, reviewBranch);
     await createReviewBranch(fixture);
     const head = await commitReview(fixture, { contents: "# Новое ревью\n\n- Finding F1\n" });
     await git(fixture.workspace, ["push", "origin", reviewBranch]);
@@ -397,7 +382,7 @@ test("существующий review.md изменяется, а planning-фа�
     const fixture = await createRepository(child);
     const { command } = createCommand(fixture);
     const harness = createServiceHarness(command);
-    const session = await harness.service.plan(fixture.workspace, changeId, parentBranch);
+    const session = await harness.service.plan(fixture.workspace, changeId, parentBranch, reviewBranch);
     await createReviewBranch(fixture);
     await commitReview(fixture, { modifyProposal: true });
     const controller = new AbortController();
@@ -424,7 +409,7 @@ test("completion отклоняет неверный commit и PR metadata", asy
       const fixture = await createRepository(child);
       const { command } = createCommand(fixture);
       const harness = createServiceHarness(command, { agentId: `agent-${kind}` });
-      const session = await harness.service.plan(fixture.workspace, changeId, parentBranch);
+      const session = await harness.service.plan(fixture.workspace, changeId, parentBranch, reviewBranch);
       await createReviewBranch(fixture);
       await commitReview(fixture, {
         subject: kind === "wrong-subject" ? "docs(openspec): add incorrect review" : reviewCommitSubject(changeId),
@@ -460,9 +445,9 @@ test("completion отклоняет неверный commit и PR metadata", asy
       if (kind === "multiple") assert.match(firstText(result), /ровно один/);
       if (kind === "outside") assert.match(firstText(result), /только новые файлы внутри/);
       if (kind === "wrong-subject") assert.equal(firstText(result).includes(reviewCommitSubject(changeId)), true);
-      if (kind === "cross-repository") assert.match(firstText(result), /origin/);
-      if (kind === "wrong-base") assert.match(firstText(result), /base\/head refs/);
-      if (kind === "wrong-metadata") assert.match(firstText(result), /Название или описание/);
+      if (kind === "cross-repository") assert.match(firstText(result), /Ready-публикации/);
+      if (kind === "wrong-base") assert.match(firstText(result), /Ready-публикации/);
+      if (kind === "wrong-metadata") assert.match(firstText(result), /Ready-публикации/);
       await client.close();
       controller.abort();
       await assert.rejects(running, /Операция отменена/);
@@ -476,7 +461,7 @@ test("completion отклоняет изменившийся parent и rewrite r
       const fixture = await createRepository(child);
       const { command } = createCommand(fixture);
       const harness = createServiceHarness(command, { agentId: `agent-${kind}` });
-      const session = await harness.service.plan(fixture.workspace, changeId, parentBranch);
+      const session = await harness.service.plan(fixture.workspace, changeId, parentBranch, reviewBranch);
       await createReviewBranch(fixture);
       const head = await commitReview(fixture);
       await git(fixture.workspace, ["push", "origin", reviewBranch]);
@@ -503,7 +488,7 @@ test("completion отклоняет изменившийся parent и rewrite r
 
       const result = await client.callTool({ name: "complete_change_review", arguments: {} });
       assert.equal(result.isError, true);
-      if (kind === "parent-changed") assert.match(firstText(result), /Предыдущая ветка/);
+      if (kind === "parent-changed") assert.match(firstText(result), /Корневая ветка/);
       if (kind === "review-rewritten") assert.match(firstText(result), /origin не содержит текущий HEAD/);
       await client.close();
       controller.abort();
@@ -512,17 +497,13 @@ test("completion отклоняет изменившийся parent и rewrite r
   }
 });
 
-test("рестарт принимает каждый сохранённый внешний эффект review-сессии", async (context) => {
-  for (const effect of ["local-branch", "first-push", "review-commit"]) {
+test("рестарт принимает planning baseline и готовый review-коммит", async (context) => {
+  for (const effect of ["planning-baseline", "review-commit"]) {
     await context.test(effect, async (child) => {
       const fixture = await createRepository(child);
       const { command } = createCommand(fixture);
       const planner = createChangeReviewService({ command, async createAgent() {} });
-      const session = await planner.plan(fixture.workspace, changeId, parentBranch);
-      await git(fixture.workspace, ["switch", "-c", reviewBranch, fixture.baselineCommit]);
-      if (effect !== "local-branch") {
-        await git(fixture.workspace, ["push", "--set-upstream", "origin", reviewBranch]);
-      }
+      const session = await planner.plan(fixture.workspace, changeId, parentBranch, reviewBranch);
       if (effect === "review-commit") await commitReview(fixture);
 
       const harness = createServiceHarness(command, { agentId: `agent-${effect}` });
@@ -549,7 +530,7 @@ test("рестарт согласует опубликованный commit и �
   const fixture = await createRepository(context);
   const { command } = createCommand(fixture);
   const planner = createChangeReviewService({ command, async createAgent() {} });
-  const session = await planner.plan(fixture.workspace, changeId, parentBranch);
+  const session = await planner.plan(fixture.workspace, changeId, parentBranch, reviewBranch);
   await createReviewBranch(fixture);
   const reviewHead = await commitReview(fixture);
   await git(fixture.workspace, ["push", "origin", reviewBranch]);
@@ -596,7 +577,7 @@ test("закрытый PR после рестарта не заменяется 
   const fixture = await createRepository(context);
   const { command } = createCommand(fixture);
   const service = createChangeReviewService({ command, async createAgent() {} });
-  const session = await service.plan(fixture.workspace, changeId, parentBranch);
+  const session = await service.plan(fixture.workspace, changeId, parentBranch, reviewBranch);
   await createReviewBranch(fixture);
   fixture.github.historicalReviewPullRequests = [reviewPullRequest(fixture.baselineCommit, { state: "CLOSED" })];
   await assert.rejects(
@@ -618,6 +599,7 @@ test("prompt и PR title используют детерминированные
     changeId: longChangeId,
     parentBranch,
     reviewBranch,
+    parentBaselineCommit: "c".repeat(40),
     baselineCommit: "a".repeat(40),
     repository: "example/project",
     reviewRepositoryPath: `openspec/changes/${longChangeId}/review.md`,
