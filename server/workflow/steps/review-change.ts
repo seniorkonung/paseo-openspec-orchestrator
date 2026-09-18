@@ -1,8 +1,9 @@
 import {
   describeRequiredAgentProfileProblem,
   resolveRequiredAgentProfile,
+  type AgentProfileReader,
 } from "../../agent-profiles.ts";
-import { ChangeReviewError } from "../../change-review.ts";
+import { ChangeReviewError, type ChangeReviewService } from "../../change-review.ts";
 import { ChangeReviewPublicationError } from "../../change-review-publication.ts";
 import type {
   WorkflowStepContext,
@@ -10,7 +11,14 @@ import type {
   WorkflowStepResult,
 } from "../types.ts";
 
-export async function reviewChangeStep(
+export interface ReviewChangeDependencies {
+  readonly workspaceDirectory: string;
+  readonly readAgentProfiles: AgentProfileReader;
+  readonly changeReview: Pick<ChangeReviewService, "plan" | "run">;
+}
+
+async function reviewChangeStep(
+  dependencies: ReviewChangeDependencies,
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
   const { branch, change } = context.state;
@@ -32,8 +40,8 @@ export async function reviewChangeStep(
   let session = context.state.pendingReviewSession;
   if (!session) {
     try {
-      session = await context.services.changeReview.plan(
-        context.workspaceDirectory,
+      session = await dependencies.changeReview.plan(
+        dependencies.workspaceDirectory,
         change.id,
         branch,
         context.signal,
@@ -49,7 +57,7 @@ export async function reviewChangeStep(
 
   let profiles;
   try {
-    profiles = await context.services.readAgentProfiles();
+    profiles = await dependencies.readAgentProfiles();
   } catch (error) {
     if (context.signal.aborted) throw error;
     console.error("[OpenSpec] Не удалось перечитать профили перед review", {
@@ -74,8 +82,8 @@ export async function reviewChangeStep(
   }
 
   try {
-    const review = await context.services.changeReview.run({
-      workspaceDirectory: context.workspaceDirectory,
+    const review = await dependencies.changeReview.run({
+      workspaceDirectory: dependencies.workspaceDirectory,
       profile: resolution.profile,
       session,
       signal: context.signal,
@@ -128,8 +136,12 @@ function errorCode(error: unknown): string {
   return "unknown";
 }
 
-export const reviewChange: WorkflowStepDefinition = {
-  id: "review-change",
-  label: "Провожу review OpenSpec change",
-  run: reviewChangeStep,
-};
+export function createReviewChangeStep(
+  dependencies: ReviewChangeDependencies,
+): WorkflowStepDefinition {
+  return {
+    id: "review-change",
+    label: "Провожу review OpenSpec change",
+    run: (context) => reviewChangeStep(dependencies, context),
+  };
+}

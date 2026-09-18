@@ -1,15 +1,29 @@
 import {
   describeRequiredAgentProfileProblem,
   resolveRequiredAgentProfile,
+  type AgentProfileReader,
 } from "../../agent-profiles.ts";
-import { ImplementationFindingResolutionError } from "../../implementation-finding-resolution.ts";
+import {
+  ImplementationFindingResolutionError,
+  type ImplementationFindingResolutionService,
+} from "../../implementation-finding-resolution.ts";
 import type {
   WorkflowStepContext,
   WorkflowStepDefinition,
   WorkflowStepResult,
 } from "../types.ts";
 
-export async function resolveImplementationReviewFindingsStep(
+export interface ResolveImplementationReviewFindingsDependencies {
+  readonly workspaceDirectory: string;
+  readonly readAgentProfiles: AgentProfileReader;
+  readonly findingResolution: Pick<
+    ImplementationFindingResolutionService,
+    "plan" | "run"
+  >;
+}
+
+async function resolveImplementationReviewFindingsStep(
+  dependencies: ResolveImplementationReviewFindingsDependencies,
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
   const { branch, change } = context.state;
@@ -35,8 +49,8 @@ export async function resolveImplementationReviewFindingsStep(
   let session = context.state.pendingImplementationFindingResolutionSession;
   if (!session) {
     try {
-      const plan = await context.services.implementationFindingResolution.plan(
-        context.workspaceDirectory,
+      const plan = await dependencies.findingResolution.plan(
+        dependencies.workspaceDirectory,
         change.id,
         branch,
         context.signal,
@@ -65,7 +79,7 @@ export async function resolveImplementationReviewFindingsStep(
 
   let profiles;
   try {
-    profiles = await context.services.readAgentProfiles();
+    profiles = await dependencies.readAgentProfiles();
   } catch (error) {
     if (context.signal.aborted) throw error;
     console.error(
@@ -91,8 +105,8 @@ export async function resolveImplementationReviewFindingsStep(
   }
 
   try {
-    const completed = await context.services.implementationFindingResolution.run({
-      workspaceDirectory: context.workspaceDirectory,
+    const completed = await dependencies.findingResolution.run({
+      workspaceDirectory: dependencies.workspaceDirectory,
       changeId: change.id,
       branch,
       profile: resolution.profile,
@@ -165,8 +179,12 @@ function errorCode(error: unknown): string {
   return "unknown";
 }
 
-export const resolveImplementationReviewFindings: WorkflowStepDefinition = {
-  id: "resolve-implementation-review-findings",
-  label: "Устраняю findings implementation review",
-  run: resolveImplementationReviewFindingsStep,
-};
+export function createResolveImplementationReviewFindingsStep(
+  dependencies: ResolveImplementationReviewFindingsDependencies,
+): WorkflowStepDefinition {
+  return {
+    id: "resolve-implementation-review-findings",
+    label: "Устраняю findings implementation review",
+    run: (context) => resolveImplementationReviewFindingsStep(dependencies, context),
+  };
+}

@@ -8,6 +8,8 @@ import { createChangeReviewService } from "./change-review.ts";
 import { createChangeFindingResolutionService } from "./change-finding-resolution.ts";
 import { createImplementationFindingResolutionService } from "./implementation-finding-resolution.ts";
 import { createChangeTaskExecutionService } from "./change-task-execution.ts";
+import { readGitBranch } from "./git-branch.ts";
+import { readGitWorktreeStatus } from "./git-worktree.ts";
 import { OpenSpecOrchestratorEngine } from "./openspec-orchestrator-engine.ts";
 import { inspectMiseToolchain } from "./mise-toolchain.ts";
 import type { OrchestratorEngine } from "./orchestrator-engine.ts";
@@ -16,6 +18,7 @@ import {
   NoopOrchestratorNotificationSink,
   type OrchestratorNotificationSink,
 } from "./orchestrator-notifications.ts";
+import { createOpenSpecWorkflow } from "./workflow/steps/index.ts";
 
 type PaseoApi = PluginHandlerContext["paseo"];
 
@@ -132,8 +135,33 @@ export class OrchestratorController {
 
     await this.#ledger.open(workspaceId);
     const workspaceDisplay = workspaceDisplayFromSnapshot(snapshot);
+    const workspaceDirectory = workspace.directory;
+    // Публичный SDK возвращает сохранённые профили через config.get().
+    // Источник: https://paseo.sh/docs/sdk/reference#clientconfig
+    const readAgentProfiles = async () =>
+      (await paseo.config.get()).config.agentProfiles ?? [];
+    // Глобальный paseo.agents.create создаёт новый workspace для cwd.
+    // Workspace-handle сохраняет размещение агента в текущем окружении.
+    // Источник: https://paseo.sh/docs/sdk/workspaces#start-an-agent-in-a-workspace
+    const createAgent = (options: Parameters<typeof workspace.agents.create>[0]) =>
+      workspace.agents.create(options);
+    const workflow = createOpenSpecWorkflow({
+      workspaceDirectory,
+      readAgentProfiles,
+      gitBranch: (directory, signal) => readGitBranch(directory, { signal }),
+      gitWorktree: (directory, signal) => readGitWorktreeStatus(directory, { signal }),
+      miseToolchain: inspectMiseToolchain,
+      changeSelection: createChangeSelectionService({ createAgent }),
+      changeArtifacts: createChangeArtifactCreationService({ createAgent }),
+      changePublication: createChangePublicationService({ createAgent }),
+      changeReview: createChangeReviewService({ createAgent }),
+      changeFindingResolution: createChangeFindingResolutionService({ createAgent }),
+      implementationFindingResolution: createImplementationFindingResolutionService({
+        createAgent,
+      }),
+      changeTaskExecution: createChangeTaskExecutionService({ createAgent }),
+    });
     this.#engine.initialize(workspaceId, {
-      workspaceDirectory: workspace.directory,
       workspaceDisplay,
       refreshWorkspaceDisplay: async () => {
         const refreshed = await workspace.refresh();
@@ -142,34 +170,7 @@ export class OrchestratorController {
         }
         return workspaceDisplayFromSnapshot(refreshed);
       },
-      // Публичный SDK возвращает сохранённые профили через config.get().
-      // Источник: https://paseo.sh/docs/sdk/reference#clientconfig
-      readAgentProfiles: async () => (await paseo.config.get()).config.agentProfiles ?? [],
-      miseToolchain: inspectMiseToolchain,
-      changeSelection: createChangeSelectionService({
-        // Глобальный paseo.agents.create создаёт новый workspace для cwd.
-        // Workspace-handle сохраняет размещение агента в текущем окружении.
-        // Источник: https://paseo.sh/docs/sdk/workspaces#start-an-agent-in-a-workspace
-        createAgent: (options) => workspace.agents.create(options),
-      }),
-      changeArtifacts: createChangeArtifactCreationService({
-        createAgent: (options) => workspace.agents.create(options),
-      }),
-      changePublication: createChangePublicationService({
-        createAgent: (options) => workspace.agents.create(options),
-      }),
-      changeReview: createChangeReviewService({
-        createAgent: (options) => workspace.agents.create(options),
-      }),
-      changeFindingResolution: createChangeFindingResolutionService({
-        createAgent: (options) => workspace.agents.create(options),
-      }),
-      implementationFindingResolution: createImplementationFindingResolutionService({
-        createAgent: (options) => workspace.agents.create(options),
-      }),
-      changeTaskExecution: createChangeTaskExecutionService({
-        createAgent: (options) => workspace.agents.create(options),
-      }),
+      workflow,
     });
   }
 }

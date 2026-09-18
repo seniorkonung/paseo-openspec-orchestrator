@@ -1,15 +1,26 @@
 import {
   describeRequiredAgentProfileProblem,
   resolveRequiredAgentProfile,
+  type AgentProfileReader,
 } from "../../agent-profiles.ts";
-import { ChangeFindingResolutionError } from "../../change-finding-resolution.ts";
+import {
+  ChangeFindingResolutionError,
+  type ChangeFindingResolutionService,
+} from "../../change-finding-resolution.ts";
 import type {
   WorkflowStepContext,
   WorkflowStepDefinition,
   WorkflowStepResult,
 } from "../types.ts";
 
-export async function resolveReviewFindingsStep(
+export interface ResolveReviewFindingsDependencies {
+  readonly workspaceDirectory: string;
+  readonly readAgentProfiles: AgentProfileReader;
+  readonly findingResolution: Pick<ChangeFindingResolutionService, "plan" | "run">;
+}
+
+async function resolveReviewFindingsStep(
+  dependencies: ResolveReviewFindingsDependencies,
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
   const { branch, change } = context.state;
@@ -35,8 +46,8 @@ export async function resolveReviewFindingsStep(
   let session = context.state.pendingFindingResolutionSession;
   if (!session) {
     try {
-      const plan = await context.services.changeFindingResolution.plan(
-        context.workspaceDirectory,
+      const plan = await dependencies.findingResolution.plan(
+        dependencies.workspaceDirectory,
         change.id,
         branch,
         context.signal,
@@ -61,7 +72,7 @@ export async function resolveReviewFindingsStep(
 
   let profiles;
   try {
-    profiles = await context.services.readAgentProfiles();
+    profiles = await dependencies.readAgentProfiles();
   } catch (error) {
     if (context.signal.aborted) throw error;
     console.error("[OpenSpec] Не удалось перечитать профили перед устранением finding", {
@@ -86,8 +97,8 @@ export async function resolveReviewFindingsStep(
   }
 
   try {
-    const completed = await context.services.changeFindingResolution.run({
-      workspaceDirectory: context.workspaceDirectory,
+    const completed = await dependencies.findingResolution.run({
+      workspaceDirectory: dependencies.workspaceDirectory,
       changeId: change.id,
       branch,
       profile: resolution.profile,
@@ -153,8 +164,12 @@ function errorCode(error: unknown): string {
   return "unknown";
 }
 
-export const resolveReviewFindings: WorkflowStepDefinition = {
-  id: "resolve-review-findings",
-  label: "Устраняю findings OpenSpec review",
-  run: resolveReviewFindingsStep,
-};
+export function createResolveReviewFindingsStep(
+  dependencies: ResolveReviewFindingsDependencies,
+): WorkflowStepDefinition {
+  return {
+    id: "resolve-review-findings",
+    label: "Устраняю findings OpenSpec review",
+    run: (context) => resolveReviewFindingsStep(dependencies, context),
+  };
+}

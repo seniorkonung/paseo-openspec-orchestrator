@@ -1,30 +1,114 @@
-import { checkAgentProfiles } from "./check-agent-profiles.ts";
-import { checkGitBranch } from "./check-git-branch.ts";
-import { checkGitWorktree } from "./check-git-worktree.ts";
-import { checkMiseToolchain } from "./check-mise-toolchain.ts";
-import { createChangeArtifacts } from "./create-change-artifacts.ts";
-import { executeChangeTasks } from "./execute-change-tasks.ts";
-import { publishChange } from "./publish-change.ts";
-import { reviewChange } from "./review-change.ts";
-import { resolveReviewFindings } from "./resolve-review-findings.ts";
-import { resolveImplementationReviewFindings } from "./resolve-implementation-review-findings.ts";
-import { selectChange } from "./select-change.ts";
-import type { WorkflowStepDefinition } from "../types.ts";
+import type { AgentProfileReader } from "../../agent-profiles.ts";
+import type { ChangeArtifactCreationService } from "../../change-artifact-creation.ts";
+import type { ChangeFindingResolutionService } from "../../change-finding-resolution.ts";
+import type { ChangePublicationService } from "../../change-publication.ts";
+import type { ChangeReviewService } from "../../change-review.ts";
+import type { ChangeSelectionService } from "../../change-selection.ts";
+import type { ChangeTaskExecutionService } from "../../change-task-execution.ts";
+import type { GitBranchProbe } from "../../git-branch.ts";
+import type { GitWorktreeProbe } from "../../git-worktree.ts";
+import type { ImplementationFindingResolutionService } from "../../implementation-finding-resolution.ts";
+import type { MiseToolchainProbe } from "../../mise-toolchain.ts";
+import type { WorkflowDefinition } from "../types.ts";
+import { createCheckAgentProfilesStep } from "./check-agent-profiles.ts";
+import { createCheckGitBranchStep } from "./check-git-branch.ts";
+import { createCheckGitWorktreeStep } from "./check-git-worktree.ts";
+import { createCheckMiseToolchainStep } from "./check-mise-toolchain.ts";
+import { createChangeArtifactsStep } from "./create-change-artifacts.ts";
+import { createExecuteChangeTasksStep } from "./execute-change-tasks.ts";
+import { createPublishChangeStep } from "./publish-change.ts";
+import { createResolveImplementationReviewFindingsStep } from "./resolve-implementation-review-findings.ts";
+import { createResolveReviewFindingsStep } from "./resolve-review-findings.ts";
+import { createReviewChangeStep } from "./review-change.ts";
+import { createSelectChangeStep } from "./select-change.ts";
 
 /**
- * Единственное место, где регистрируются шаги workflow.
- * Добавляйте новую функцию-описание шага в `steps/` и включайте её сюда.
+ * Все конкретные зависимости стандартного OpenSpec workflow.
+ *
+ * Это контракт сборки, а не локатор сервисов: он существует только в этой
+ * точке. Каждый шаг получает из него свой меньший контракт, определённый
+ * потребностями шага.
  */
-export const OPEN_SPEC_WORKFLOW_STEPS: readonly WorkflowStepDefinition[] = Object.freeze([
-  checkAgentProfiles,
-  checkGitBranch,
-  checkGitWorktree,
-  checkMiseToolchain,
-  selectChange,
-  createChangeArtifacts,
-  publishChange,
-  reviewChange,
-  resolveReviewFindings,
-  resolveImplementationReviewFindings,
-  executeChangeTasks,
-]);
+export interface OpenSpecWorkflowDependencies {
+  readonly workspaceDirectory: string;
+  readonly readAgentProfiles: AgentProfileReader;
+  readonly gitBranch: GitBranchProbe;
+  readonly gitWorktree: GitWorktreeProbe;
+  readonly miseToolchain: MiseToolchainProbe;
+  readonly changeSelection: ChangeSelectionService;
+  readonly changeArtifacts: ChangeArtifactCreationService;
+  readonly changePublication: ChangePublicationService;
+  readonly changeReview: ChangeReviewService;
+  readonly changeFindingResolution: ChangeFindingResolutionService;
+  readonly implementationFindingResolution: ImplementationFindingResolutionService;
+  readonly changeTaskExecution: ChangeTaskExecutionService;
+}
+
+/**
+ * Связывает конкретные возможности со сценариями один раз, до запуска движка.
+ * После этой границы движок видит только исполняемый WorkflowDefinition.
+ */
+export function createOpenSpecWorkflow(
+  dependencies: OpenSpecWorkflowDependencies,
+): WorkflowDefinition {
+  return {
+    startStepId: "check-agent-profiles",
+    steps: Object.freeze([
+      createCheckAgentProfilesStep({
+        readAgentProfiles: dependencies.readAgentProfiles,
+      }),
+      createCheckGitBranchStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        inspectBranch: dependencies.gitBranch,
+      }),
+      createCheckGitWorktreeStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        inspectWorktree: dependencies.gitWorktree,
+      }),
+      createCheckMiseToolchainStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        inspectToolchain: dependencies.miseToolchain,
+      }),
+      createSelectChangeStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        readAgentProfiles: dependencies.readAgentProfiles,
+        changeSelection: dependencies.changeSelection,
+        changeArtifacts: dependencies.changeArtifacts,
+      }),
+      createChangeArtifactsStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        readAgentProfiles: dependencies.readAgentProfiles,
+        changeArtifacts: dependencies.changeArtifacts,
+      }),
+      createPublishChangeStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        readAgentProfiles: dependencies.readAgentProfiles,
+        inspectBranch: dependencies.gitBranch,
+        inspectWorktree: dependencies.gitWorktree,
+        changeSelection: dependencies.changeSelection,
+        changeArtifacts: dependencies.changeArtifacts,
+        changePublication: dependencies.changePublication,
+      }),
+      createReviewChangeStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        readAgentProfiles: dependencies.readAgentProfiles,
+        changeReview: dependencies.changeReview,
+      }),
+      createResolveReviewFindingsStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        readAgentProfiles: dependencies.readAgentProfiles,
+        findingResolution: dependencies.changeFindingResolution,
+      }),
+      createResolveImplementationReviewFindingsStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        readAgentProfiles: dependencies.readAgentProfiles,
+        findingResolution: dependencies.implementationFindingResolution,
+      }),
+      createExecuteChangeTasksStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        readAgentProfiles: dependencies.readAgentProfiles,
+        taskExecution: dependencies.changeTaskExecution,
+      }),
+    ]),
+  };
+}

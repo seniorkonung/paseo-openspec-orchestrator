@@ -2,22 +2,11 @@ import {
   ORCHESTRATOR_LIMITS,
   type ControlCommand,
 } from "../shared/orchestrator.ts";
-import type { AgentProfileReader } from "./agent-profiles.ts";
-import type { ChangeArtifactCreationService } from "./change-artifact-creation.ts";
-import type { ChangeSelectionService } from "./change-selection.ts";
-import type { ChangePublicationService } from "./change-publication.ts";
-import type { ChangeReviewService } from "./change-review.ts";
-import type { ChangeFindingResolutionService } from "./change-finding-resolution.ts";
-import type { ImplementationFindingResolutionService } from "./implementation-finding-resolution.ts";
-import type { ChangeTaskExecutionService } from "./change-task-execution.ts";
-import type { MiseToolchainProbe } from "./mise-toolchain.ts";
 import {
   normalizeOrchestratorWorkspaceDisplay,
   type OrchestratorNotificationRequest,
   type OrchestratorWorkspaceDisplay,
 } from "../shared/orchestrator-notifications.ts";
-import { readGitBranch, type GitBranchProbe } from "./git-branch.ts";
-import { readGitWorktreeStatus, type GitWorktreeProbe } from "./git-worktree.ts";
 import {
   NoopOrchestratorNotificationSink,
   type OrchestratorNotificationSink,
@@ -34,15 +23,13 @@ import {
   workflowCheckpointSchema,
   workflowStateSchema,
   type WorkflowCheckpoint,
+  type WorkflowDefinition,
   type WorkflowState,
   type WorkflowStepDefinition,
   type WorkflowStepId,
 } from "./workflow/types.ts";
-import { OPEN_SPEC_WORKFLOW_STEPS } from "./workflow/steps/index.ts";
 
 export interface OpenSpecOrchestratorEngineOptions {
-  branchProbe?: GitBranchProbe;
-  worktreeProbe?: GitWorktreeProbe;
   notifications?: OrchestratorNotificationSink;
   steps?: readonly WorkflowStepDefinition[];
   startStepId?: WorkflowStepId;
@@ -50,18 +37,9 @@ export interface OpenSpecOrchestratorEngineOptions {
 }
 
 interface WorkspaceRuntime {
-  workspaceDirectory: string;
+  workflow: PreparedWorkflow;
   workspaceDisplay: OrchestratorWorkspaceDisplay;
   refreshWorkspaceDisplay: () => Promise<OrchestratorWorkspaceDisplay>;
-  readAgentProfiles: AgentProfileReader;
-  miseToolchain: MiseToolchainProbe;
-  changeSelection: ChangeSelectionService;
-  changeArtifacts: ChangeArtifactCreationService;
-  changePublication: ChangePublicationService;
-  changeReview: ChangeReviewService;
-  changeFindingResolution: ChangeFindingResolutionService;
-  implementationFindingResolution: ImplementationFindingResolutionService;
-  changeTaskExecution: ChangeTaskExecutionService;
   generation: number;
   pauseRequested: boolean;
   active: boolean;
@@ -70,6 +48,11 @@ interface WorkspaceRuntime {
   durableCheckpoint: WorkflowCheckpoint | null;
   currentHandle: ActionHandle | null;
   abortController: AbortController | null;
+}
+
+interface PreparedWorkflow {
+  readonly startStepId: WorkflowStepId;
+  readonly steps: ReadonlyMap<WorkflowStepId, WorkflowStepDefinition>;
 }
 
 const ACTIVE_LIFECYCLE_STATUSES = ["starting", "running", "pausing", "paused"] as const;
@@ -91,13 +74,35 @@ function checkpointFor(stepId: WorkflowStepId, state: WorkflowState): WorkflowCh
   });
 }
 
+function prepareWorkflow(definition: WorkflowDefinition): PreparedWorkflow {
+  const configuredSteps = [...definition.steps];
+  if (configuredSteps.length === 0) {
+    throw new Error("Workflow должен содержать хотя бы один шаг");
+  }
+  const steps = new Map<WorkflowStepId, WorkflowStepDefinition>();
+  for (const step of configuredSteps) {
+    if (step.id.trim().length === 0) {
+      throw new Error("Workflow не может содержать шаг без id");
+    }
+    if (step.label.trim().length === 0 || step.label.length > MAX_STEP_LABEL_LENGTH) {
+      throw new Error(`Недопустимое название шага workflow: ${step.id}`);
+    }
+    if (steps.has(step.id)) {
+      throw new Error(`Workflow содержит повторяющийся id шага: ${step.id}`);
+    }
+    steps.set(step.id, step);
+  }
+  if (!steps.has(definition.startStepId)) {
+    throw new Error(`Начальный шаг workflow не найден: ${definition.startStepId}`);
+  }
+  return { startStepId: definition.startStepId, steps };
+}
+
 export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
   readonly #ledger: OrchestratorLedger;
-  readonly #branchProbe: GitBranchProbe;
-  readonly #worktreeProbe: GitWorktreeProbe;
   readonly #notifications: OrchestratorNotificationSink;
-  readonly #steps: ReadonlyMap<WorkflowStepId, WorkflowStepDefinition>;
-  readonly #startStepId: WorkflowStepId;
+  readonly #workflowOverride: PreparedWorkflow | null;
+  readonly #startStepIdOverride: WorkflowStepId | null;
   readonly #now: () => Date;
   readonly #runtime = new Map<string, WorkspaceRuntime>();
   readonly #activeRuns = new Set<Promise<void>>();
@@ -106,35 +111,14 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
 
   constructor(ledger: OrchestratorLedger, options: OpenSpecOrchestratorEngineOptions = {}) {
     this.#ledger = ledger;
-    this.#branchProbe =
-      options.branchProbe ??
-      ((workspaceDirectory, signal) => readGitBranch(workspaceDirectory, { signal }));
-    this.#worktreeProbe =
-      options.worktreeProbe ??
-      ((workspaceDirectory, signal) => readGitWorktreeStatus(workspaceDirectory, { signal }));
     this.#notifications = options.notifications ?? new NoopOrchestratorNotificationSink();
-    const configuredSteps = [...(options.steps ?? OPEN_SPEC_WORKFLOW_STEPS)];
-    if (configuredSteps.length === 0) {
-      throw new Error("Workflow должен содержать хотя бы один шаг");
-    }
-    const steps = new Map<WorkflowStepId, WorkflowStepDefinition>();
-    for (const step of configuredSteps) {
-      if (step.id.trim().length === 0) {
-        throw new Error("Workflow не может содержать шаг без id");
-      }
-      if (step.label.trim().length === 0 || step.label.length > MAX_STEP_LABEL_LENGTH) {
-        throw new Error(`Недопустимое название шага workflow: ${step.id}`);
-      }
-      if (steps.has(step.id)) {
-        throw new Error(`Workflow содержит повторяющийся id шага: ${step.id}`);
-      }
-      steps.set(step.id, step);
-    }
-    this.#steps = steps;
-    this.#startStepId = options.startStepId ?? configuredSteps[0].id;
-    if (!this.#steps.has(this.#startStepId)) {
-      throw new Error(`Начальный шаг workflow не найден: ${this.#startStepId}`);
-    }
+    this.#workflowOverride = options.steps
+      ? prepareWorkflow({
+          startStepId: options.startStepId ?? options.steps[0]?.id ?? "",
+          steps: options.steps,
+        })
+      : null;
+    this.#startStepIdOverride = options.startStepId ?? null;
     this.#now = options.now ?? (() => new Date());
   }
 
@@ -142,19 +126,16 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
     if (this.#runtime.has(workspaceId)) return;
     this.#recoverInterruptedRun(workspaceId);
     const checkpoint = this.#ledger.getWorkflowCheckpoint(workspaceId);
+    const workflow =
+      this.#workflowOverride ??
+      prepareWorkflow({
+        ...context.workflow,
+        startStepId: this.#startStepIdOverride ?? context.workflow.startStepId,
+      });
     this.#runtime.set(workspaceId, {
-      workspaceDirectory: context.workspaceDirectory,
+      workflow,
       workspaceDisplay: normalizeOrchestratorWorkspaceDisplay(context.workspaceDisplay),
       refreshWorkspaceDisplay: context.refreshWorkspaceDisplay,
-      readAgentProfiles: context.readAgentProfiles,
-      miseToolchain: context.miseToolchain,
-      changeSelection: context.changeSelection,
-      changeArtifacts: context.changeArtifacts,
-      changePublication: context.changePublication,
-      changeReview: context.changeReview,
-      changeFindingResolution: context.changeFindingResolution,
-      implementationFindingResolution: context.implementationFindingResolution,
-      changeTaskExecution: context.changeTaskExecution,
       generation: 0,
       pauseRequested: false,
       active: false,
@@ -250,7 +231,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       runtime.currentStepId = durableCheckpoint.nextStepId;
       runtime.state = durableCheckpoint.state;
     } else {
-      runtime.currentStepId = this.#startStepId;
+      runtime.currentStepId = runtime.workflow.startStepId;
       runtime.state = createInitialWorkflowState();
       reporter.setChange(null);
     }
@@ -266,7 +247,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
           runtime,
           reporter,
           generation,
-          checkpointFor(this.#startStepId, runtime.state),
+          checkpointFor(runtime.workflow.startStepId, runtime.state),
         );
 
     queueMicrotask(() => {
@@ -321,7 +302,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
         this.#complete(workspaceId, reporter, runtime);
         return;
       }
-      const step = this.#steps.get(currentStepId);
+      const step = runtime.workflow.steps.get(currentStepId);
       if (!step) {
         this.#fail(
           workspaceId,
@@ -347,23 +328,8 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
 
       try {
         const result = await step.run({
-          workspaceDirectory: runtime.workspaceDirectory,
           signal: abortController.signal,
           state: runtime.state,
-          services: {
-            readAgentProfiles: runtime.readAgentProfiles,
-            gitBranch: this.#branchProbe,
-            gitWorktree: this.#worktreeProbe,
-            miseToolchain: runtime.miseToolchain,
-            changeSelection: runtime.changeSelection,
-            changeArtifacts: runtime.changeArtifacts,
-            changePublication: runtime.changePublication,
-            changeReview: runtime.changeReview,
-            changeFindingResolution: runtime.changeFindingResolution,
-            implementationFindingResolution: runtime.implementationFindingResolution,
-            changeTaskExecution: runtime.changeTaskExecution,
-            notify: (notification) => this.#notify(workspaceId, notification, runtime),
-          },
           updateActionLinks: (links) => {
             if (this.#disposed || runtime.generation !== generation) {
               throw new Error("Workflow больше не принимает ссылки действий");
@@ -379,6 +345,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
               currentStepId,
               nextState,
             ),
+          notify: (notification) => this.#notify(workspaceId, notification, runtime),
         });
         if (this.#disposed || runtime.generation !== generation) return;
 
@@ -403,7 +370,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
             return;
           }
           case "continue": {
-            if (!this.#steps.has(result.next)) {
+            if (!runtime.workflow.steps.has(result.next)) {
               this.#fail(
                 workspaceId,
                 reporter,

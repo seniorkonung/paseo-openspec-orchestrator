@@ -1,22 +1,35 @@
-import { lstat, realpath } from "node:fs/promises";
-import { relative, resolve } from "node:path";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import type { CompleteRequiredAgentProfile } from "./agent-profiles.ts";
 import {
-  abortError,
   combineAbortSignals,
-  createDeferred,
-  createSerializedExecutor,
   throwIfSignalAborted,
-  waitForPromise,
 } from "./agent-session-control.ts";
 import {
   runBoundedCommand,
   type BoundedCommandRunner,
 } from "./bounded-command.ts";
-import { commitHashSchema } from "./change-artifact-model.ts";
-import { runWorkspaceMiseCommand } from "./mise-toolchain.ts";
+import {
+  ChangeReviewError,
+  pendingReviewSessionSchema,
+  reviewCommitSubject,
+  reviewPublicationTarget,
+  type CompletedChangeReview,
+  type PendingReviewSession,
+} from "./change-review-model.ts";
+import {
+  ChangeReviewPublicationError,
+  assertReviewPublicationRecovery,
+  prepareReviewPublication,
+  reviewBranchSchema,
+  reviewPullRequestBody,
+  reviewPullRequestTitle,
+} from "./change-review-publication.ts";
+import {
+  createChangeReviewVerification,
+  type ChangeReviewVerificationOptions,
+} from "./change-review-verification.ts";
+import { createManagedAgentSession } from "./managed-agent-session.ts";
 import {
   McpToolError,
   OrchestratorMcpToolHost,
@@ -24,24 +37,19 @@ import {
 } from "./orchestrator-mcp-tool-host.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import {
-  ChangeReviewPublicationError,
-  assertReviewPublicationRecovery,
-  prepareReviewPublication,
-  reviewBranchSchema,
-  reviewPublicationTargetSchema,
-  reviewPullRequestBody,
-  reviewPullRequestTitle,
-  verifyReviewPullRequest,
-  type CompletedReviewPullRequest,
-} from "./change-review-publication.ts";
-import {
   updateAgentNotificationLabel,
   type AgentNotificationLabelUpdater,
 } from "./paseo-agent-labels.ts";
-import {
-  resolveRepoLocalChangePaths,
-  type RepoLocalChangePaths,
-} from "./repo-local-change.ts";
+
+export {
+  ChangeReviewError,
+  pendingReviewSessionSchema,
+  reviewCommitSubject,
+} from "./change-review-model.ts";
+export type {
+  CompletedChangeReview,
+  PendingReviewSession,
+} from "./change-review-model.ts";
 
 type PaseoApi = PluginHandlerContext["paseo"];
 type PaseoWorkspace = ReturnType<PaseoApi["workspaces"]["ref"]>;
@@ -51,36 +59,8 @@ export type ReviewPaseoAgentCreator = (
   options: Parameters<PaseoWorkspace["agents"]["create"]>[0],
 ) => Promise<PaseoAgent>;
 
-const REVIEW_FILE_NAME = "review.md";
 const DEFAULT_AGENT_DRAIN_TIMEOUT_MS = 15_000;
-const FALLBACK_COMMIT_SUBJECT = "docs(openspec): add change review";
 const MAX_PATH_LENGTH = 8_192;
-
-const reviewStatusSchema = z
-  .object({
-    changeName: openSpecChangeIdSchema,
-    changeRoot: z.string().trim().min(1).max(MAX_PATH_LENGTH),
-    actionContext: z
-      .object({
-        mode: z.literal("repo-local"),
-        sourceOfTruth: z.literal("repo"),
-      })
-      .loose(),
-  })
-  .loose();
-
-export const pendingReviewSessionSchema = reviewPublicationTargetSchema.safeExtend({
-  changeId: openSpecChangeIdSchema,
-});
-
-export type PendingReviewSession = z.infer<typeof pendingReviewSessionSchema>;
-
-export interface CompletedChangeReview {
-  readonly changeId: string;
-  readonly reviewPath: string;
-  readonly branch: string;
-  readonly pullRequest: CompletedReviewPullRequest;
-}
 
 export interface ChangeReviewRequest {
   readonly workspaceDirectory: string;
@@ -107,33 +87,25 @@ interface McpHostFactory {
 export interface ChangeReviewServiceOptions {
   readonly createAgent: ReviewPaseoAgentCreator;
   readonly command?: BoundedCommandRunner;
-  readonly resolveRealPath?: typeof realpath;
-  readonly inspectPath?: typeof lstat;
+  readonly resolveRealPath?: ChangeReviewVerificationOptions["resolveRealPath"];
+  readonly inspectPath?: ChangeReviewVerificationOptions["inspectPath"];
   readonly updateNotificationLabel?: AgentNotificationLabelUpdater;
   readonly mcpHost?: McpHostFactory;
   readonly agentDrainTimeoutMs?: number;
   readonly logger?: Pick<Console, "error" | "warn">;
 }
 
-interface ReviewContext extends RepoLocalChangePaths {
-  readonly changeId: string;
-  readonly reviewPath: string;
-  readonly reviewRepositoryPath: string;
-}
-
-export class ChangeReviewError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ChangeReviewError";
-  }
-}
-
 export function createChangeReviewService(
   options: ChangeReviewServiceOptions,
 ): ChangeReviewService {
   const command = options.command ?? runBoundedCommand;
-  const resolveRealPath = options.resolveRealPath ?? realpath;
-  const inspectPath = options.inspectPath ?? lstat;
+  const verification = createChangeReviewVerification({
+    command,
+    ...(options.resolveRealPath == null
+      ? {}
+      : { resolveRealPath: options.resolveRealPath }),
+    ...(options.inspectPath == null ? {} : { inspectPath: options.inspectPath }),
+  });
   const updateNotificationLabel =
     options.updateNotificationLabel ?? updateAgentNotificationLabel;
   const mcpHost = options.mcpHost ?? OrchestratorMcpToolHost;
@@ -141,104 +113,13 @@ export function createChangeReviewService(
     options.agentDrainTimeoutMs ?? DEFAULT_AGENT_DRAIN_TIMEOUT_MS;
   const logger = options.logger ?? console;
 
-  const readContext = async (
-    workspaceDirectory: string,
-    changeId: string,
-    signal?: AbortSignal,
-  ): Promise<ReviewContext> => {
-    const parsedChangeId = parseChangeId(changeId);
-    let stdout: string;
-    try {
-      ({ stdout } = await runWorkspaceMiseCommand(
-        command,
-        workspaceDirectory,
-        "openspec",
-        ["status", "--change", parsedChangeId, "--json"],
-        signal,
-      ));
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      throw new ChangeReviewError(
-        `Не удалось прочитать OpenSpec change «${parsedChangeId}» для review`,
-      );
-    }
-
-    let status: z.output<typeof reviewStatusSchema>;
-    try {
-      status = reviewStatusSchema.parse(JSON.parse(stdout) as unknown);
-    } catch {
-      throw new ChangeReviewError(
-        `OpenSpec вернул некорректное состояние change «${parsedChangeId}»`,
-      );
-    }
-    if (status.changeName !== parsedChangeId) {
-      throw new ChangeReviewError(
-        `OpenSpec вернул другой change вместо «${parsedChangeId}»`,
-      );
-    }
-
-    let paths: RepoLocalChangePaths;
-    try {
-      paths = await resolveRepoLocalChangePaths({
-        command,
-        workspaceDirectory,
-        reportedChangeRoot: status.changeRoot,
-        signal,
-        resolveRealPath,
-      });
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      throw new ChangeReviewError(
-        `Не удалось безопасно определить каталог change «${parsedChangeId}»`,
-      );
-    }
-
-    const reviewPath = resolve(paths.changeRoot, REVIEW_FILE_NAME);
-    const reviewRepositoryPath = `${paths.changeRepositoryPath}/${REVIEW_FILE_NAME}`;
-    return {
-      ...paths,
-      changeId: parsedChangeId,
-      reviewPath,
-      reviewRepositoryPath,
-    };
-  };
-
-  const inspectReview = async (
-    context: ReviewContext,
-    signal?: AbortSignal,
-  ): Promise<boolean> => {
-    let reviewStat;
-    try {
-      reviewStat = await inspectPath(context.reviewPath);
-    } catch (error) {
-      if (isMissingPathError(error)) return false;
-      if (signal?.aborted) throw error;
-      throw new ChangeReviewError("Не удалось проверить review.md выбранного change");
-    }
-    if (!reviewStat.isFile() || reviewStat.isSymbolicLink() || reviewStat.size === 0) {
-      throw new ChangeReviewError(
-        "review.md должен быть непустым обычным файлом внутри выбранного change",
-      );
-    }
-
-    try {
-      const resolvedReviewPath = await resolveRealPath(context.reviewPath);
-      const pathInsideChange = relative(context.changeRoot, resolvedReviewPath);
-      if (pathInsideChange !== REVIEW_FILE_NAME) {
-        throw new Error("Review path вышел за пределы change");
-      }
-    } catch (error) {
-      if (error instanceof ChangeReviewError || signal?.aborted) throw error;
-      throw new ChangeReviewError(
-        "review.md находится за пределами выбранного OpenSpec change",
-      );
-    }
-    return true;
-  };
-
   return {
     async plan(workspaceDirectory, changeId, branch, signal) {
-      const context = await readContext(workspaceDirectory, changeId, signal);
+      const context = await verification.readContext(
+        workspaceDirectory,
+        changeId,
+        signal,
+      );
       const target = await prepareReviewPublication(
         context.gitRoot,
         branch,
@@ -257,7 +138,7 @@ export function createChangeReviewService(
       const changeId = session.changeId;
       const publicationTarget = reviewPublicationTarget(session);
 
-      const context = await readContext(
+      const context = await verification.readContext(
         request.workspaceDirectory,
         changeId,
         request.signal,
@@ -270,23 +151,21 @@ export function createChangeReviewService(
         command,
       );
 
-      const reviewAlreadyCommitted = await isLocalReviewCommitReady(
-        command,
+      const reviewAlreadyCommitted = await verification.isLocalCommitReady(
         context,
         session,
-        inspectReview,
         request.signal,
       );
       const host = await mcpHost.listen();
-      let agent: PaseoAgent | null = null;
-      let notificationsDisabled = false;
       let completedReview: CompletedChangeReview | null = null;
-      const agentReady = createDeferred<PaseoAgent>();
-      const completion = createDeferred<CompletedChangeReview>();
-      void completion.promise.catch(() => undefined);
-      const abortCompletion = () => completion.reject(abortError());
-      request.signal.addEventListener("abort", abortCompletion, { once: true });
-      const serialize = createSerializedExecutor();
+      const agentSession = createManagedAgentSession<CompletedChangeReview>({
+        signal: request.signal,
+        host,
+        updateNotificationLabel,
+        agentDrainTimeoutMs,
+        logContext: "review change",
+        logger,
+      });
 
       const outputSchema = z
         .object({
@@ -302,26 +181,24 @@ export function createChangeReviewService(
             .strict(),
         })
         .strict();
-      const scope = host.expose({
+      const scope = await agentSession.openScope(() => host.expose({
         complete_change_review: defineMcpTool({
           description:
             "Проверить законченный, закоммиченный и опубликованный review выбранного OpenSpec change",
           inputSchema: z.object({}).strict(),
           outputSchema,
           execute: (_input, toolContext) =>
-            serialize(async () => {
+            agentSession.runExclusive(async () => {
               if (completedReview) return completionToolResult(completedReview);
               const combined = combineAbortSignals(request.signal, toolContext.signal);
               const { signal } = combined;
               try {
-                const activeAgent = await waitForPromise(agentReady.promise, signal);
+                const activeAgent = await agentSession.waitForAgent(signal);
                 let verified: CompletedChangeReview;
                 try {
-                  verified = await verifyCompletedReview(
-                    command,
+                  verified = await verification.verifyCompleted(
                     context,
                     session,
-                    inspectReview,
                     signal,
                   );
                 } catch (error) {
@@ -340,8 +217,7 @@ export function createChangeReviewService(
                 }
 
                 try {
-                  await updateNotificationLabel(activeAgent.id, false, signal);
-                  notificationsDisabled = true;
+                  await agentSession.disableNotifications(signal);
                 } catch (error) {
                   if (signal.aborted) throw error;
                   logger.error("[OpenSpec] Не удалось отключить ntfy для review-агента", {
@@ -354,14 +230,14 @@ export function createChangeReviewService(
                 }
 
                 completedReview = verified;
-                completion.resolve(verified);
+                agentSession.complete(verified);
                 return completionToolResult(verified);
               } finally {
                 combined.dispose();
               }
             }),
         }),
-      });
+      }));
 
       try {
         const config = scope.configureAgent({
@@ -372,71 +248,39 @@ export function createChangeReviewService(
             ? {}
             : { featureValues: request.profile.featureValues }),
         });
-        agent = await options.createAgent({
-          config,
-          title: `Review OpenSpec change: ${changeId}`,
-          prompt: changeReviewPrompt({
-            changeId,
-            parentBranch: session.parentBranch,
-            reviewBranch: session.reviewBranch,
-            baselineCommit: session.baselineCommit,
-            repository:
-              session.repositoryHost === "github.com"
-                ? session.repositoryNameWithOwner
-                : `${session.repositoryHost}/${session.repositoryNameWithOwner}`,
-            reviewRepositoryPath: context.reviewRepositoryPath,
-            alreadyCommitted: reviewAlreadyCommitted,
-          }),
-          labels: { ntfy: "true" },
-        });
-        throwIfSignalAborted(request.signal);
-        request.onAgentCreated(agent.id);
-        agentReady.resolve(agent);
+        await agentSession.launchAgent(
+          () =>
+            options.createAgent({
+              config,
+              title: `Review OpenSpec change: ${changeId}`,
+              prompt: changeReviewPrompt({
+                changeId,
+                parentBranch: session.parentBranch,
+                reviewBranch: session.reviewBranch,
+                baselineCommit: session.baselineCommit,
+                repository:
+                  session.repositoryHost === "github.com"
+                    ? session.repositoryNameWithOwner
+                    : `${session.repositoryHost}/${session.repositoryNameWithOwner}`,
+                reviewRepositoryPath: context.reviewRepositoryPath,
+                alreadyCommitted: reviewAlreadyCommitted,
+              }),
+              labels: { ntfy: "true" },
+            }),
+          request.onAgentCreated,
+        );
 
-        const review = await completion.promise;
+        const review = await agentSession.waitForCompletion();
         // Completion разрешается внутри MCP handler. Даём transport закончить
         // отправку ответа до возможного мгновенного waitForFinish и закрытия scope.
         await new Promise<void>((resolveDrain) => setImmediate(resolveDrain));
-        try {
-          await agent.waitForFinish(agentDrainTimeoutMs);
-        } catch (error) {
-          logger.warn("[OpenSpec] Не удалось дождаться завершения хода review-агента", {
-            agentId: agent.id,
-            code: errorCode(error),
-          });
-        }
+        await agentSession.drainAgent();
         return review;
       } finally {
-        request.signal.removeEventListener("abort", abortCompletion);
-        if (agent && !notificationsDisabled) {
-          try {
-            await updateNotificationLabel(agent.id, false);
-            notificationsDisabled = true;
-          } catch (error) {
-            logger.warn("[OpenSpec] Не удалось отключить ntfy при закрытии review", {
-              agentId: agent.id,
-              code: errorCode(error),
-            });
-          }
-        }
-        await scope.close().catch((error) => {
-          logger.warn("[OpenSpec] Не удалось закрыть MCP scope review change", {
-            code: errorCode(error),
-          });
-        });
-        await host.close().catch((error) => {
-          logger.warn("[OpenSpec] Не удалось закрыть MCP-хост review change", {
-            code: errorCode(error),
-          });
-        });
+        await agentSession.close();
       }
     },
   };
-}
-
-export function reviewCommitSubject(changeId: string): string {
-  const detailed = `docs(openspec): add ${parseChangeId(changeId)} review`;
-  return detailed.length <= 71 ? detailed : FALLBACK_COMMIT_SUBJECT;
 }
 
 export function changeReviewPrompt(input: {
@@ -487,281 +331,6 @@ Publish the review commit with \`git push --set-upstream origin ${input.reviewBr
 Then call the orchestrator MCP tool \`complete_change_review\` with an empty object. If it reports an error, fix only the review commit or publication state and retry the tool. Your task ends after \`complete_change_review\` succeeds. Do not archive the agent or workspace.`;
 }
 
-async function isLocalReviewCommitReady(
-  command: BoundedCommandRunner,
-  context: ReviewContext,
-  session: PendingReviewSession,
-  inspectReview: (context: ReviewContext, signal?: AbortSignal) => Promise<boolean>,
-  signal: AbortSignal,
-): Promise<boolean> {
-  try {
-    await verifyLocalReviewCommit(command, context, session, inspectReview, signal);
-    return true;
-  } catch (error) {
-    if (signal.aborted) throw error;
-    return false;
-  }
-}
-
-async function verifyCompletedReview(
-  command: BoundedCommandRunner,
-  context: ReviewContext,
-  session: PendingReviewSession,
-  inspectReview: (context: ReviewContext, signal?: AbortSignal) => Promise<boolean>,
-  signal: AbortSignal,
-): Promise<CompletedChangeReview> {
-  const head = await verifyLocalReviewCommit(
-    command,
-    context,
-    session,
-    inspectReview,
-    signal,
-  );
-  const pullRequest = await verifyReviewPullRequest(
-    context.gitRoot,
-    reviewPublicationTarget(session),
-    context.changeId,
-    head,
-    signal,
-    command,
-  );
-  return {
-    changeId: context.changeId,
-    reviewPath: context.reviewRepositoryPath,
-    branch: session.reviewBranch,
-    pullRequest,
-  };
-}
-
-async function verifyLocalReviewCommit(
-  command: BoundedCommandRunner,
-  context: ReviewContext,
-  session: PendingReviewSession,
-  inspectReview: (context: ReviewContext, signal?: AbortSignal) => Promise<boolean>,
-  signal: AbortSignal,
-): Promise<string> {
-  await assertCurrentBranch(command, context.gitRoot, session.reviewBranch, signal);
-  await assertCleanWorktree(command, context.gitRoot, signal);
-  if (!(await inspectReview(context, signal))) {
-    throw new ChangeReviewError("Review ещё не создал review.md");
-  }
-  await assertReviewTracked(command, context, signal);
-  const head = await readHeadCommit(command, context.gitRoot, signal);
-  await assertDescendsFromBaseline(
-    command,
-    context.gitRoot,
-    session.baselineCommit,
-    signal,
-  );
-
-  const commitCount = await readCommitCount(
-    command,
-    context.gitRoot,
-    session.baselineCommit,
-    head,
-    signal,
-  );
-  if (commitCount !== 1) {
-    throw new ChangeReviewError("Для review требуется ровно один отдельный Git-коммит");
-  }
-
-  const [changedPaths, addedPaths] = await Promise.all([
-    readDiffPaths(command, context.gitRoot, session.baselineCommit, head, [], signal),
-    readDiffPaths(command, context.gitRoot, session.baselineCommit, head, ["--diff-filter=A"], signal),
-  ]);
-  const addedPathSet = new Set(addedPaths);
-  const allowedPrefix = `${context.changeRepositoryPath}/`;
-  if (
-    !changedPaths.includes(context.reviewRepositoryPath) ||
-    changedPaths.some((path) => !path.startsWith(allowedPrefix))
-  ) {
-    throw new ChangeReviewError(
-      "Review-коммит должен содержать review.md и только новые файлы внутри выбранного change",
-    );
-  }
-  if (
-    changedPaths.some(
-      (path) => path !== context.reviewRepositoryPath && !addedPathSet.has(path),
-    )
-  ) {
-    throw new ChangeReviewError(
-      "Review-коммит не должен изменять существующие planning-артефакты",
-    );
-  }
-
-  const subject = await readCommitSubject(command, context.gitRoot, head, signal);
-  const expectedSubject = reviewCommitSubject(context.changeId);
-  if (subject !== expectedSubject) {
-    throw new ChangeReviewError(
-      `Git-коммит review должен иметь сообщение «${expectedSubject}»`,
-    );
-  }
-  return head;
-}
-
-async function assertCleanWorktree(
-  command: BoundedCommandRunner,
-  gitRoot: string,
-  signal?: AbortSignal,
-): Promise<void> {
-  try {
-    const result = await command(
-      "git",
-      ["status", "--porcelain=v1", "--untracked-files=all"],
-      { cwd: gitRoot, signal },
-    );
-    if (result.stdout.length > 0) {
-      throw new ChangeReviewError(
-        "Рабочее дерево Git содержит незакоммиченные или неотслеживаемые изменения",
-      );
-    }
-  } catch (error) {
-    if (error instanceof ChangeReviewError || signal?.aborted) throw error;
-    throw new ChangeReviewError("Не удалось проверить чистоту рабочего дерева Git");
-  }
-}
-
-async function assertCurrentBranch(
-  command: BoundedCommandRunner,
-  gitRoot: string,
-  branch: string,
-  signal?: AbortSignal,
-): Promise<void> {
-  try {
-    const result = await command("git", ["branch", "--show-current"], {
-      cwd: gitRoot,
-      signal,
-    });
-    const current = reviewBranchSchema.parse(result.stdout);
-    if (current !== branch) {
-      throw new ChangeReviewError(
-        `Текущая Git-ветка изменилась с «${branch}» на «${current}»`,
-      );
-    }
-  } catch (error) {
-    if (error instanceof ChangeReviewError || signal?.aborted) throw error;
-    throw new ChangeReviewError("Не удалось подтвердить текущую Git-ветку");
-  }
-}
-
-async function readHeadCommit(
-  command: BoundedCommandRunner,
-  gitRoot: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  try {
-    const result = await command("git", ["rev-parse", "HEAD"], {
-      cwd: gitRoot,
-      signal,
-    });
-    return commitHashSchema.parse(result.stdout.trim());
-  } catch (error) {
-    if (signal?.aborted) throw error;
-    throw new ChangeReviewError("Не удалось определить текущий Git HEAD");
-  }
-}
-
-async function assertReviewTracked(
-  command: BoundedCommandRunner,
-  context: ReviewContext,
-  signal?: AbortSignal,
-): Promise<void> {
-  try {
-    await command("git", ["cat-file", "-e", `HEAD:${context.reviewRepositoryPath}`], {
-      cwd: context.gitRoot,
-      signal,
-    });
-  } catch (error) {
-    if (signal?.aborted) throw error;
-    throw new ChangeReviewError("review.md не добавлен в текущий Git HEAD");
-  }
-}
-
-async function assertDescendsFromBaseline(
-  command: BoundedCommandRunner,
-  gitRoot: string,
-  baselineCommit: string,
-  signal?: AbortSignal,
-): Promise<void> {
-  try {
-    await command("git", ["merge-base", "--is-ancestor", baselineCommit, "HEAD"], {
-      cwd: gitRoot,
-      signal,
-    });
-  } catch (error) {
-    if (signal?.aborted) throw error;
-    throw new ChangeReviewError(
-      "Текущий Git HEAD больше не продолжает baseline review-сессии",
-    );
-  }
-}
-
-async function readCommitCount(
-  command: BoundedCommandRunner,
-  gitRoot: string,
-  baselineCommit: string,
-  head: string,
-  signal: AbortSignal,
-): Promise<number> {
-  try {
-    const result = await command(
-      "git",
-      ["rev-list", "--count", `${baselineCommit}..${head}`],
-      { cwd: gitRoot, signal },
-    );
-    return z.coerce.number().int().nonnegative().parse(result.stdout.trim());
-  } catch (error) {
-    if (signal.aborted) throw error;
-    throw new ChangeReviewError("Не удалось проверить историю Git review");
-  }
-}
-
-async function readDiffPaths(
-  command: BoundedCommandRunner,
-  gitRoot: string,
-  baselineCommit: string,
-  head: string,
-  extraArguments: readonly string[],
-  signal: AbortSignal,
-): Promise<string[]> {
-  try {
-    const result = await command(
-      "git",
-      [
-        "diff",
-        "--name-only",
-        "--no-renames",
-        "-z",
-        ...extraArguments,
-        `${baselineCommit}..${head}`,
-      ],
-      { cwd: gitRoot, signal },
-    );
-    return result.stdout.split("\0").filter(Boolean);
-  } catch (error) {
-    if (signal.aborted) throw error;
-    throw new ChangeReviewError("Не удалось проверить состав Git-коммита review");
-  }
-}
-
-async function readCommitSubject(
-  command: BoundedCommandRunner,
-  gitRoot: string,
-  head: string,
-  signal: AbortSignal,
-): Promise<string> {
-  try {
-    const result = await command("git", ["log", "-1", "--format=%s", head], {
-      cwd: gitRoot,
-      signal,
-    });
-    return result.stdout.trim();
-  } catch (error) {
-    if (signal.aborted) throw error;
-    throw new ChangeReviewError("Не удалось проверить сообщение Git-коммита review");
-  }
-}
-
 function completionToolResult(review: CompletedChangeReview): {
   readonly text: string;
   readonly data: CompletedChangeReview;
@@ -770,35 +339,6 @@ function completionToolResult(review: CompletedChangeReview): {
     text: `Review change «${review.changeId}» принят и опубликован`,
     data: review,
   };
-}
-
-function reviewPublicationTarget(
-  session: PendingReviewSession,
-): z.output<typeof reviewPublicationTargetSchema> {
-  return reviewPublicationTargetSchema.parse({
-    parentBranch: session.parentBranch,
-    reviewBranch: session.reviewBranch,
-    baselineCommit: session.baselineCommit,
-    repositoryHost: session.repositoryHost,
-    repositoryNameWithOwner: session.repositoryNameWithOwner,
-    repositoryUrl: session.repositoryUrl,
-    parentPullRequestNumber: session.parentPullRequestNumber,
-  });
-}
-
-function parseChangeId(changeId: string): string {
-  const parsed = openSpecChangeIdSchema.safeParse(changeId);
-  if (!parsed.success) throw new ChangeReviewError("Change ID должен быть в kebab-case");
-  return parsed.data;
-}
-
-function isMissingPathError(error: unknown): boolean {
-  return Boolean(
-    error &&
-      typeof error === "object" &&
-      "code" in error &&
-      Reflect.get(error, "code") === "ENOENT",
-  );
 }
 
 function errorCode(error: unknown): string {

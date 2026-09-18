@@ -3,13 +3,10 @@ import { z } from "zod";
 import type { OrchestratorChange } from "../shared/orchestrator.ts";
 import type { CompleteRequiredAgentProfile } from "./agent-profiles.ts";
 import {
-  abortError,
   combineAbortSignals,
-  createDeferred,
-  createSerializedExecutor,
   throwIfSignalAborted,
-  waitForPromise,
 } from "./agent-session-control.ts";
+import { createManagedAgentSession } from "./managed-agent-session.ts";
 import {
   McpToolError,
   OrchestratorMcpToolHost,
@@ -98,26 +95,25 @@ export function createChangeSelectionService(
     async select(request) {
       throwIfSignalAborted(request.signal);
       const host = await mcpHost.listen();
-      let agent: PaseoAgent | null = null;
-      let notificationsDisabled = false;
       let selectedChange: OrchestratorChange | null = null;
-      const agentReady = createDeferred<PaseoAgent>();
-      const selection = createDeferred<OrchestratorChange>();
-      void selection.promise.catch(() => undefined);
-      const abortSelection = () => selection.reject(abortError());
-      request.signal.addEventListener("abort", abortSelection, { once: true });
-
-      const serialize = createSerializedExecutor();
+      const agentSession = createManagedAgentSession<OrchestratorChange>({
+        signal: request.signal,
+        host,
+        updateNotificationLabel,
+        agentDrainTimeoutMs,
+        logContext: "выбор change",
+        logger,
+      });
 
       const outputSchema = z.object({ changeId: openSpecChangeIdSchema }).strict();
-      const scope = host.expose({
+      const scope = await agentSession.openScope(() => host.expose({
         set_change: defineMcpTool({
           description:
             "Проверить существующий закоммиченный OpenSpec change и установить его для текущего workflow",
           inputSchema: z.object({ changeId: openSpecChangeIdSchema }).strict(),
           outputSchema,
           execute: (input, toolContext) =>
-            serialize(async () => {
+            agentSession.runExclusive(async () => {
               if (selectedChange) {
                 if (selectedChange.id !== input.changeId) {
                   throw new McpToolError(
@@ -133,7 +129,7 @@ export function createChangeSelectionService(
               const combined = combineAbortSignals(request.signal, toolContext.signal);
               const { signal } = combined;
               try {
-                const activeAgent = await waitForPromise(agentReady.promise, signal);
+                const activeAgent = await agentSession.waitForAgent(signal);
                 let change: OrchestratorChange;
                 try {
                   change = await verifyChange(
@@ -154,8 +150,7 @@ export function createChangeSelectionService(
                 }
 
                 try {
-                  await updateNotificationLabel(activeAgent.id, false, signal);
-                  notificationsDisabled = true;
+                  await agentSession.disableNotifications(signal);
                 } catch (error) {
                   if (signal.aborted) throw error;
                   logger.error("[OpenSpec] Не удалось отключить ntfy для агента", {
@@ -175,8 +170,7 @@ export function createChangeSelectionService(
                     error,
                   });
                   try {
-                    await updateNotificationLabel(activeAgent.id, true, signal);
-                    notificationsDisabled = false;
+                    await agentSession.restoreNotifications(signal);
                   } catch (restoreError) {
                     logger.warn("[OpenSpec] Не удалось восстановить ntfy после ошибки записи", {
                       agentId: activeAgent.id,
@@ -189,7 +183,7 @@ export function createChangeSelectionService(
                 }
 
                 selectedChange = change;
-                selection.resolve(change);
+                agentSession.complete(change);
                 return {
                   text: `Change «${change.id}» установлен для текущего workflow`,
                   data: { changeId: change.id },
@@ -199,7 +193,7 @@ export function createChangeSelectionService(
               }
             }),
         }),
-      });
+      }));
 
       try {
         const config = scope.configureAgent({
@@ -210,45 +204,22 @@ export function createChangeSelectionService(
             ? {}
             : { featureValues: request.profile.featureValues }),
         });
-        agent = await options.createAgent({
-          config,
-          title: AGENT_TITLE,
-          prompt: CHANGE_SELECTION_PROMPT,
-          labels: { ntfy: "true" },
-        });
-        throwIfSignalAborted(request.signal);
-        request.onAgentCreated(agent.id);
-        agentReady.resolve(agent);
+        await agentSession.launchAgent(
+          () =>
+            options.createAgent({
+              config,
+              title: AGENT_TITLE,
+              prompt: CHANGE_SELECTION_PROMPT,
+              labels: { ntfy: "true" },
+            }),
+          request.onAgentCreated,
+        );
 
-        const change = await selection.promise;
-        try {
-          await agent.waitForFinish(agentDrainTimeoutMs);
-        } catch (error) {
-          logger.warn("[OpenSpec] Не удалось дождаться завершения хода агента", {
-            agentId: agent.id,
-            error,
-          });
-        }
+        const change = await agentSession.waitForCompletion();
+        await agentSession.drainAgent();
         return change;
       } finally {
-        request.signal.removeEventListener("abort", abortSelection);
-        if (agent && !notificationsDisabled) {
-          try {
-            await updateNotificationLabel(agent.id, false);
-            notificationsDisabled = true;
-          } catch (error) {
-            logger.warn("[OpenSpec] Не удалось отключить ntfy при закрытии шага", {
-              agentId: agent.id,
-              error,
-            });
-          }
-        }
-        await scope.close().catch((error) => {
-          logger.warn("[OpenSpec] Не удалось закрыть MCP scope выбора change", { error });
-        });
-        await host.close().catch((error) => {
-          logger.warn("[OpenSpec] Не удалось закрыть MCP-хост выбора change", { error });
-        });
+        await agentSession.close();
       }
     },
   };

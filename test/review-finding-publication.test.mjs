@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 import {
+  reviewPullRequestTitle,
+} from "../server/change-review-publication.ts";
+import {
   assertActiveReviewPullRequest,
   parseFindingCompletionInput,
   publishReviewFindingOutcome,
-  reviewPullRequestTitle,
-} from "../server/change-review-publication.ts";
+} from "../server/review-finding-publication.ts";
 
 const workspaceDirectory = process.cwd();
 const changeId = "publication-contract";

@@ -69,6 +69,11 @@ Paseo workspace panel and composer shortcut
                   v
          OrchestratorController
                   |
+                  | workspace capabilities
+                  v
+       OpenSpec workflow assembly
+                  |
+                  | WorkflowDefinition
                   v
        OpenSpecOrchestratorEngine
           |                 |
@@ -87,12 +92,16 @@ The main boundaries are:
 - `index.server.ts`, `shared/`, and `server/orchestrator-controller.ts` register
   RPC handlers, validate their inputs and outputs, resolve Paseo workspaces, and
   enforce revision-aware commands.
-- `server/openspec-orchestrator-engine.ts` owns workflow execution, lifecycle
-  transitions, pause and retry behavior, checkpoint recovery, and automatic
-  completion or retry notifications.
-- `server/workflow/` contains the typed workflow model, the step registry, and
-  the step implementations. Steps live in `server/workflow/steps/` and are
-  registered in `server/workflow/steps/index.ts`.
+- `server/workflow/steps/index.ts` is the composition root for the default
+  workflow. It binds workspace capabilities to consumer-owned step contracts
+  and returns a complete `WorkflowDefinition`.
+- `server/openspec-orchestrator-engine.ts` owns generic workflow execution,
+  lifecycle transitions, pause and retry behavior, checkpoint recovery, and
+  automatic completion or retry notifications. It executes an already-assembled
+  definition and does not expose the full dependency set to individual steps.
+- `server/workflow/types.ts` contains the execution contract and durable state.
+  Each module under `server/workflow/steps/` declares only the capabilities its
+  scenario requires; implementation details stay behind those local contracts.
 - `server/orchestrator-ledger.ts` maintains the public snapshot and internal
   checkpoint for each workspace. It stores data beneath
   `$PASEO_HOME/plugin-data/paseo-openspec-orchestrator/` (or `~/.paseo` when
@@ -110,25 +119,48 @@ The main boundaries are:
   `complete_implementation_review_finding` tool. Each task agent receives only
   `complete_change_task`. A tool from one session is not shared with another
   session.
-- `server/change-artifact-creation.ts` is the boundary around OpenSpec planning
-  status, repository path validation, per-artifact Git verification, agent
-  sessions, and the `complete_artifact` MCP contract.
-- `server/change-publication.ts` owns the GitHub publication seam: it validates
-  `origin`, GitHub CLI access, the remote commit and pull-request metadata while
-  a workspace-local agent performs the push and PR create/edit operations.
-- `server/change-review.ts` owns the review agent session and review-commit
-  verification. `server/change-review-publication.ts` owns the immutable
-  parent/child branch target, the GitHub PR boundary, accumulated finding
-  outcomes, and restart reconciliation. Finding agents never invoke `gh`.
+- `server/managed-agent-session.ts` owns the common lifecycle of interactive
+  agent work: MCP call serialization, agent readiness, completion cancellation,
+  ntfy state, turn draining, and best-effort scope/host cleanup. Scenario modules
+  still own their completion rules and domain failures.
+- `server/change-artifact-creation.ts` coordinates the artifact agent and the
+  `complete_artifact` MCP contract. `server/change-artifact-status.ts` validates
+  OpenSpec status, repository-local output paths, artifact ordering, and apply
+  readiness; `server/change-artifact-git.ts` owns commit verification.
+- `server/change-publication.ts` coordinates the publication agent and MCP
+  contract. `server/change-publication-model.ts` defines the validated target
+  and completion types, while `server/change-publication-gateway.ts` is the
+  boundary that translates `git` and `gh` output and enforces the PR policy.
+- `server/github-repository-identity.ts` is the shared trust boundary for
+  parsing HTTPS, SSH URL, and SCP-like Git remotes into a validated GitHub host
+  and `owner/name`. Scenario gateways translate its typed failures into their
+  own domain errors.
+- `server/change-review.ts` owns the review agent session.
+  `server/change-review-verification.ts` owns OpenSpec context, review-file, and
+  review-commit verification. `server/change-review-publication.ts` owns the immutable
+  parent/child branch target and restart reconciliation. The shared validated
+  publication model lives in `server/review-publication-model.ts`, while
+  `server/review-publication-gateway.ts` is the only boundary in this scenario
+  that translates `git` and `gh` output into that model.
+- `server/review-finding-publication.ts` owns the contract and deterministic PR
+  body format for accumulated finding outcomes. Finding-resolution scenarios
+  depend on this focused capability and never invoke `gh` directly.
 - `server/change-review-report.ts` and
   `server/implementation-review-report.ts` validate their versioned report
-  contracts fail closed. `server/review-finding-resolution.ts` owns the shared
-  finding-resolution lifecycle, Git verification, scoped MCP, notification,
-  and restart-recovery invariants; the two format-specific adapters own report
-  parsing, prompts, tool names, and commit subjects.
-- `server/change-task-execution.ts` is the task-execution boundary around
-  OpenSpec apply instructions, stacked Git branches and GitHub pull requests,
-  recovery, agent sessions, scoped MCP verification, and ntfy state.
+  contracts fail closed. `server/review-finding-resolution-model.ts` defines
+  the shared behavior and session contracts;
+  `server/review-finding-context.ts` resolves the repo-local report and reads it
+  through the format-specific contract;
+  `server/review-finding-verification.ts` owns Git verification, while
+  `server/review-finding-resolution.ts` coordinates restart recovery, scoped
+  MCP, and notifications. The two format-specific adapters own report parsing,
+  prompts, tool names, and commit subjects.
+- `server/change-task-model.ts` defines the durable task checkpoint and
+  completion contracts. `server/change-task-publication.ts` owns OpenSpec
+  apply-state, recovery, and completion rules, while
+  `server/change-task-gateway.ts` validates the required Git and GitHub state.
+  `server/change-task-execution.ts` is limited to the interactive agent session,
+  scoped MCP tool, and ntfy lifecycle.
 
 The shared Zod schemas are runtime boundaries as well as TypeScript contracts.
 Persisted data, RPC payloads, workflow state, and tool results must be validated

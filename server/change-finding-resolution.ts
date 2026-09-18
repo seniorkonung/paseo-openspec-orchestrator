@@ -53,30 +53,36 @@ export function createChangeFindingResolutionService(
   options: ChangeFindingResolutionServiceOptions,
 ): ChangeFindingResolutionService {
   return createReviewFindingResolutionService(options, {
-    reportFileName: REVIEW_FILE_NAME,
-    missingReportMeansNoFindings: false,
-    toolName: "complete_review_finding",
-    toolDescription:
-      "Проверить устранение и Git-публикацию finding, затем опубликовать её итог в review PR",
-    agentTitle: (findingId) => `Устранение review finding: ${findingId}`,
-    logLabel: "review finding",
-    completionLabel: "Finding",
-    publicationKind: "review",
     sessionSchema: pendingFindingResolutionSessionSchema,
-    readReport: async (location) => {
-      try {
-        return await readChangeReviewReport(location);
-      } catch (error) {
-        if (error instanceof ChangeReviewReportError) {
-          throw new ReviewFindingResolutionError(error.message);
+    report: {
+      fileName: REVIEW_FILE_NAME,
+      missingMeansNoFindings: false,
+      read: async (location) => {
+        try {
+          return await readChangeReviewReport(location);
+        } catch (error) {
+          if (error instanceof ChangeReviewReportError) {
+            throw new ReviewFindingResolutionError(error.message);
+          }
+          throw new ReviewFindingResolutionError(
+            "Не удалось разобрать review.md выбранного change",
+          );
         }
-        throw new ReviewFindingResolutionError(
-          "Не удалось разобрать review.md выбранного change",
-        );
-      }
+      },
     },
-    commitSubject: findingResolutionCommitSubject,
-    prompt: changeFindingResolutionPrompt,
+    agent: {
+      toolName: "complete_review_finding",
+      toolDescription:
+        "Проверить устранение и Git-публикацию finding, затем опубликовать её итог в review PR",
+      title: (findingId) => `Устранение review finding: ${findingId}`,
+      logLabel: "review finding",
+      completionLabel: "Finding",
+      prompt: changeFindingResolutionPrompt,
+    },
+    publication: {
+      kind: "review",
+      commitSubject: findingResolutionCommitSubject,
+    },
   });
 }
 

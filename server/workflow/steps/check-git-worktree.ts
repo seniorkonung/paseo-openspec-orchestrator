@@ -1,4 +1,4 @@
-import type { GitWorktreeDecision } from "../../git-worktree.ts";
+import type { GitWorktreeDecision, GitWorktreeProbe } from "../../git-worktree.ts";
 import type {
   WorkflowStepContext,
   WorkflowStepDefinition,
@@ -18,13 +18,19 @@ function worktreeSummary(decision: GitWorktreeDecision): string {
     : "Рабочее дерево Git содержит изменения";
 }
 
-export async function checkGitWorktreeStep(
+export interface CheckGitWorktreeDependencies {
+  readonly workspaceDirectory: string;
+  readonly inspectWorktree: GitWorktreeProbe;
+}
+
+async function checkGitWorktreeStep(
+  dependencies: CheckGitWorktreeDependencies,
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
   let decision: GitWorktreeDecision;
   try {
-    decision = await context.services.gitWorktree(
-      context.workspaceDirectory,
+    decision = await dependencies.inspectWorktree(
+      dependencies.workspaceDirectory,
       context.signal,
     );
   } catch (error) {
@@ -55,8 +61,12 @@ export async function checkGitWorktreeStep(
   };
 }
 
-export const checkGitWorktree: WorkflowStepDefinition = {
-  id: "check-git-worktree",
-  label: "Проверяю чистоту рабочего дерева",
-  run: checkGitWorktreeStep,
-};
+export function createCheckGitWorktreeStep(
+  dependencies: CheckGitWorktreeDependencies,
+): WorkflowStepDefinition {
+  return {
+    id: "check-git-worktree",
+    label: "Проверяю чистоту рабочего дерева",
+    run: (context) => checkGitWorktreeStep(dependencies, context),
+  };
+}

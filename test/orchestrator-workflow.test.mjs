@@ -6,13 +6,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { REQUIRED_AGENT_PROFILE_NAMES } from "../server/agent-profiles.ts";
-import { OpenSpecOrchestratorEngine } from "../server/openspec-orchestrator-engine.ts";
+import { OpenSpecOrchestratorEngine as RuntimeOrchestratorEngine } from "../server/openspec-orchestrator-engine.ts";
 import { readGitBranch } from "../server/git-branch.ts";
 import { readGitWorktreeStatus } from "../server/git-worktree.ts";
 import { REQUIRED_MISE_TOOLS } from "../server/mise-toolchain.ts";
 import { OrchestratorController } from "../server/orchestrator-controller.ts";
 import { OrchestratorLedger } from "../server/orchestrator-ledger.ts";
 import { createOrchestratorReporter } from "../server/orchestrator-reporter.ts";
+import { createOpenSpecWorkflow } from "../server/workflow/steps/index.ts";
+import { createInitialWorkflowState } from "../server/workflow/types.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -210,6 +212,48 @@ function engineContext(
     implementationFindingResolution,
     changeTaskExecution,
   };
+}
+
+/**
+ * Адаптер сохраняет компактную подготовку существующих поведенческих тестов.
+ * Рабочая сборка выполняется в OrchestratorController и передаёт движку уже
+ * готовый WorkflowDefinition.
+ */
+class OpenSpecOrchestratorEngine extends RuntimeOrchestratorEngine {
+  #branchProbe;
+  #worktreeProbe;
+
+  constructor(ledger, options = {}) {
+    const {
+      branchProbe = (directory, signal) => readGitBranch(directory, { signal }),
+      worktreeProbe = (directory, signal) => readGitWorktreeStatus(directory, { signal }),
+      ...runtimeOptions
+    } = options;
+    super(ledger, runtimeOptions);
+    this.#branchProbe = branchProbe;
+    this.#worktreeProbe = worktreeProbe;
+  }
+
+  initialize(workspaceId, context) {
+    super.initialize(workspaceId, {
+      workspaceDisplay: context.workspaceDisplay,
+      refreshWorkspaceDisplay: context.refreshWorkspaceDisplay,
+      workflow: createOpenSpecWorkflow({
+        workspaceDirectory: context.workspaceDirectory,
+        readAgentProfiles: context.readAgentProfiles,
+        gitBranch: this.#branchProbe,
+        gitWorktree: this.#worktreeProbe,
+        miseToolchain: context.miseToolchain,
+        changeSelection: context.changeSelection,
+        changeArtifacts: context.changeArtifacts,
+        changePublication: context.changePublication,
+        changeReview: context.changeReview,
+        changeFindingResolution: context.changeFindingResolution,
+        implementationFindingResolution: context.implementationFindingResolution,
+        changeTaskExecution: context.changeTaskExecution,
+      }),
+    });
+  }
 }
 
 test("определяет реальную Git-ветку в директории workspace", async (context) => {
@@ -1083,6 +1127,9 @@ test("после перезапуска workflow продолжает работ
   assert.equal(resumedContexts.length, 1);
   assert.equal(resumedContexts[0].state.branch, "feature/resume");
   assert.equal(resumedContexts[0].state.change, null);
+  assert.equal("services" in resumedContexts[0], false);
+  assert.equal("workspaceDirectory" in resumedContexts[0], false);
+  assert.equal(typeof resumedContexts[0].notify, "function");
   assert.equal(restoredLedger.get("workspace-resume").lifecycle.status, "completed");
   assert.equal(restoredLedger.getWorkflowCheckpoint("workspace-resume"), null);
   await resumedEngine.dispose();
@@ -2773,6 +2820,7 @@ test("после reload незавершённая проверка ветки �
 });
 
 test("контроллер передаёт контекст и создаёт агента в том же workspace", async (context) => {
+  context.mock.method(console, "error", () => undefined);
   const paseoHome = await temporaryHome(context);
   const ledger = new OrchestratorLedger({ paseoHome });
   const calls = [];
@@ -2835,21 +2883,45 @@ test("контроллер передаёт контекст и создаёт �
   const [initializeCall, initializedWorkspaceId, initializedContext] = calls[0];
   assert.equal(initializeCall, "initialize");
   assert.equal(initializedWorkspaceId, "workspace-1");
-  assert.equal(initializedContext.workspaceDirectory, "/tmp/workspace-1");
   assert.deepEqual(initializedContext.workspaceDisplay, {
     projectName: "Платёжный сервис",
     workspaceName: "Проверка авторизации",
   });
   assert.equal(typeof initializedContext.refreshWorkspaceDisplay, "function");
-  assert.equal(typeof initializedContext.miseToolchain, "function");
-  assert.equal(typeof initializedContext.changeArtifacts.inspect, "function");
-  assert.equal(typeof initializedContext.changeArtifacts.create, "function");
-  assert.equal(typeof initializedContext.changePublication.publish, "function");
-  assert.deepEqual(await initializedContext.readAgentProfiles(), configuredProfiles);
+  assert.equal(initializedContext.workflow.startStepId, "check-agent-profiles");
+  assert.deepEqual(
+    initializedContext.workflow.steps.map(({ id }) => id),
+    [
+      "check-agent-profiles",
+      "check-git-branch",
+      "check-git-worktree",
+      "check-mise-toolchain",
+      "select-change",
+      "create-change-artifacts",
+      "publish-change",
+      "review-change",
+      "resolve-review-findings",
+      "resolve-implementation-review-findings",
+      "execute-change-tasks",
+    ],
+  );
+  const stepContext = {
+    signal: new AbortController().signal,
+    state: createInitialWorkflowState(),
+    updateActionLinks() {},
+    async checkpointState() {},
+    async notify() {
+      return true;
+    },
+  };
+  const profileStep = initializedContext.workflow.steps.find(
+    ({ id }) => id === "check-agent-profiles",
+  );
+  assert.equal((await profileStep.run(stepContext)).kind, "continue");
   configuredProfiles = undefined;
-  assert.deepEqual(await initializedContext.readAgentProfiles(), []);
+  assert.equal((await profileStep.run(stepContext)).kind, "halt");
   configuredProfiles = requiredAgentProfiles().slice(0, 1);
-  assert.deepEqual(await initializedContext.readAgentProfiles(), configuredProfiles);
+  assert.equal((await profileStep.run(stepContext)).kind, "halt");
   assert.equal(configReads, 3);
   assert.deepEqual(calls[1], ["command", "workspace-1", "start"]);
 
@@ -2862,19 +2934,14 @@ test("контроллер передаёт контекст и создаёт �
     workspaceName: "Ручное название после переименования",
   });
 
-  const lowSandbox = requiredAgentProfiles().find(
-    ({ name }) => name === "Low Sandbox",
+  configuredProfiles = requiredAgentProfiles();
+  const selectStep = initializedContext.workflow.steps.find(
+    ({ id }) => id === "select-change",
   );
-  await assert.rejects(
-    initializedContext.changeSelection.select({
-      workspaceDirectory: "/tmp/workspace-1",
-      profile: lowSandbox,
-      signal: new AbortController().signal,
-      onAgentCreated() {},
-      async onChangeSelected() {},
-    }),
-    /workspace agent creator called/,
-  );
+  const selection = await selectStep.run(stepContext);
+  assert.equal(selection.kind, "halt");
+  assert.equal(selection.summary, "Не удалось выбрать OpenSpec change");
+  assert.equal(configReads, 4);
   assert.equal(globalAgentCreates, 0);
   assert.equal(workspaceAgentCreates.length, 1);
   assert.equal("cwd" in workspaceAgentCreates[0], false);

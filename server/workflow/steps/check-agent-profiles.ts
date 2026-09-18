@@ -2,6 +2,7 @@ import {
   describeRequiredAgentProfileProblems,
   resolveRequiredAgentProfiles,
 } from "../../agent-profiles.ts";
+import type { AgentProfileReader } from "../../agent-profiles.ts";
 import type {
   WorkflowStepContext,
   WorkflowStepDefinition,
@@ -15,12 +16,17 @@ function errorCode(error: unknown): string {
   return "unknown";
 }
 
-export async function checkAgentProfilesStep(
+export interface CheckAgentProfilesDependencies {
+  readonly readAgentProfiles: AgentProfileReader;
+}
+
+async function checkAgentProfilesStep(
+  dependencies: CheckAgentProfilesDependencies,
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
   let profiles;
   try {
-    profiles = await context.services.readAgentProfiles();
+    profiles = await dependencies.readAgentProfiles();
   } catch (error) {
     console.error("[OpenSpec] Не удалось получить профили агентов из Paseo", {
       code: errorCode(error),
@@ -50,8 +56,12 @@ export async function checkAgentProfilesStep(
   };
 }
 
-export const checkAgentProfiles: WorkflowStepDefinition = {
-  id: "check-agent-profiles",
-  label: "Проверяю профили агентов",
-  run: checkAgentProfilesStep,
-};
+export function createCheckAgentProfilesStep(
+  dependencies: CheckAgentProfilesDependencies,
+): WorkflowStepDefinition {
+  return {
+    id: "check-agent-profiles",
+    label: "Проверяю профили агентов",
+    run: (context) => checkAgentProfilesStep(dependencies, context),
+  };
+}

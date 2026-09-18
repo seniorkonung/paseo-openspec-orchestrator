@@ -58,30 +58,36 @@ export function createImplementationFindingResolutionService(
   options: ImplementationFindingResolutionServiceOptions,
 ): ImplementationFindingResolutionService {
   return createReviewFindingResolutionService(options, {
-    reportFileName: IMPLEMENTATION_REVIEW_FILE_NAME,
-    missingReportMeansNoFindings: true,
-    toolName: "complete_implementation_review_finding",
-    toolDescription:
-      "Проверить устранение и Git-публикацию implementation finding, затем опубликовать её итог в review PR",
-    agentTitle: (findingId) => `Устранение implementation finding: ${findingId}`,
-    logLabel: "implementation review finding",
-    completionLabel: "Implementation finding",
-    publicationKind: "implementation-review",
     sessionSchema: pendingImplementationFindingResolutionSessionSchema,
-    readReport: async (location) => {
-      try {
-        return await readImplementationReviewReport(location);
-      } catch (error) {
-        if (error instanceof ImplementationReviewReportError) {
-          throw new ReviewFindingResolutionError(error.message);
+    report: {
+      fileName: IMPLEMENTATION_REVIEW_FILE_NAME,
+      missingMeansNoFindings: true,
+      read: async (location) => {
+        try {
+          return await readImplementationReviewReport(location);
+        } catch (error) {
+          if (error instanceof ImplementationReviewReportError) {
+            throw new ReviewFindingResolutionError(error.message);
+          }
+          throw new ReviewFindingResolutionError(
+            "Не удалось разобрать implementation-review.md выбранного change",
+          );
         }
-        throw new ReviewFindingResolutionError(
-          "Не удалось разобрать implementation-review.md выбранного change",
-        );
-      }
+      },
     },
-    commitSubject: implementationFindingResolutionCommitSubject,
-    prompt: implementationFindingResolutionPrompt,
+    agent: {
+      toolName: "complete_implementation_review_finding",
+      toolDescription:
+        "Проверить устранение и Git-публикацию implementation finding, затем опубликовать её итог в review PR",
+      title: (findingId) => `Устранение implementation finding: ${findingId}`,
+      logLabel: "implementation review finding",
+      completionLabel: "Implementation finding",
+      prompt: implementationFindingResolutionPrompt,
+    },
+    publication: {
+      kind: "implementation-review",
+      commitSubject: implementationFindingResolutionCommitSubject,
+    },
   });
 }
 

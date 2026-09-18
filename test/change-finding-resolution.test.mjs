@@ -12,10 +12,10 @@ import {
   findingResolutionCommitSubject,
 } from "../server/change-finding-resolution.ts";
 import {
-  publishReviewFindingOutcome,
   reviewPullRequestBody,
   reviewPullRequestTitle,
 } from "../server/change-review-publication.ts";
+import { publishReviewFindingOutcome } from "../server/review-finding-publication.ts";
 
 const execFileAsync = promisify(execFile);
 const parentBranch = "feature/resolve-review-findings";

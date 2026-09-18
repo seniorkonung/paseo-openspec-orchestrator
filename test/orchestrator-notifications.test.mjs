@@ -218,8 +218,8 @@ test("engine уведомляет о retry, прогрессе шага и за�
       {
         id: "announce",
         label: "Объявляю прогресс",
-        async run({ services }) {
-          await services.notify({ kind: "progress", message: "Шаг выполняется" });
+        async run({ notify }) {
+          await notify({ kind: "progress", message: "Шаг выполняется" });
           return { kind: "continue", next: "finish" };
         },
       },
@@ -290,10 +290,10 @@ test("engine обновляет имя workspace перед уведомлени
       {
         id: "announce-before-and-after-rename",
         label: "Проверяю обновление названия",
-        async run({ services }) {
-          await services.notify({ kind: "progress", message: "До переименования" });
+        async run({ notify }) {
+          await notify({ kind: "progress", message: "До переименования" });
           workspaceName = "Проверка авторизации";
-          await services.notify({ kind: "progress", message: "После переименования" });
+          await notify({ kind: "progress", message: "После переименования" });
           refreshFails = true;
           return { kind: "complete" };
         },

@@ -1,34 +1,24 @@
-import type { GitBranchDecision, GitBranchProbe } from "../git-branch.ts";
-import type { GitWorktreeProbe } from "../git-worktree.ts";
-import type { AgentProfileReader } from "../agent-profiles.ts";
-import type { ChangeSelectionService } from "../change-selection.ts";
-import type { ChangePublicationService } from "../change-publication.ts";
 import {
   pendingFindingResolutionSessionSchema,
-  type ChangeFindingResolutionService,
   type PendingFindingResolutionSession,
 } from "../change-finding-resolution.ts";
 import {
   pendingImplementationFindingResolutionSessionSchema,
-  type ImplementationFindingResolutionService,
   type PendingImplementationFindingResolutionSession,
 } from "../implementation-finding-resolution.ts";
 import {
   pendingReviewSessionSchema,
-  type ChangeReviewService,
   type PendingReviewSession,
 } from "../change-review.ts";
 import {
   pendingArtifactSessionSchema,
-  type ChangeArtifactCreationService,
   type PendingArtifactSession,
 } from "../change-artifact-creation.ts";
-import type { MiseToolchainProbe } from "../mise-toolchain.ts";
 import {
   pendingTaskExecutionSessionSchema,
-  type ChangeTaskExecutionService,
   type PendingTaskExecutionSession,
 } from "../change-task-execution.ts";
+import type { GitBranchDecision } from "../git-branch.ts";
 import type { OrchestratorNotificationRequest } from "../../shared/orchestrator-notifications.ts";
 import {
   orchestratorChangeSchema,
@@ -47,22 +37,6 @@ export interface WorkflowState {
     | PendingImplementationFindingResolutionSession
     | null;
   readonly pendingTaskExecutionSession: PendingTaskExecutionSession | null;
-}
-
-export interface WorkflowServices {
-  readonly readAgentProfiles: AgentProfileReader;
-  readonly gitBranch: GitBranchProbe;
-  readonly gitWorktree: GitWorktreeProbe;
-  readonly miseToolchain: MiseToolchainProbe;
-  readonly changeSelection: ChangeSelectionService;
-  readonly changeArtifacts: ChangeArtifactCreationService;
-  readonly changePublication: ChangePublicationService;
-  readonly changeReview: ChangeReviewService;
-  readonly changeFindingResolution: ChangeFindingResolutionService;
-  readonly implementationFindingResolution: ImplementationFindingResolutionService;
-  readonly changeTaskExecution: ChangeTaskExecutionService;
-  /** Не блокирует и не ломает шаг при ошибке доставки уведомления. */
-  readonly notify: (notification: OrchestratorNotificationRequest) => Promise<boolean>;
 }
 
 export type WorkflowStepId = string;
@@ -114,12 +88,12 @@ export const workflowCheckpointSchema = z
 export type WorkflowCheckpoint = z.infer<typeof workflowCheckpointSchema>;
 
 export interface WorkflowStepContext {
-  readonly workspaceDirectory: string;
   readonly signal: AbortSignal;
   readonly state: Readonly<WorkflowState>;
-  readonly services: WorkflowServices;
   readonly updateActionLinks: (links: readonly AgentLink[]) => void;
   readonly checkpointState: (nextState: WorkflowState) => Promise<void>;
+  /** Ошибка доставки записывается движком в лог и возвращает false, не ломая шаг. */
+  readonly notify: (notification: OrchestratorNotificationRequest) => Promise<boolean>;
 }
 
 export type WorkflowStepResult =
@@ -148,6 +122,15 @@ export interface WorkflowStepDefinition {
   readonly id: WorkflowStepId;
   readonly label: string;
   readonly run: WorkflowStepFunction;
+}
+
+/**
+ * Полный исполняемый контракт workflow. Конкретные зависимости уже связаны
+ * со шагами в точке сборки и не видны универсальному движку.
+ */
+export interface WorkflowDefinition {
+  readonly startStepId: WorkflowStepId;
+  readonly steps: readonly WorkflowStepDefinition[];
 }
 
 export function createInitialWorkflowState(): WorkflowState {

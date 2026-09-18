@@ -1,8 +1,13 @@
 import {
   describeRequiredAgentProfileProblems,
   resolveRequiredAgentProfiles,
+  type AgentProfileReader,
 } from "../../agent-profiles.ts";
-import { ChangeArtifactCreationError } from "../../change-artifact-creation.ts";
+import {
+  ChangeArtifactCreationError,
+  type ChangeArtifactCreationService,
+} from "../../change-artifact-creation.ts";
+import type { ChangeSelectionService } from "../../change-selection.ts";
 import { OpenSpecChangeError } from "../../openspec-change.ts";
 import type { OrchestratorChange } from "../../../shared/orchestrator.ts";
 import type {
@@ -18,14 +23,22 @@ function errorCode(error: unknown): string {
   return "unknown";
 }
 
-export async function selectChangeStep(
+export interface SelectChangeDependencies {
+  readonly workspaceDirectory: string;
+  readonly readAgentProfiles: AgentProfileReader;
+  readonly changeSelection: Pick<ChangeSelectionService, "verify" | "select">;
+  readonly changeArtifacts: Pick<ChangeArtifactCreationService, "inspect" | "verifyApply">;
+}
+
+async function selectChangeStep(
+  dependencies: SelectChangeDependencies,
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
   let change: OrchestratorChange;
   if (context.state.change) {
     try {
-      change = await context.services.changeSelection.verify(
-        context.workspaceDirectory,
+      change = await dependencies.changeSelection.verify(
+        dependencies.workspaceDirectory,
         context.state.change.id,
         context.signal,
       );
@@ -44,7 +57,7 @@ export async function selectChangeStep(
   } else {
     let profiles;
     try {
-      profiles = await context.services.readAgentProfiles();
+      profiles = await dependencies.readAgentProfiles();
     } catch (error) {
       console.error("[OpenSpec] Не удалось перечитать профили перед выбором change", {
         code: errorCode(error),
@@ -68,8 +81,8 @@ export async function selectChangeStep(
     }
 
     try {
-      change = await context.services.changeSelection.select({
-        workspaceDirectory: context.workspaceDirectory,
+      change = await dependencies.changeSelection.select({
+        workspaceDirectory: dependencies.workspaceDirectory,
         profile: resolution.profiles["Low Sandbox"],
         signal: context.signal,
         onAgentCreated: (agentId) => {
@@ -100,8 +113,8 @@ export async function selectChangeStep(
   }
 
   try {
-    const plan = await context.services.changeArtifacts.inspect(
-      context.workspaceDirectory,
+    const plan = await dependencies.changeArtifacts.inspect(
+      dependencies.workspaceDirectory,
       change.id,
       context.signal,
     );
@@ -120,8 +133,8 @@ export async function selectChangeStep(
         message: `${plan.message}; исправьте состояние change и нажмите «Повторить»`,
       };
     }
-    await context.services.changeArtifacts.verifyApply(
-      context.workspaceDirectory,
+    await dependencies.changeArtifacts.verifyApply(
+      dependencies.workspaceDirectory,
       change.id,
       plan.schemaName,
       context.signal,
@@ -150,8 +163,12 @@ export async function selectChangeStep(
   }
 }
 
-export const selectChange: WorkflowStepDefinition = {
-  id: "select-change",
-  label: "Выбираю OpenSpec change",
-  run: selectChangeStep,
-};
+export function createSelectChangeStep(
+  dependencies: SelectChangeDependencies,
+): WorkflowStepDefinition {
+  return {
+    id: "select-change",
+    label: "Выбираю OpenSpec change",
+    run: (context) => selectChangeStep(dependencies, context),
+  };
+}

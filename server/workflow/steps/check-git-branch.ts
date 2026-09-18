@@ -1,4 +1,4 @@
-import type { GitBranchDecision } from "../../git-branch.ts";
+import type { GitBranchDecision, GitBranchProbe } from "../../git-branch.ts";
 import type {
   WorkflowStepDefinition,
   WorkflowStepContext,
@@ -23,12 +23,21 @@ function errorCode(error: unknown): string {
   return "unknown";
 }
 
-export async function checkGitBranchStep(
+export interface CheckGitBranchDependencies {
+  readonly workspaceDirectory: string;
+  readonly inspectBranch: GitBranchProbe;
+}
+
+async function checkGitBranchStep(
+  dependencies: CheckGitBranchDependencies,
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
   let decision: GitBranchDecision;
   try {
-    decision = await context.services.gitBranch(context.workspaceDirectory, context.signal);
+    decision = await dependencies.inspectBranch(
+      dependencies.workspaceDirectory,
+      context.signal,
+    );
   } catch (error) {
     console.error("[OpenSpec] Не удалось определить Git-ветку", {
       code: errorCode(error),
@@ -64,8 +73,12 @@ export async function checkGitBranchStep(
   }
 }
 
-export const checkGitBranch: WorkflowStepDefinition = {
-  id: "check-git-branch",
-  label: "Определяю Git-ветку",
-  run: checkGitBranchStep,
-};
+export function createCheckGitBranchStep(
+  dependencies: CheckGitBranchDependencies,
+): WorkflowStepDefinition {
+  return {
+    id: "check-git-branch",
+    label: "Определяю Git-ветку",
+    run: (context) => checkGitBranchStep(dependencies, context),
+  };
+}

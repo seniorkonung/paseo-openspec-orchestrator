@@ -1,8 +1,12 @@
 import {
   describeRequiredAgentProfileProblem,
   resolveRequiredAgentProfile,
+  type AgentProfileReader,
 } from "../../agent-profiles.ts";
-import { ChangeArtifactCreationError } from "../../change-artifact-creation.ts";
+import {
+  ChangeArtifactCreationError,
+  type ChangeArtifactCreationService,
+} from "../../change-artifact-creation.ts";
 import type {
   WorkflowStepContext,
   WorkflowStepDefinition,
@@ -16,7 +20,17 @@ function errorCode(error: unknown): string {
   return "unknown";
 }
 
-export async function createChangeArtifactsStep(
+export interface CreateChangeArtifactsDependencies {
+  readonly workspaceDirectory: string;
+  readonly readAgentProfiles: AgentProfileReader;
+  readonly changeArtifacts: Pick<
+    ChangeArtifactCreationService,
+    "inspect" | "prepare" | "create" | "verifyApply"
+  >;
+}
+
+async function runCreateChangeArtifactsStep(
+  dependencies: CreateChangeArtifactsDependencies,
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
   const change = context.state.change;
@@ -30,8 +44,8 @@ export async function createChangeArtifactsStep(
 
   if (!context.state.pendingArtifactSession) {
     try {
-      const currentPlan = await context.services.changeArtifacts.inspect(
-        context.workspaceDirectory,
+      const currentPlan = await dependencies.changeArtifacts.inspect(
+        dependencies.workspaceDirectory,
         change.id,
         context.signal,
       );
@@ -43,8 +57,8 @@ export async function createChangeArtifactsStep(
         };
       }
       if (currentPlan.kind === "complete") {
-        await context.services.changeArtifacts.verifyApply(
-          context.workspaceDirectory,
+        await dependencies.changeArtifacts.verifyApply(
+          dependencies.workspaceDirectory,
           change.id,
           currentPlan.schemaName,
           context.signal,
@@ -63,7 +77,7 @@ export async function createChangeArtifactsStep(
 
   let profiles;
   try {
-    profiles = await context.services.readAgentProfiles();
+    profiles = await dependencies.readAgentProfiles();
   } catch (error) {
     console.error("[OpenSpec] Не удалось перечитать профили перед созданием артефакта", {
       code: errorCode(error),
@@ -89,8 +103,8 @@ export async function createChangeArtifactsStep(
   let session = context.state.pendingArtifactSession;
   if (!session) {
     try {
-      session = await context.services.changeArtifacts.prepare(
-        context.workspaceDirectory,
+      session = await dependencies.changeArtifacts.prepare(
+        dependencies.workspaceDirectory,
         change.id,
         context.signal,
       );
@@ -104,8 +118,8 @@ export async function createChangeArtifactsStep(
   }
 
   try {
-    const plan = await context.services.changeArtifacts.create({
-      workspaceDirectory: context.workspaceDirectory,
+    const plan = await dependencies.changeArtifacts.create({
+      workspaceDirectory: dependencies.workspaceDirectory,
       changeId: change.id,
       profile: resolution.profile,
       session,
@@ -128,8 +142,8 @@ export async function createChangeArtifactsStep(
     });
 
     if (plan.kind === "complete") {
-      await context.services.changeArtifacts.verifyApply(
-        context.workspaceDirectory,
+      await dependencies.changeArtifacts.verifyApply(
+        dependencies.workspaceDirectory,
         change.id,
         plan.schemaName,
         context.signal,
@@ -169,8 +183,12 @@ function artifactFailure(
   };
 }
 
-export const createChangeArtifacts: WorkflowStepDefinition = {
-  id: "create-change-artifacts",
-  label: "Создаю OpenSpec-артефакт",
-  run: createChangeArtifactsStep,
-};
+export function createChangeArtifactsStep(
+  dependencies: CreateChangeArtifactsDependencies,
+): WorkflowStepDefinition {
+  return {
+    id: "create-change-artifacts",
+    label: "Создаю OpenSpec-артефакт",
+    run: (context) => runCreateChangeArtifactsStep(dependencies, context),
+  };
+}

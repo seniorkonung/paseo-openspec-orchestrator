@@ -1,15 +1,26 @@
 import {
   describeRequiredAgentProfileProblem,
   resolveRequiredAgentProfile,
+  type AgentProfileReader,
 } from "../../agent-profiles.ts";
-import { ChangeTaskExecutionError } from "../../change-task-execution.ts";
+import {
+  ChangeTaskExecutionError,
+  type ChangeTaskExecutionService,
+} from "../../change-task-execution.ts";
 import type {
   WorkflowStepContext,
   WorkflowStepDefinition,
   WorkflowStepResult,
 } from "../types.ts";
 
-export async function executeChangeTasksStep(
+export interface ExecuteChangeTasksDependencies {
+  readonly workspaceDirectory: string;
+  readonly readAgentProfiles: AgentProfileReader;
+  readonly taskExecution: Pick<ChangeTaskExecutionService, "plan" | "run">;
+}
+
+async function executeChangeTasksStep(
+  dependencies: ExecuteChangeTasksDependencies,
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
   const { branch, change } = context.state;
@@ -36,8 +47,8 @@ export async function executeChangeTasksStep(
   let session = context.state.pendingTaskExecutionSession;
   if (!session) {
     try {
-      const plan = await context.services.changeTaskExecution.plan(
-        context.workspaceDirectory,
+      const plan = await dependencies.taskExecution.plan(
+        dependencies.workspaceDirectory,
         change.id,
         branch,
         context.signal,
@@ -61,7 +72,7 @@ export async function executeChangeTasksStep(
 
   let profiles;
   try {
-    profiles = await context.services.readAgentProfiles();
+    profiles = await dependencies.readAgentProfiles();
   } catch (error) {
     if (context.signal.aborted) throw error;
     console.error("[OpenSpec] Не удалось перечитать профили перед выполнением задачи", {
@@ -86,8 +97,8 @@ export async function executeChangeTasksStep(
   }
 
   try {
-    const completed = await context.services.changeTaskExecution.run({
-      workspaceDirectory: context.workspaceDirectory,
+    const completed = await dependencies.taskExecution.run({
+      workspaceDirectory: dependencies.workspaceDirectory,
       profile: resolution.profile,
       session,
       signal: context.signal,
@@ -148,8 +159,12 @@ function errorCode(error: unknown): string {
   return "unknown";
 }
 
-export const executeChangeTasks: WorkflowStepDefinition = {
-  id: "execute-change-tasks",
-  label: "Выполняю следующую OpenSpec-задачу",
-  run: executeChangeTasksStep,
-};
+export function createExecuteChangeTasksStep(
+  dependencies: ExecuteChangeTasksDependencies,
+): WorkflowStepDefinition {
+  return {
+    id: "execute-change-tasks",
+    label: "Выполняю следующую OpenSpec-задачу",
+    run: (context) => executeChangeTasksStep(dependencies, context),
+  };
+}

@@ -1,9 +1,19 @@
 import {
   describeRequiredAgentProfileProblem,
   resolveRequiredAgentProfile,
+  type AgentProfileReader,
 } from "../../agent-profiles.ts";
-import { ChangeArtifactCreationError } from "../../change-artifact-creation.ts";
-import { ChangePublicationError } from "../../change-publication.ts";
+import {
+  ChangeArtifactCreationError,
+  type ChangeArtifactCreationService,
+} from "../../change-artifact-creation.ts";
+import {
+  ChangePublicationError,
+  type ChangePublicationService,
+} from "../../change-publication.ts";
+import type { ChangeSelectionService } from "../../change-selection.ts";
+import type { GitBranchProbe } from "../../git-branch.ts";
+import type { GitWorktreeProbe } from "../../git-worktree.ts";
 import { OpenSpecChangeError } from "../../openspec-change.ts";
 import type {
   WorkflowStepContext,
@@ -11,7 +21,18 @@ import type {
   WorkflowStepResult,
 } from "../types.ts";
 
-export async function publishChangeStep(
+export interface PublishChangeDependencies {
+  readonly workspaceDirectory: string;
+  readonly readAgentProfiles: AgentProfileReader;
+  readonly inspectBranch: GitBranchProbe;
+  readonly inspectWorktree: GitWorktreeProbe;
+  readonly changeSelection: Pick<ChangeSelectionService, "verify">;
+  readonly changeArtifacts: Pick<ChangeArtifactCreationService, "inspect" | "verifyApply">;
+  readonly changePublication: Pick<ChangePublicationService, "publish">;
+}
+
+async function publishChangeStep(
+  dependencies: PublishChangeDependencies,
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
   const { branch, change } = context.state;
@@ -24,8 +45,8 @@ export async function publishChangeStep(
   }
 
   try {
-    const currentBranch = await context.services.gitBranch(
-      context.workspaceDirectory,
+    const currentBranch = await dependencies.inspectBranch(
+      dependencies.workspaceDirectory,
       context.signal,
     );
     if (currentBranch.kind !== "non-main" || currentBranch.name !== branch) {
@@ -48,8 +69,8 @@ export async function publishChangeStep(
   }
 
   try {
-    const worktree = await context.services.gitWorktree(
-      context.workspaceDirectory,
+    const worktree = await dependencies.inspectWorktree(
+      dependencies.workspaceDirectory,
       context.signal,
     );
     if (worktree.kind === "dirty") {
@@ -73,13 +94,13 @@ export async function publishChangeStep(
   }
 
   try {
-    await context.services.changeSelection.verify(
-      context.workspaceDirectory,
+    await dependencies.changeSelection.verify(
+      dependencies.workspaceDirectory,
       change.id,
       context.signal,
     );
-    const plan = await context.services.changeArtifacts.inspect(
-      context.workspaceDirectory,
+    const plan = await dependencies.changeArtifacts.inspect(
+      dependencies.workspaceDirectory,
       change.id,
       context.signal,
     );
@@ -97,8 +118,8 @@ export async function publishChangeStep(
         message: "Восстановите planning-артефакты change и нажмите «Повторить»",
       };
     }
-    await context.services.changeArtifacts.verifyApply(
-      context.workspaceDirectory,
+    await dependencies.changeArtifacts.verifyApply(
+      dependencies.workspaceDirectory,
       change.id,
       plan.schemaName,
       context.signal,
@@ -118,7 +139,7 @@ export async function publishChangeStep(
 
   let profiles;
   try {
-    profiles = await context.services.readAgentProfiles();
+    profiles = await dependencies.readAgentProfiles();
   } catch (error) {
     if (context.signal.aborted) throw error;
     console.error("[OpenSpec] Не удалось перечитать профили перед публикацией", {
@@ -143,8 +164,8 @@ export async function publishChangeStep(
   }
 
   try {
-    const publication = await context.services.changePublication.publish({
-      workspaceDirectory: context.workspaceDirectory,
+    const publication = await dependencies.changePublication.publish({
+      workspaceDirectory: dependencies.workspaceDirectory,
       changeId: change.id,
       branch,
       profile: resolution.profile,
@@ -196,8 +217,12 @@ function errorCode(error: unknown): string {
   return "unknown";
 }
 
-export const publishChange: WorkflowStepDefinition = {
-  id: "publish-change",
-  label: "Публикую change и pull request",
-  run: publishChangeStep,
-};
+export function createPublishChangeStep(
+  dependencies: PublishChangeDependencies,
+): WorkflowStepDefinition {
+  return {
+    id: "publish-change",
+    label: "Публикую change и pull request",
+    run: (context) => publishChangeStep(dependencies, context),
+  };
+}

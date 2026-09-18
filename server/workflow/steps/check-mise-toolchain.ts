@@ -1,4 +1,4 @@
-import type { MiseToolchainDecision } from "../../mise-toolchain.ts";
+import type { MiseToolchainDecision, MiseToolchainProbe } from "../../mise-toolchain.ts";
 import type {
   WorkflowStepContext,
   WorkflowStepDefinition,
@@ -52,13 +52,19 @@ function haltFor(
   }
 }
 
-export async function checkMiseToolchainStep(
+export interface CheckMiseToolchainDependencies {
+  readonly workspaceDirectory: string;
+  readonly inspectToolchain: MiseToolchainProbe;
+}
+
+async function checkMiseToolchainStep(
+  dependencies: CheckMiseToolchainDependencies,
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
   let decision: MiseToolchainDecision;
   try {
-    decision = await context.services.miseToolchain(
-      context.workspaceDirectory,
+    decision = await dependencies.inspectToolchain(
+      dependencies.workspaceDirectory,
       context.signal,
     );
   } catch (error) {
@@ -81,8 +87,12 @@ export async function checkMiseToolchainStep(
   };
 }
 
-export const checkMiseToolchain: WorkflowStepDefinition = {
-  id: "check-mise-toolchain",
-  label: "Проверяю mise toolchain",
-  run: checkMiseToolchainStep,
-};
+export function createCheckMiseToolchainStep(
+  dependencies: CheckMiseToolchainDependencies,
+): WorkflowStepDefinition {
+  return {
+    id: "check-mise-toolchain",
+    label: "Проверяю mise toolchain",
+    run: (context) => checkMiseToolchainStep(dependencies, context),
+  };
+}

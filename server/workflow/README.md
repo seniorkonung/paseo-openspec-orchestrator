@@ -11,12 +11,38 @@ Workflow состоит из последовательности независ
 активные findings обычного и implementation review и рекурсивно выполняет все
 OpenSpec-задачи отдельными агентами и stacked pull requests.
 
+## Границы и контракты
+
+Workflow разделён на четыре уровня с разной ответственностью:
+
+- `types.ts` определяет только контракт исполнения: состояние, результат шага,
+  runtime-контекст и готовый `WorkflowDefinition`. Предметных сервисов OpenSpec в
+  этом файле нет.
+- Каждый модуль в `steps/` определяет предоставляемое поведение одного сценария и
+  собственный интерфейс `*Dependencies`. В нём перечислены только возможности,
+  необходимые этому шагу. По реализации шага и этому интерфейсу должно быть
+  возможно проверить сценарий, не открывая реализации зависимостей.
+- `steps/index.ts` — единственная точка сборки стандартного OpenSpec workflow. Она
+  получает конкретные сервисы, передаёт каждому шагу его узкий контракт и
+  возвращает готовый `WorkflowDefinition`.
+- `OpenSpecOrchestratorEngine` исполняет готовое определение, управляет жизненным
+  циклом и checkpoint. Он не знает, какие Git-, OpenSpec-, агентские или GitHub-
+  сервисы использует конкретный шаг.
+
+`WorkflowStepContext` содержит только общие возможности движка: `signal`,
+read-only `state`, durable `checkpointState`, обновление ссылок текущего действия
+и best-effort `notify`. Workspace и предметные сервисы в контекст не входят:
+они связываются с шагом до запуска.
+
 ## Как добавить шаг
 
 1. Создайте файл `server/workflow/steps/<имя-шага>.ts`.
-2. Вынесите логику в экспортируемую функцию с типом `WorkflowStepFunction`.
-3. Оберните функцию в `WorkflowStepDefinition` с уникальными `id` и `label`.
-4. Добавьте definition в массив `OPEN_SPEC_WORKFLOW_STEPS` в `steps/index.ts`.
+2. Опишите рядом интерфейс зависимостей из потребностей сценария. Не передавайте
+   весь `OpenSpecWorkflowDependencies` и не создавайте локатор сервисов.
+3. Реализуйте сценарий через `WorkflowStepContext` и этот интерфейс.
+4. Экспортируйте фабрику, которая связывает зависимости с
+   `WorkflowStepDefinition` с уникальными `id` и `label`.
+5. Вызовите фабрику в `createOpenSpecWorkflow()` в `steps/index.ts`.
 
 Пример:
 
@@ -27,10 +53,15 @@ import type {
   WorkflowStepResult,
 } from "../types.ts";
 
-export async function inspectChangeStep(
+interface InspectChangeDependencies {
+  readonly inspectChange: (signal: AbortSignal) => Promise<{ title: string } | null>;
+}
+
+async function inspectChangeStep(
+  dependencies: InspectChangeDependencies,
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
-  const change = await loadChange(context.workspaceDirectory, context.signal);
+  const change = await dependencies.inspectChange(context.signal);
 
   if (!change) {
     return {
@@ -47,11 +78,15 @@ export async function inspectChangeStep(
   };
 }
 
-export const inspectChange: WorkflowStepDefinition = {
-  id: "inspect-change",
-  label: "Проверяю текущий change",
-  run: inspectChangeStep,
-};
+export function createInspectChangeStep(
+  dependencies: InspectChangeDependencies,
+): WorkflowStepDefinition {
+  return {
+    id: "inspect-change",
+    label: "Проверяю текущий change",
+    run: (context) => inspectChangeStep(dependencies, context),
+  };
+}
 ```
 
 `context.state` содержит результаты предыдущих шагов и доступен только для чтения.
@@ -73,9 +108,9 @@ checkpoint текущего шага и только после успешной
 со статусом `failed`; пользователь сможет исправить причину и выполнить `retry`.
 `halt` не принимает новое состояние: данные, которые должны пережить повтор или
 перезапуск процесса, заранее сохраняйте через `checkpointState`. Результат
-`complete` завершает workflow успешно. Массив
-`OPEN_SPEC_WORKFLOW_STEPS` теперь является реестром шагов: порядок элементов не
-определяет выполнение, переходы задаются через `next` по идентификатору шага.
+`complete` завершает workflow успешно. Массив `steps` внутри
+`WorkflowDefinition` является реестром: порядок элементов не определяет
+выполнение, переходы задаются через `next` по идентификатору шага.
 
 Переход может образовывать ветвление или цикл:
 
@@ -100,7 +135,8 @@ Checkpoint не устраняет аварийное окно между вне
 
 Обязательные имена профилей определены один раз в
 `server/agent-profiles.ts`. Следующие шаги не должны повторять эти строки или
-искать профиль самостоятельно: вызовите `context.services.readAgentProfiles()`.
+искать профиль самостоятельно: объявите `readAgentProfiles` в локальном
+dependency-контракте шага и передайте общую реализацию из `steps/index.ts`.
 Для общей preflight-проверки передайте результат в
 `resolveRequiredAgentProfiles()`, а для конкретной сессии — в
 `resolveRequiredAgentProfile()` с типизированным `RequiredAgentProfileName`.
@@ -519,10 +555,10 @@ PR образуют стек: первая task-ветка направлена 
 
 ## Уведомления
 
-Шаг может отправить короткое типизированное уведомление через тот же контекст:
+Шаг может отправить короткое типизированное уведомление через runtime-контекст:
 
 ```ts
-await context.services.notify({
+await context.notify({
   kind: "progress",
   message: "Начинаю проверку результата агента",
 });
