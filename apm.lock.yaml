@@ -4,14 +4,13 @@ dependencies:
 - repo_url: seniorkonung/agent-skills
   name: agent-skills
   host: github.com
-  resolved_commit: 91db9c1890c57299d381d67911892c5ce8a0681e
+  resolved_commit: f2e8da0295af4d31a0ccc522ac1586e783e18a5c
   resolved_ref: main
   version: 0.0.1
   package_type: apm_package
   deployed_files:
   - .agents/skills/change-summary
   - .agents/skills/change-summary/SKILL.md
-  - .agents/skills/change-summary/agents/openai.yaml
   - .agents/skills/code-review-and-quality
   - .agents/skills/code-review-and-quality/SKILL.md
   - .agents/skills/discussion
@@ -32,6 +31,8 @@ dependencies:
   - .agents/skills/security-and-hardening/SKILL.md
   - .agents/skills/shipping-and-launch
   - .agents/skills/shipping-and-launch/SKILL.md
+  - .agents/skills/top-down-contract-development
+  - .agents/skills/top-down-contract-development/SKILL.md
   - .claude/agents/code-reviewer.md
   - .claude/agents/security-auditor.md
   - .claude/agents/test-engineer.md
@@ -40,7 +41,6 @@ dependencies:
   - .claude/rules/production-readiness.md
   - .claude/skills/change-summary
   - .claude/skills/change-summary/SKILL.md
-  - .claude/skills/change-summary/agents/openai.yaml
   - .claude/skills/code-review-and-quality
   - .claude/skills/code-review-and-quality/SKILL.md
   - .claude/skills/discussion
@@ -61,12 +61,13 @@ dependencies:
   - .claude/skills/security-and-hardening/SKILL.md
   - .claude/skills/shipping-and-launch
   - .claude/skills/shipping-and-launch/SKILL.md
+  - .claude/skills/top-down-contract-development
+  - .claude/skills/top-down-contract-development/SKILL.md
   - .codex/agents/code-reviewer.toml
   - .codex/agents/security-auditor.toml
   - .codex/agents/test-engineer.toml
   deployed_file_hashes:
-    .agents/skills/change-summary/SKILL.md: sha256:cf4f96ab7bca9e995deeb88a8bff0a8e8d9cadf4fe775a451731f359445a7276
-    .agents/skills/change-summary/agents/openai.yaml: sha256:a1499d95abd8447558c535fe5554adcc3c9b988a0a39264a6283d430effe1e94
+    .agents/skills/change-summary/SKILL.md: sha256:855ac5dae361704b0af7471cf5a6c50519b338f95d49d7f83c9c1ccf1cf7cfc4
     .agents/skills/code-review-and-quality/SKILL.md: sha256:0ff65150158adfd41844534948cbe4271e6a7a3aa463700a8d99caf550e38223
     .agents/skills/discussion/SKILL.md: sha256:e9c3423b73b4d572af3d95c8820142e18bb44e226adc92f1c297905e9835ca9a
     .agents/skills/discussion/references/document-format.md: sha256:9012f228e7a7759f14176e38b1b39946a3d810693a4a96319934b93ad71e80ac
@@ -81,14 +82,14 @@ dependencies:
     .agents/skills/idea-refine/scripts/idea-refine.sh: sha256:f02a52408a4218047c032d221483abfbb48d11f090bb4915965c7419bf2e0e47
     .agents/skills/security-and-hardening/SKILL.md: sha256:7dee4d2cc8b417b90790bf6016f74a3dcd1adcddde6e42f545a391f950778ebe
     .agents/skills/shipping-and-launch/SKILL.md: sha256:ca9216f73ac6dfd1b1104ccd7de570acc5a22e11b1bf0ad4bafde1009afc4512
+    .agents/skills/top-down-contract-development/SKILL.md: sha256:04e83fa11298e3b59285a24c7b1f6fd996bf8db27e21e826062b65c26d349a56
     .claude/agents/code-reviewer.md: sha256:8efeec034eb299bf63eacda4b9aa7126dfaa61d122b807fbb679502151567d1f
     .claude/agents/security-auditor.md: sha256:e9d51b87b02eae4e7af55a549fcb8fcc1289dce81a39806d2739d2d5c3f867db
     .claude/agents/test-engineer.md: sha256:7fa49278ec977731a18f7ce743561a6d62945db0be15578e748945cf19ae822a
     .claude/rules/commit-message-conventions.md: sha256:4d0e01e3f8628b9f4e2a90b932935cd819bd50a0969862294e140ae6e4aeb8ba
     .claude/rules/domain-language.md: sha256:047b781ee08264502823b2594ab7851095bbf1ed455d6e51ff1883baa95b9861
     .claude/rules/production-readiness.md: sha256:1f8352e4fad91fc1f1bee955d70521636e1da6453a96022fb3a8939cc6646e55
-    .claude/skills/change-summary/SKILL.md: sha256:cf4f96ab7bca9e995deeb88a8bff0a8e8d9cadf4fe775a451731f359445a7276
-    .claude/skills/change-summary/agents/openai.yaml: sha256:a1499d95abd8447558c535fe5554adcc3c9b988a0a39264a6283d430effe1e94
+    .claude/skills/change-summary/SKILL.md: sha256:855ac5dae361704b0af7471cf5a6c50519b338f95d49d7f83c9c1ccf1cf7cfc4
     .claude/skills/code-review-and-quality/SKILL.md: sha256:0ff65150158adfd41844534948cbe4271e6a7a3aa463700a8d99caf550e38223
     .claude/skills/discussion/SKILL.md: sha256:e9c3423b73b4d572af3d95c8820142e18bb44e226adc92f1c297905e9835ca9a
     .claude/skills/discussion/references/document-format.md: sha256:9012f228e7a7759f14176e38b1b39946a3d810693a4a96319934b93ad71e80ac
@@ -103,10 +104,11 @@ dependencies:
     .claude/skills/idea-refine/scripts/idea-refine.sh: sha256:f02a52408a4218047c032d221483abfbb48d11f090bb4915965c7419bf2e0e47
     .claude/skills/security-and-hardening/SKILL.md: sha256:7dee4d2cc8b417b90790bf6016f74a3dcd1adcddde6e42f545a391f950778ebe
     .claude/skills/shipping-and-launch/SKILL.md: sha256:ca9216f73ac6dfd1b1104ccd7de570acc5a22e11b1bf0ad4bafde1009afc4512
+    .claude/skills/top-down-contract-development/SKILL.md: sha256:04e83fa11298e3b59285a24c7b1f6fd996bf8db27e21e826062b65c26d349a56
     .codex/agents/code-reviewer.toml: sha256:68551392550f16bad4545b154ec710ba215623bcb35f95f8ab2e613d798b50dd
     .codex/agents/security-auditor.toml: sha256:6f2bec3bded4da237fa14b74fd77720f0e7d96982f09288652aec26b228110dd
     .codex/agents/test-engineer.toml: sha256:729261399bedbfa7af957725773fddea919b1e094a81ebe6d8a6e476d54c7ff8
-  content_hash: sha256:f69de0a9be1aea4c5430d659dd5c65e13c40554aa7adde0b81f7060576999dbd
+  content_hash: sha256:8145bec35fd7642e12152542ed0cbc88bd6c7cf78bdebb9397b9ce616e30c90c
   skill_subset:
   - change-summary
   - code-review-and-quality
@@ -115,6 +117,7 @@ dependencies:
   - idea-refine
   - security-and-hardening
   - shipping-and-launch
+  - top-down-contract-development
 - repo_url: addyosmani/agent-skills
   name: code-simplification
   host: github.com
@@ -137,7 +140,7 @@ dependencies:
   content_hash: sha256:7973e746e8e2ea5004d520da970c15a106824b8d6be1bcff48908aec021f3677
   constraint: 0.6.9
   resolved_tag: 0.6.9
-  resolved_at: '2026-09-15T13:14:36+00:00'
+  resolved_at: '2026-09-18T20:01:15+00:00'
 - repo_url: addyosmani/agent-skills
   name: debugging-and-error-recovery
   host: github.com
@@ -160,7 +163,7 @@ dependencies:
   content_hash: sha256:1a119d27e8f1d27ed6317adf3115826336491346780dcb7d7a7a7f79fe3ffe10
   constraint: 0.6.9
   resolved_tag: 0.6.9
-  resolved_at: '2026-09-15T13:14:36+00:00'
+  resolved_at: '2026-09-18T20:01:15+00:00'
 - repo_url: addyosmani/agent-skills
   name: source-driven-development
   host: github.com
@@ -183,7 +186,7 @@ dependencies:
   content_hash: sha256:c48d3c3abb2cb8a5c4a8584ab95db64f8a0261f3acfe2cdb7b8ff88ec3d90211
   constraint: 0.6.9
   resolved_tag: 0.6.9
-  resolved_at: '2026-09-15T13:14:36+00:00'
+  resolved_at: '2026-09-18T20:01:15+00:00'
 - repo_url: mattpocock/skills
   name: codebase-design
   host: github.com
@@ -302,16 +305,7 @@ deployments:
   owners:
   - seniorkonung/agent-skills
   active_owner: seniorkonung/agent-skills
-  content_hash: sha256:cf4f96ab7bca9e995deeb88a8bff0a8e8d9cadf4fe775a451731f359445a7276
-- kind: project-relative
-  target: agent-skills
-  value: .agents/skills/change-summary/agents/openai.yaml
-  runtime: null
-  scope: project
-  owners:
-  - seniorkonung/agent-skills
-  active_owner: seniorkonung/agent-skills
-  content_hash: sha256:a1499d95abd8447558c535fe5554adcc3c9b988a0a39264a6283d430effe1e94
+  content_hash: sha256:855ac5dae361704b0af7471cf5a6c50519b338f95d49d7f83c9c1ccf1cf7cfc4
 - kind: project-relative
   target: agent-skills
   value: .agents/skills/code-review-and-quality
@@ -647,6 +641,24 @@ deployments:
   content_hash: sha256:719d4e54083c90ded62112fb41df3dbc4619309118ee0e6aa4d846f92d8204af
 - kind: project-relative
   target: agent-skills
+  value: .agents/skills/top-down-contract-development
+  runtime: null
+  scope: project
+  owners:
+  - seniorkonung/agent-skills
+  active_owner: seniorkonung/agent-skills
+  content_hash: null
+- kind: project-relative
+  target: agent-skills
+  value: .agents/skills/top-down-contract-development/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - seniorkonung/agent-skills
+  active_owner: seniorkonung/agent-skills
+  content_hash: sha256:04e83fa11298e3b59285a24c7b1f6fd996bf8db27e21e826062b65c26d349a56
+- kind: project-relative
+  target: agent-skills
   value: .agents/skills/verification-before-completion
   runtime: null
   scope: project
@@ -728,6 +740,15 @@ deployments:
   content_hash: sha256:1f8352e4fad91fc1f1bee955d70521636e1da6453a96022fb3a8939cc6646e55
 - kind: project-relative
   target: claude
+  value: .claude/rules/project-context.md
+  runtime: null
+  scope: project
+  owners:
+  - .
+  active_owner: .
+  content_hash: sha256:78185cfd4063eb9ec0dccd321284eb9079a6f89a12787ccdd0b4e0642033b4c3
+- kind: project-relative
+  target: claude
   value: .claude/rules/type-safe-design.md
   runtime: null
   scope: project
@@ -761,16 +782,7 @@ deployments:
   owners:
   - seniorkonung/agent-skills
   active_owner: seniorkonung/agent-skills
-  content_hash: sha256:cf4f96ab7bca9e995deeb88a8bff0a8e8d9cadf4fe775a451731f359445a7276
-- kind: project-relative
-  target: claude
-  value: .claude/skills/change-summary/agents/openai.yaml
-  runtime: null
-  scope: project
-  owners:
-  - seniorkonung/agent-skills
-  active_owner: seniorkonung/agent-skills
-  content_hash: sha256:a1499d95abd8447558c535fe5554adcc3c9b988a0a39264a6283d430effe1e94
+  content_hash: sha256:855ac5dae361704b0af7471cf5a6c50519b338f95d49d7f83c9c1ccf1cf7cfc4
 - kind: project-relative
   target: claude
   value: .claude/skills/code-review-and-quality
@@ -1106,6 +1118,24 @@ deployments:
   content_hash: sha256:719d4e54083c90ded62112fb41df3dbc4619309118ee0e6aa4d846f92d8204af
 - kind: project-relative
   target: claude
+  value: .claude/skills/top-down-contract-development
+  runtime: null
+  scope: project
+  owners:
+  - seniorkonung/agent-skills
+  active_owner: seniorkonung/agent-skills
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/top-down-contract-development/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - seniorkonung/agent-skills
+  active_owner: seniorkonung/agent-skills
+  content_hash: sha256:04e83fa11298e3b59285a24c7b1f6fd996bf8db27e21e826062b65c26d349a56
+- kind: project-relative
+  target: claude
   value: .claude/skills/verification-before-completion
   runtime: null
   scope: project
@@ -1184,9 +1214,11 @@ mcp_target_servers:
   - typescript
 local_deployed_files:
 - .claude/rules/language-preferences.md
+- .claude/rules/project-context.md
 - .claude/rules/type-safe-design.md
 - .claude/rules/typescript-mcp.md
 local_deployed_file_hashes:
   .claude/rules/language-preferences.md: sha256:e500f4facb5fc936b79aa3b7eb140bbd2f456d5d497da76a269ae7d5322ca1e8
+  .claude/rules/project-context.md: sha256:78185cfd4063eb9ec0dccd321284eb9079a6f89a12787ccdd0b4e0642033b4c3
   .claude/rules/type-safe-design.md: sha256:91e3d48f0eb3d7f65f523e59c7734221f93208c91557d07ddc40dc2a9c8dd867
   .claude/rules/typescript-mcp.md: sha256:aaaf4ec118e70ea3be7be8a63b700cca199ce3143af0cf18c98c324dc9a28818

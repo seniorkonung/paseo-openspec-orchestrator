@@ -16,6 +16,7 @@ dependencies:
         - discussion
         - change-summary
         - domain-modeling
+        - top-down-contract-development
   mcp:
     - name: typescript
       registry: false
