@@ -140,7 +140,7 @@ dependencies:
   content_hash: sha256:7973e746e8e2ea5004d520da970c15a106824b8d6be1bcff48908aec021f3677
   constraint: 0.6.9
   resolved_tag: 0.6.9
-  resolved_at: '2026-09-18T20:01:15+00:00'
+  resolved_at: '2026-09-18T20:37:51+00:00'
 - repo_url: addyosmani/agent-skills
   name: debugging-and-error-recovery
   host: github.com
@@ -163,7 +163,7 @@ dependencies:
   content_hash: sha256:1a119d27e8f1d27ed6317adf3115826336491346780dcb7d7a7a7f79fe3ffe10
   constraint: 0.6.9
   resolved_tag: 0.6.9
-  resolved_at: '2026-09-18T20:01:15+00:00'
+  resolved_at: '2026-09-18T20:37:51+00:00'
 - repo_url: addyosmani/agent-skills
   name: source-driven-development
   host: github.com
@@ -186,39 +186,7 @@ dependencies:
   content_hash: sha256:c48d3c3abb2cb8a5c4a8584ab95db64f8a0261f3acfe2cdb7b8ff88ec3d90211
   constraint: 0.6.9
   resolved_tag: 0.6.9
-  resolved_at: '2026-09-18T20:01:15+00:00'
-- repo_url: mattpocock/skills
-  name: codebase-design
-  host: github.com
-  resolved_commit: 6acc160e4e0cd062dbbbd7a1b26ae92855edf07e
-  resolved_ref: v1.2.3
-  version: unknown
-  virtual_path: skills/engineering/codebase-design
-  is_virtual: true
-  depth: 2
-  resolved_by: seniorkonung/agent-skills
-  package_type: claude_skill
-  deployed_files:
-  - .agents/skills/codebase-design
-  - .agents/skills/codebase-design/DEEPENING.md
-  - .agents/skills/codebase-design/DESIGN-IT-TWICE.md
-  - .agents/skills/codebase-design/SKILL.md
-  - .agents/skills/codebase-design/agents/openai.yaml
-  - .claude/skills/codebase-design
-  - .claude/skills/codebase-design/DEEPENING.md
-  - .claude/skills/codebase-design/DESIGN-IT-TWICE.md
-  - .claude/skills/codebase-design/SKILL.md
-  - .claude/skills/codebase-design/agents/openai.yaml
-  deployed_file_hashes:
-    .agents/skills/codebase-design/DEEPENING.md: sha256:125e6b77413ad2bc7cf7a772bc74336d580a50f9e797db2178ed133d62333d06
-    .agents/skills/codebase-design/DESIGN-IT-TWICE.md: sha256:09f9948ea7636a4d3704c5ab909762e876c0b39849eefb14d2e03a398cc9c7e7
-    .agents/skills/codebase-design/SKILL.md: sha256:a8d50abac5a4018f60e1d911d4b6f4e36454ca14d6c390c0695a578c7de65dad
-    .agents/skills/codebase-design/agents/openai.yaml: sha256:edebc9e4fcfe102114012575eaa9600b9b5fd08c311664f389c36e7bc717740f
-    .claude/skills/codebase-design/DEEPENING.md: sha256:125e6b77413ad2bc7cf7a772bc74336d580a50f9e797db2178ed133d62333d06
-    .claude/skills/codebase-design/DESIGN-IT-TWICE.md: sha256:09f9948ea7636a4d3704c5ab909762e876c0b39849eefb14d2e03a398cc9c7e7
-    .claude/skills/codebase-design/SKILL.md: sha256:a8d50abac5a4018f60e1d911d4b6f4e36454ca14d6c390c0695a578c7de65dad
-    .claude/skills/codebase-design/agents/openai.yaml: sha256:edebc9e4fcfe102114012575eaa9600b9b5fd08c311664f389c36e7bc717740f
-  content_hash: sha256:16b8ebb74b2bca32691efd69ad4e5e3bd089eecb594df104280d5ef88eee79af
+  resolved_at: '2026-09-18T20:37:51+00:00'
 - repo_url: mattpocock/skills
   name: grill-with-docs
   host: github.com
@@ -342,51 +310,6 @@ deployments:
   - addyosmani/agent-skills/skills/code-simplification
   active_owner: addyosmani/agent-skills/skills/code-simplification
   content_hash: sha256:f0c5ed754057eb0c1e027e2587f59de816651feb5e837242296c43ea21cf621d
-- kind: project-relative
-  target: agent-skills
-  value: .agents/skills/codebase-design
-  runtime: null
-  scope: project
-  owners:
-  - mattpocock/skills/skills/engineering/codebase-design
-  active_owner: mattpocock/skills/skills/engineering/codebase-design
-  content_hash: null
-- kind: project-relative
-  target: agent-skills
-  value: .agents/skills/codebase-design/DEEPENING.md
-  runtime: null
-  scope: project
-  owners:
-  - mattpocock/skills/skills/engineering/codebase-design
-  active_owner: mattpocock/skills/skills/engineering/codebase-design
-  content_hash: sha256:125e6b77413ad2bc7cf7a772bc74336d580a50f9e797db2178ed133d62333d06
-- kind: project-relative
-  target: agent-skills
-  value: .agents/skills/codebase-design/DESIGN-IT-TWICE.md
-  runtime: null
-  scope: project
-  owners:
-  - mattpocock/skills/skills/engineering/codebase-design
-  active_owner: mattpocock/skills/skills/engineering/codebase-design
-  content_hash: sha256:09f9948ea7636a4d3704c5ab909762e876c0b39849eefb14d2e03a398cc9c7e7
-- kind: project-relative
-  target: agent-skills
-  value: .agents/skills/codebase-design/SKILL.md
-  runtime: null
-  scope: project
-  owners:
-  - mattpocock/skills/skills/engineering/codebase-design
-  active_owner: mattpocock/skills/skills/engineering/codebase-design
-  content_hash: sha256:a8d50abac5a4018f60e1d911d4b6f4e36454ca14d6c390c0695a578c7de65dad
-- kind: project-relative
-  target: agent-skills
-  value: .agents/skills/codebase-design/agents/openai.yaml
-  runtime: null
-  scope: project
-  owners:
-  - mattpocock/skills/skills/engineering/codebase-design
-  active_owner: mattpocock/skills/skills/engineering/codebase-design
-  content_hash: sha256:edebc9e4fcfe102114012575eaa9600b9b5fd08c311664f389c36e7bc717740f
 - kind: project-relative
   target: agent-skills
   value: .agents/skills/debugging-and-error-recovery
@@ -819,51 +742,6 @@ deployments:
   - addyosmani/agent-skills/skills/code-simplification
   active_owner: addyosmani/agent-skills/skills/code-simplification
   content_hash: sha256:f0c5ed754057eb0c1e027e2587f59de816651feb5e837242296c43ea21cf621d
-- kind: project-relative
-  target: claude
-  value: .claude/skills/codebase-design
-  runtime: null
-  scope: project
-  owners:
-  - mattpocock/skills/skills/engineering/codebase-design
-  active_owner: mattpocock/skills/skills/engineering/codebase-design
-  content_hash: null
-- kind: project-relative
-  target: claude
-  value: .claude/skills/codebase-design/DEEPENING.md
-  runtime: null
-  scope: project
-  owners:
-  - mattpocock/skills/skills/engineering/codebase-design
-  active_owner: mattpocock/skills/skills/engineering/codebase-design
-  content_hash: sha256:125e6b77413ad2bc7cf7a772bc74336d580a50f9e797db2178ed133d62333d06
-- kind: project-relative
-  target: claude
-  value: .claude/skills/codebase-design/DESIGN-IT-TWICE.md
-  runtime: null
-  scope: project
-  owners:
-  - mattpocock/skills/skills/engineering/codebase-design
-  active_owner: mattpocock/skills/skills/engineering/codebase-design
-  content_hash: sha256:09f9948ea7636a4d3704c5ab909762e876c0b39849eefb14d2e03a398cc9c7e7
-- kind: project-relative
-  target: claude
-  value: .claude/skills/codebase-design/SKILL.md
-  runtime: null
-  scope: project
-  owners:
-  - mattpocock/skills/skills/engineering/codebase-design
-  active_owner: mattpocock/skills/skills/engineering/codebase-design
-  content_hash: sha256:a8d50abac5a4018f60e1d911d4b6f4e36454ca14d6c390c0695a578c7de65dad
-- kind: project-relative
-  target: claude
-  value: .claude/skills/codebase-design/agents/openai.yaml
-  runtime: null
-  scope: project
-  owners:
-  - mattpocock/skills/skills/engineering/codebase-design
-  active_owner: mattpocock/skills/skills/engineering/codebase-design
-  content_hash: sha256:edebc9e4fcfe102114012575eaa9600b9b5fd08c311664f389c36e7bc717740f
 - kind: project-relative
   target: claude
   value: .claude/skills/debugging-and-error-recovery
