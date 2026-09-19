@@ -245,6 +245,9 @@ async function startRun(harness, fixture, session, signal = new AbortController(
   const agentOptions = await harness.agentCreated;
   const [{ url }] = Object.values(agentOptions.config.mcpServers);
   const client = await connectClient(url);
+  assert.deepEqual((await client.listTools()).tools.map(({ name }) => name), [
+    "complete_change_review",
+  ]);
   return { running, client, agentOptions };
 }
 

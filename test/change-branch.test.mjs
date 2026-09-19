@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { z } from "zod";
 import {
   ChangeBranchError,
   assertPlanningBranchFor,
   assertImplementationBranchFor,
+  changeBranchSchema,
   changeBranchFor,
   changeIdFromBranch,
+  implementationBranchSchema,
   parseChangeBranch,
+  planningBranchSchema,
   planningBranchFor,
   initialPlanningBranchFor,
   phasePlanningBranchFor,
@@ -14,6 +18,18 @@ import {
   parsePlanningBranch,
   parseImplementationBranch,
 } from "../server/change-branch.ts";
+
+test("схемы Git-веток представимы в JSON Schema для MCP tools/list", () => {
+  for (const schema of [
+    changeBranchSchema,
+    planningBranchSchema,
+    implementationBranchSchema,
+  ]) {
+    const jsonSchema = z.toJSONSchema(schema);
+    assert.equal(jsonSchema.type, "string");
+    assert.equal(typeof jsonSchema.pattern, "string");
+  }
+});
 
 test("извлекает change ID только из точной root-ветки change/<kebab-case-id>", () => {
   assert.equal(parseChangeBranch("change/add-export"), "change/add-export");

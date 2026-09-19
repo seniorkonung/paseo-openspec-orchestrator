@@ -2,78 +2,81 @@ import { z } from "zod";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 
 const MAX_BRANCH_LENGTH = 512;
+const CHANGE_BRANCH_PATTERN = /^change\/([a-z0-9]+(?:-[a-z0-9]+)*)$/u;
+const PLANNING_BRANCH_PATTERN =
+  /^planning\/([a-z0-9]+(?:-[a-z0-9]+)*)\/(initial|phase-([1-9][0-9]*))$/u;
+const IMPLEMENTATION_BRANCH_PATTERN =
+  /^implementation\/([a-z0-9]+(?:-[a-z0-9]+)*)\/phase-([1-9][0-9]*)\/run-([1-9][0-9]*)$/u;
 
+const CHANGE_BRANCH_MESSAGE =
+  "Корневая Git-ветка должна иметь формат change/<change-id>";
+const PLANNING_BRANCH_MESSAGE =
+  "Planning-ветка должна иметь формат planning/<change-id>/initial или planning/<change-id>/phase-N";
+const IMPLEMENTATION_BRANCH_MESSAGE =
+  "Implementation-ветка должна иметь формат implementation/<change-id>/phase-N/run-M";
+
+export type ChangeBranch = `change/${string}`;
+export type PlanningBranch =
+  | `planning/${string}/initial`
+  | `planning/${string}/phase-${number}`;
+export type ImplementationBranch = `implementation/${string}/phase-${number}/run-${number}`;
+
+// Эти схемы входят в MCP outputSchema: transform здесь запрещён, потому что
+// tools/list должен преобразовать их в JSON Schema.
 export const changeBranchSchema = z
   .string()
   .min(1)
   .max(MAX_BRANCH_LENGTH)
-  .transform((branch, context) => {
-    const match = /^change\/([^/]+)$/u.exec(branch);
-    const changeId = match?.[1];
-    const parsedChangeId = openSpecChangeIdSchema.safeParse(changeId);
-    if (!parsedChangeId.success || changeId !== parsedChangeId.data) {
-      context.addIssue({
-        code: "custom",
-        message: "Корневая Git-ветка должна иметь формат change/<change-id>",
-      });
-      return z.NEVER;
-    }
-    return `change/${parsedChangeId.data}` as const;
-  });
+  .regex(CHANGE_BRANCH_PATTERN, { message: CHANGE_BRANCH_MESSAGE, abort: true })
+  .refine(isChangeBranch, { message: CHANGE_BRANCH_MESSAGE });
 
 export const planningBranchSchema = z
   .string()
   .min(1)
   .max(MAX_BRANCH_LENGTH)
-  .transform((branch, context) => {
-    const match = /^planning\/([^/]+)\/(initial|phase-([1-9][0-9]*))$/u.exec(branch);
-    const changeId = match?.[1];
-    const parsedChangeId = openSpecChangeIdSchema.safeParse(changeId);
-    const phaseNumber = match?.[3] === undefined ? null : Number(match[3]);
-    if (
-      !parsedChangeId.success ||
-      changeId !== parsedChangeId.data ||
-      (phaseNumber !== null && !Number.isSafeInteger(phaseNumber))
-    ) {
-      context.addIssue({
-        code: "custom",
-        message: "Planning-ветка должна иметь формат planning/<change-id>/initial или planning/<change-id>/phase-N",
-      });
-      return z.NEVER;
-    }
-    return branch as PlanningBranch;
-  });
+  .regex(PLANNING_BRANCH_PATTERN, {
+    message: PLANNING_BRANCH_MESSAGE,
+    abort: true,
+  })
+  .refine(isPlanningBranch, { message: PLANNING_BRANCH_MESSAGE });
 
 export const implementationBranchSchema = z
   .string()
   .min(1)
   .max(MAX_BRANCH_LENGTH)
-  .transform((branch, context) => {
-    const match = /^implementation\/([^/]+)\/phase-([1-9][0-9]*)\/run-([1-9][0-9]*)$/u.exec(branch);
-    const changeId = match?.[1];
-    const parsedChangeId = openSpecChangeIdSchema.safeParse(changeId);
-    const phaseNumber = Number(match?.[2]);
-    const runNumber = Number(match?.[3]);
-    if (
-      !parsedChangeId.success ||
-      changeId !== parsedChangeId.data ||
-      !Number.isSafeInteger(phaseNumber) ||
-      !Number.isSafeInteger(runNumber)
-    ) {
-      context.addIssue({
-        code: "custom",
-        message: "Implementation-ветка должна иметь формат implementation/<change-id>/phase-N/run-M",
-      });
-      return z.NEVER;
-    }
-    return branch as ImplementationBranch;
-  });
+  .regex(IMPLEMENTATION_BRANCH_PATTERN, {
+    message: IMPLEMENTATION_BRANCH_MESSAGE,
+    abort: true,
+  })
+  .refine(isImplementationBranch, { message: IMPLEMENTATION_BRANCH_MESSAGE });
 
-export type ChangeBranch = z.output<typeof changeBranchSchema>;
-export type PlanningBranch =
-  | `planning/${string}/initial`
-  | `planning/${string}/phase-${number}`;
-export type ImplementationBranch = `implementation/${string}/phase-${number}/run-${number}`;
+function isChangeBranch(branch: string): branch is ChangeBranch {
+  const changeId = CHANGE_BRANCH_PATTERN.exec(branch)?.[1];
+  return isCanonicalChangeId(changeId);
+}
+
+function isPlanningBranch(branch: string): branch is PlanningBranch {
+  const match = PLANNING_BRANCH_PATTERN.exec(branch);
+  const phaseNumber = match?.[3] === undefined ? null : Number(match[3]);
+  return (
+    isCanonicalChangeId(match?.[1]) &&
+    (phaseNumber === null || Number.isSafeInteger(phaseNumber))
+  );
+}
+
+function isImplementationBranch(branch: string): branch is ImplementationBranch {
+  const match = IMPLEMENTATION_BRANCH_PATTERN.exec(branch);
+  return (
+    isCanonicalChangeId(match?.[1]) &&
+    Number.isSafeInteger(Number(match?.[2])) &&
+    Number.isSafeInteger(Number(match?.[3]))
+  );
+}
+
+function isCanonicalChangeId(changeId: string | undefined): boolean {
+  const parsed = openSpecChangeIdSchema.safeParse(changeId);
+  return parsed.success && changeId === parsed.data;
+}
 
 export class ChangeBranchError extends Error {
   constructor(message: string) {
@@ -146,7 +149,7 @@ export type ParsedImplementationBranch = {
 
 export function parsePlanningBranch(branch: string): ParsedPlanningBranch {
   const parsed = planningBranchSchema.parse(branch);
-  const match = /^planning\/([^/]+)\/(initial|phase-([1-9][0-9]*))$/u.exec(parsed);
+  const match = PLANNING_BRANCH_PATTERN.exec(parsed);
   if (!match?.[1]) throw new ChangeBranchError("Некорректная planning-ветка");
   if (match[2] === "initial") return { kind: "initial", changeId: match[1] };
   return { kind: "phase", changeId: match[1], phaseNumber: Number(match[3]) };
@@ -154,7 +157,7 @@ export function parsePlanningBranch(branch: string): ParsedPlanningBranch {
 
 export function parseImplementationBranch(branch: string): ParsedImplementationBranch {
   const parsed = implementationBranchSchema.parse(branch);
-  const match = /^implementation\/([^/]+)\/phase-([1-9][0-9]*)\/run-([1-9][0-9]*)$/u.exec(parsed);
+  const match = IMPLEMENTATION_BRANCH_PATTERN.exec(parsed);
   if (!match?.[1]) throw new ChangeBranchError("Некорректная implementation-ветка");
   if (!match[2] || !match[3]) throw new ChangeBranchError("Некорректная implementation-ветка");
   return {
