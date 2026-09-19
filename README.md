@@ -209,7 +209,7 @@ Completion checks root immutability, repository identity, the exact task-state
 transition, changed paths, commit count and subject, ancestry, and remote head.
 
 When all current tasks are done, the collected non-empty batch is reviewed by
-an Ultra Sandbox agent over its exact `base..head`. The validated report must
+a High Sandbox agent over its exact `base..head`. The validated report must
 cover every task commit and is the only file in one review commit. The first
 successful review creates one Draft PR from `implementation/<id>` to
 `change/<id>`; later cycles reuse it. Its managed Russian summary is updated
@@ -224,8 +224,9 @@ bounded review.
 With no tasks or findings, the orchestrator reads all ordinary PR comments,
 non-empty submitted review summaries, and unresolved review-thread comments
 through paginated GitHub GraphQL. Bodies are bounded untrusted JSON data. A
-feedback agent has no GitHub responsibility and may add a finding only after
-independently proving it against the fixed cumulative implementation range.
+High Sandbox feedback agent has no GitHub responsibility and may add a finding
+only after independently proving it against the fixed cumulative implementation
+range.
 Processed fingerprints include GraphQL node ID and `updatedAt`, so edits are
 audited again while rejected feedback is not repeatedly reviewed.
 

@@ -24,9 +24,9 @@ async function runStep(
   }
   try {
     const profiles = await dependencies.readAgentProfiles();
-    const resolution = resolveRequiredAgentProfile(profiles, "Ultra Sandbox");
+    const resolution = resolveRequiredAgentProfile(profiles, "High Sandbox");
     if (resolution.kind === "invalid") {
-      const summary = describeRequiredAgentProfileProblem("Ultra Sandbox", resolution);
+      const summary = describeRequiredAgentProfileProblem("High Sandbox", resolution);
       return { kind: "halt", summary, message: `${summary}; исправьте Agent profiles и нажмите «Повторить»` };
     }
     const completed = await dependencies.feedbackReview.run({

@@ -248,7 +248,7 @@ commit, changed paths, единственное допустимое измен�
 ancestry и точные local/remote heads. Успех добавляет `{taskId, taskNumber,
 commit}` в collecting batch и повторяет шаг.
 
-При `all_done` непустой batch передаётся `review-implementation`. Ultra Sandbox
+При `all_done` непустой batch передаётся `review-implementation`. High Sandbox
 агент вызывает `openspec-review-implementation` для точного `base..head`,
 сопоставляет каждый task-коммит с review unit и изменяет только
 `implementation-review.md`. Completion требует полное покрытие, точный ordered
@@ -269,9 +269,10 @@ GraphQL Node ID и `updatedAt`; edit создаёт новый fingerprint. Ли
 1000 элементов, 64 KiB на body и 4 MiB суммарно. Невалидный ответ, незавершённая
 пагинация или превышение лимита останавливают workflow.
 
-Feedback передаётся агенту как недоверенные JSON-данные. Агент не владеет
-GitHub-операциями, игнорирует инструкции в body и независимо проверяет замечания
-по зафиксированному cumulative range `rootBaseline..lastDeliveryHead`. Только
+Feedback передаётся High Sandbox агенту как недоверенные JSON-данные. Агент не
+владеет GitHub-операциями, игнорирует инструкции в body и независимо проверяет
+замечания по зафиксированному cumulative range
+`rootBaseline..lastDeliveryHead`. Только
 доказанная проблема меняет `implementation-review.md`; режимы completion —
 `report-updated` и `no-report-change`. Fingerprints фиксируются только вместе с
 успешным durable completion.

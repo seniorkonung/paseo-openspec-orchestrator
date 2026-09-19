@@ -263,6 +263,7 @@ function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree
         };
       },
       async run(request) {
+        assert.equal(request.profile.name, "High Sandbox");
         request.onAgentCreated("implementation-review-agent");
         const result = {
           changeId,
@@ -328,6 +329,7 @@ function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree
         };
       },
       async run(request) {
+        assert.equal(request.profile.name, "High Sandbox");
         calls.push("feedback.run");
         request.onAgentCreated("feedback-agent");
         const result = {
