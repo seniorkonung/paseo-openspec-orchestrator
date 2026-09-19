@@ -5,21 +5,14 @@ import {
   ChangeTaskExecutionError,
   TASK_REMOTE,
   parseTaskBranch,
-  taskPullRequestSchema,
   taskRepositoryArgument,
   taskRepositorySchema,
   type ResolvedTaskRepository,
   type TaskGitHubRemoteIdentity,
-  type TaskPullRequest,
 } from "./change-task-model.ts";
 import {
   parseGitHubRemoteIdentity,
 } from "./github-repository-identity.ts";
-
-const MAX_OPEN_PULL_REQUESTS = 100;
-const taskPullRequestListSchema = z
-  .array(taskPullRequestSchema)
-  .max(MAX_OPEN_PULL_REQUESTS);
 
 export async function readTaskGitRoot(
   command: BoundedCommandRunner,
@@ -192,7 +185,9 @@ export async function readTaskCommitCount(
     return z.coerce.number().int().nonnegative().parse(result.stdout.trim());
   } catch (error) {
     if (signal.aborted) throw error;
-    throw new ChangeTaskExecutionError("Не удалось проверить историю Git task-ветки");
+    throw new ChangeTaskExecutionError(
+      "Не удалось проверить историю Git implementation-ветки",
+    );
   }
 }
 
@@ -312,100 +307,6 @@ export async function resolveTaskRepository(
     );
   }
   return { ...remote, url: repository.url };
-}
-
-export async function readSingleOpenTaskPullRequest(
-  command: BoundedCommandRunner,
-  gitRoot: string,
-  repository: ResolvedTaskRepository,
-  headBranch: string,
-  signal?: AbortSignal,
-): Promise<TaskPullRequest> {
-  const pullRequests = await listTaskPullRequests(
-    command,
-    gitRoot,
-    repository,
-    headBranch,
-    "open",
-    signal,
-  );
-  if (pullRequests.length !== 1) {
-    throw new ChangeTaskExecutionError(
-      `Для ветки «${headBranch}» должен существовать ровно один открытый pull request`,
-    );
-  }
-  return pullRequests[0]!;
-}
-
-export async function listTaskPullRequests(
-  command: BoundedCommandRunner,
-  gitRoot: string,
-  repository: ResolvedTaskRepository,
-  headBranch: string,
-  state: "open" | "all",
-  signal?: AbortSignal,
-): Promise<readonly TaskPullRequest[]> {
-  try {
-    const result = await command(
-      "gh",
-      [
-        "pr",
-        "list",
-        "--repo",
-        taskRepositoryArgument(repository),
-        "--head",
-        parseTaskBranch(headBranch),
-        "--state",
-        state,
-        "--limit",
-        String(MAX_OPEN_PULL_REQUESTS),
-        "--json",
-        "number,url,state,isDraft,isCrossRepository,baseRefName,headRefName,headRefOid,title,body",
-      ],
-      { cwd: gitRoot, signal },
-    );
-    return taskPullRequestListSchema.parse(JSON.parse(result.stdout));
-  } catch (error) {
-    if (signal?.aborted) throw error;
-    throw new ChangeTaskExecutionError(
-      `Не удалось прочитать pull request ветки «${headBranch}»`,
-    );
-  }
-}
-
-export function assertReadyTaskPullRequest(
-  pullRequest: TaskPullRequest,
-  expected: {
-    readonly baseBranch: string;
-    readonly headBranch: string;
-    readonly headCommit: string;
-    readonly label: string;
-  },
-): void {
-  if (
-    pullRequest.state !== "OPEN" ||
-    pullRequest.isDraft ||
-    pullRequest.isCrossRepository ||
-    pullRequest.baseRefName !== expected.baseBranch ||
-    pullRequest.headRefName !== expected.headBranch ||
-    pullRequest.headRefOid !== expected.headCommit
-  ) {
-    throw new ChangeTaskExecutionError(
-      `${expected.label} должен быть Ready из «${expected.headBranch}» в «${expected.baseBranch}» и содержать точный remote HEAD`,
-    );
-  }
-}
-
-export function assertTaskPullRequestRepository(
-  pullRequest: Pick<TaskPullRequest, "number" | "url">,
-  repositoryUrl: string,
-): void {
-  const expectedUrl = `${repositoryUrl.replace(/\/$/u, "")}/pull/${pullRequest.number}`;
-  if (pullRequest.url !== expectedUrl) {
-    throw new ChangeTaskExecutionError(
-      `Pull request #${pullRequest.number} принадлежит другому GitHub-репозиторию`,
-    );
-  }
 }
 
 function parseGitHubRemote(remoteUrl: string): TaskGitHubRemoteIdentity {

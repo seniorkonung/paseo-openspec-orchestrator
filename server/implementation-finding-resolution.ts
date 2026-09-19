@@ -9,7 +9,7 @@ import {
   type ReviewFindingId,
 } from "./change-review-report.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
-import { planningBranchSchema } from "./change-branch.ts";
+import { implementationBranchSchema } from "./change-branch.ts";
 import {
   ReviewFindingResolutionError,
   createReviewFindingResolutionService,
@@ -33,7 +33,7 @@ export interface PendingImplementationFindingResolutionSession
 export const pendingImplementationFindingResolutionSessionSchema = z
   .object({
     changeId: openSpecChangeIdSchema,
-    branch: planningBranchSchema,
+    branch: implementationBranchSchema,
     findingId: reviewFindingIdSchema,
     baselineCommit: commitHashSchema,
   })

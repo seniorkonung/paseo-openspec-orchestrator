@@ -12,6 +12,11 @@ import type {
   WorkflowStepDefinition,
   WorkflowStepResult,
 } from "../types.ts";
+import { clearImplementationBatch } from "../../implementation-run-model.ts";
+import {
+  ImplementationRunVerificationError,
+  type ImplementationRunVerifier,
+} from "../../implementation-run-verification.ts";
 
 export interface ResolveImplementationReviewFindingsDependencies {
   readonly workspaceDirectory: string;
@@ -20,6 +25,7 @@ export interface ResolveImplementationReviewFindingsDependencies {
     ImplementationFindingResolutionService,
     "plan" | "run"
   >;
+  readonly implementationRunVerification: Pick<ImplementationRunVerifier, "assertCurrent">;
 }
 
 async function resolveImplementationReviewFindingsStep(
@@ -27,7 +33,8 @@ async function resolveImplementationReviewFindingsStep(
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
   const { activeBranch, change } = context.state;
-  if (!activeBranch || !change) {
+  const implementationRun = context.state.implementationRun;
+  if (!activeBranch || !change || !implementationRun) {
     return {
       kind: "halt",
       summary: "Недостаточно данных для устранения implementation findings",
@@ -49,6 +56,11 @@ async function resolveImplementationReviewFindingsStep(
   let session = context.state.pendingImplementationFindingResolutionSession;
   if (!session) {
     try {
+      await dependencies.implementationRunVerification.assertCurrent(
+        dependencies.workspaceDirectory,
+        implementationRun,
+        context.signal,
+      );
       const plan = await dependencies.findingResolution.plan(
         dependencies.workspaceDirectory,
         change.id,
@@ -58,8 +70,14 @@ async function resolveImplementationReviewFindingsStep(
       if (plan.kind === "no-findings") {
         return {
           kind: "continue",
-          next: "await-planning-merge",
-          state: { pendingImplementationFindingResolutionSession: null },
+          next: "execute-change-tasks",
+          state: {
+            implementationRun: clearImplementationBatch(
+              implementationRun,
+              plan.headCommit,
+            ),
+            pendingImplementationFindingResolutionSession: null,
+          },
           summary: `В implementation review нет нерешённых findings: ${plan.reviewPath}`,
         };
       }
@@ -122,6 +140,11 @@ async function resolveImplementationReviewFindingsStep(
         ]);
       },
       onFindingResolved: async () => {
+        await dependencies.implementationRunVerification.assertCurrent(
+          dependencies.workspaceDirectory,
+          implementationRun,
+          context.signal,
+        );
         await context.checkpointState({
           ...context.state,
           pendingImplementationFindingResolutionSession: null,
@@ -132,8 +155,14 @@ async function resolveImplementationReviewFindingsStep(
     if (completed.remainingFindingIds.length === 0) {
       return {
         kind: "continue",
-        next: "await-planning-merge",
-        state: { pendingImplementationFindingResolutionSession: null },
+        next: "execute-change-tasks",
+        state: {
+          implementationRun: clearImplementationBatch(
+            implementationRun,
+            completed.commit,
+          ),
+          pendingImplementationFindingResolutionSession: null,
+        },
         summary: `Обработана последняя implementation finding ${completed.findingId}; обновлён PR #${completed.pullRequest.number}`,
       };
     }
@@ -162,9 +191,11 @@ function findingFailure(
   console.error("[OpenSpec] Ошибка устранения implementation review finding", {
     code: errorCode(error),
   });
-  const summary = error instanceof ImplementationFindingResolutionError
-    ? error.message
-    : fallback;
+  const summary =
+    error instanceof ImplementationFindingResolutionError ||
+      error instanceof ImplementationRunVerificationError
+      ? error.message
+      : fallback;
   return {
     kind: "halt",
     summary,

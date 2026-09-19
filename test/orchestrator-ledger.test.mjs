@@ -44,7 +44,30 @@ function workflowBranches(changeId) {
   };
 }
 
-test("checkpoint версий 1 и 2 не мигрируется, а версия 3 заполняет default", () => {
+function implementationRun(changeId) {
+  return {
+    changeId,
+    changeBranch: `change/${changeId}`,
+    implementationBranch: `implementation/${changeId}`,
+    rootBaselineCommit: "a".repeat(40),
+    repository: {
+      host: "github.com",
+      nameWithOwner: "example/project",
+      url: "https://github.com/example/project",
+    },
+    publication: {
+      kind: "draft-pr",
+      number: 51,
+      url: "https://github.com/example/project/pull/51",
+      title: `Реализация OpenSpec change «${changeId}»`,
+    },
+    batch: { kind: "empty", baseCommit: "c".repeat(40) },
+    lastDeliveryHead: "b".repeat(40),
+    processedFeedbackFingerprints: [],
+  };
+}
+
+test("checkpoint версий 1–3 не мигрируется, а версия 4 заполняет default", () => {
   assert.throws(
     () =>
       workflowCheckpointSchema.parse({
@@ -60,12 +83,19 @@ test("checkpoint версий 1 и 2 не мигрируется, а верси�
       state: { ...workflowBranches("legacy-change"), change: { id: "legacy-change" } },
     }),
   );
+  assert.throws(() =>
+    workflowCheckpointSchema.parse({
+      version: 3,
+      nextStepId: "initialize-change",
+      state: { ...workflowBranches("legacy-change"), change: { id: "legacy-change" } },
+    }),
+  );
   const parsed = workflowCheckpointSchema.parse({
-    version: 3,
+    version: 4,
     nextStepId: "initialize-change",
     state: { ...workflowBranches("legacy-change"), change: { id: "legacy-change" } },
   });
-  assert.equal(parsed.version, 3);
+  assert.equal(parsed.version, 4);
   assert.equal(parsed.state.pendingChangeInitializationSession, null);
   assert.equal(parsed.state.pendingPlanningBranchSession, null);
   assert.equal(parsed.state.pendingPlanningMergeSession, null);
@@ -76,6 +106,7 @@ test("workflow не принимает несколько незавершённ
     () =>
       workflowStateSchema.parse({
         ...workflowBranches("conflicting-sessions"),
+        activeBranch: "implementation/conflicting-sessions",
         change: { id: "conflicting-sessions" },
         pendingArtifactSession: {
           artifactId: "proposal",
@@ -98,13 +129,13 @@ test("workflow не принимает несколько незавершённ
         pendingReviewSession: null,
         pendingFindingResolutionSession: {
           changeId: "conflicting-sessions",
-          branch: "planning/conflicting-sessions",
+          branch: "implementation/conflicting-sessions",
           findingId: "F1",
           baselineCommit: "c".repeat(40),
         },
         pendingImplementationFindingResolutionSession: {
           changeId: "conflicting-sessions",
-          branch: "planning/conflicting-sessions",
+          branch: "implementation/conflicting-sessions",
           findingId: "F2",
           baselineCommit: "d".repeat(40),
         },
@@ -183,6 +214,45 @@ test("workflow отклоняет checkpoint-сессии другого change 
         },
       }),
     /Сессия merge-gate не соответствует/,
+  );
+});
+
+test("workflow связывает durable implementation-сессии с точным run", () => {
+  const changeId = "durable-implementation";
+  const run = implementationRun(changeId);
+  const state = {
+    changeBranch: run.changeBranch,
+    activeBranch: run.implementationBranch,
+    change: { id: changeId },
+    implementationRun: run,
+    pendingPrFeedbackReviewSession: {
+      changeId,
+      changeBranch: run.changeBranch,
+      implementationBranch: run.implementationBranch,
+      rootBaselineCommit: run.rootBaselineCommit,
+      rangeHead: run.lastDeliveryHead,
+      baselineCommit: run.batch.baseCommit,
+      reportBlob: "d".repeat(40),
+      repository: run.repository,
+      items: [{
+        source: "comment",
+        nodeId: "PRC_kwDOExample",
+        updatedAt: "2026-09-19T10:00:00Z",
+        body: "Проверить крайний случай",
+        fingerprint: "e".repeat(64),
+      }],
+    },
+  };
+  assert.doesNotThrow(() => workflowStateSchema.parse(state));
+  assert.throws(
+    () => workflowStateSchema.parse({
+      ...state,
+      pendingPrFeedbackReviewSession: {
+        ...state.pendingPrFeedbackReviewSession,
+        rangeHead: "f".repeat(40),
+      },
+    }),
+    /не соответствует implementation-run/u,
   );
 });
 
@@ -288,7 +358,7 @@ test("ledger сохраняет checkpoint workflow и полностью очи
     change: { id: "change-a" },
   }));
   const checkpoint = workflowCheckpointSchema.parse({
-    version: 3,
+    version: 4,
     nextStepId: "review-change",
     state: {
       ...workflowBranches("checkpoint"),
@@ -381,6 +451,39 @@ test("семантически несовместимый ledger переход�
   assert.equal(snapshot.persistence.status, "degraded");
   assert.equal(snapshot.currentAction, null);
   createOrchestratorReporter(ledger, "workspace-1").setChange({ id: "change-a" });
+  await ledger.close();
+  assert.equal(await readFile(path, "utf8"), source);
+});
+
+test("ledger с checkpoint v3 остаётся read-only degraded до Clear", async (context) => {
+  context.mock.method(console, "error", () => undefined);
+  const paseoHome = await temporaryHome(context);
+  const path = getLedgerPath("workspace-v3", paseoHome);
+  await mkdir(dirname(path), { recursive: true });
+  const source = JSON.stringify({
+    version: 1,
+    workspaceId: "workspace-v3",
+    revision: 3,
+    change: { id: "legacy-change" },
+    lifecycle: { status: "failed", availableCommand: "retry" },
+    currentAction: null,
+    history: [],
+    checkpoint: {
+      version: 3,
+      nextStepId: "execute-change-tasks",
+      state: {
+        changeBranch: "change/legacy-change",
+        activeBranch: "legacy-change-task-1",
+        change: { id: "legacy-change" },
+      },
+    },
+  });
+  await writeFile(path, source, "utf8");
+
+  const ledger = new OrchestratorLedger({ paseoHome });
+  const snapshot = await ledger.open("workspace-v3");
+  assert.equal(snapshot.persistence.status, "degraded");
+  assert.equal(ledger.getWorkflowCheckpoint("workspace-v3"), null);
   await ledger.close();
   assert.equal(await readFile(path, "utf8"), source);
 });

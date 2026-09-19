@@ -7,6 +7,10 @@ import {
   ChangeFindingResolutionError,
   type ChangeFindingResolutionService,
 } from "../../change-finding-resolution.ts";
+import {
+  ImplementationRunVerificationError,
+  type ImplementationRunVerifier,
+} from "../../implementation-run-verification.ts";
 import type {
   WorkflowStepContext,
   WorkflowStepDefinition,
@@ -17,6 +21,7 @@ export interface ResolveReviewFindingsDependencies {
   readonly workspaceDirectory: string;
   readonly readAgentProfiles: AgentProfileReader;
   readonly findingResolution: Pick<ChangeFindingResolutionService, "plan" | "run">;
+  readonly implementationRunVerification: Pick<ImplementationRunVerifier, "assertCurrent">;
 }
 
 async function resolveReviewFindingsStep(
@@ -46,6 +51,13 @@ async function resolveReviewFindingsStep(
   let session = context.state.pendingFindingResolutionSession;
   if (!session) {
     try {
+      if (context.state.implementationRun) {
+        await dependencies.implementationRunVerification.assertCurrent(
+          dependencies.workspaceDirectory,
+          context.state.implementationRun,
+          context.signal,
+        );
+      }
       const plan = await dependencies.findingResolution.plan(
         dependencies.workspaceDirectory,
         change.id,
@@ -55,7 +67,9 @@ async function resolveReviewFindingsStep(
       if (plan.kind === "no-findings") {
         return {
           kind: "continue",
-          next: "resolve-implementation-review-findings",
+          next: context.state.implementationRun
+            ? "resolve-implementation-review-findings"
+            : "await-planning-merge",
           state: { pendingFindingResolutionSession: null },
           summary: `В review нет нерешённых findings: ${plan.reviewPath}`,
         };
@@ -114,6 +128,13 @@ async function resolveReviewFindingsStep(
         ]);
       },
       onFindingResolved: async () => {
+        if (context.state.implementationRun) {
+          await dependencies.implementationRunVerification.assertCurrent(
+            dependencies.workspaceDirectory,
+            context.state.implementationRun,
+            context.signal,
+          );
+        }
         await context.checkpointState({
           ...context.state,
           pendingFindingResolutionSession: null,
@@ -124,7 +145,9 @@ async function resolveReviewFindingsStep(
     if (completed.remainingFindingIds.length === 0) {
       return {
         kind: "continue",
-        next: "resolve-implementation-review-findings",
+        next: context.state.implementationRun
+          ? "resolve-implementation-review-findings"
+          : "await-planning-merge",
         state: { pendingFindingResolutionSession: null },
         summary: `Обработана последняя finding review ${completed.findingId}; обновлён PR #${completed.pullRequest.number}`,
       };
@@ -149,7 +172,11 @@ function findingFailure(
   console.error("[OpenSpec] Ошибка устранения review finding", {
     code: errorCode(error),
   });
-  const summary = error instanceof ChangeFindingResolutionError ? error.message : fallback;
+  const summary =
+    error instanceof ChangeFindingResolutionError ||
+      error instanceof ImplementationRunVerificationError
+      ? error.message
+      : fallback;
   return {
     kind: "halt",
     summary,

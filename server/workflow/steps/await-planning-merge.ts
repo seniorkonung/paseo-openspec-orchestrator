@@ -65,7 +65,7 @@ async function awaitPlanningMergeStep(
     );
     return {
       kind: "continue",
-      next: "execute-change-tasks",
+      next: "prepare-implementation-branch",
       state: {
         activeBranch: rootBranch,
         pendingPlanningMergeSession: null,

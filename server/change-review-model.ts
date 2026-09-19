@@ -5,7 +5,11 @@ import {
   type CompletedReviewPullRequest,
 } from "./change-review-publication.ts";
 import type { RepoLocalChangePaths } from "./repo-local-change.ts";
-import { changeBranchFor, planningBranchFor } from "./change-branch.ts";
+import {
+  changeBranchFor,
+  planningBranchFor,
+  type PlanningBranch,
+} from "./change-branch.ts";
 
 const FALLBACK_COMMIT_SUBJECT = "docs(openspec): add change review";
 
@@ -33,7 +37,7 @@ export type PendingReviewSession = z.infer<typeof pendingReviewSessionSchema>;
 export interface CompletedChangeReview {
   readonly changeId: string;
   readonly reviewPath: string;
-  readonly branch: string;
+  readonly branch: PlanningBranch;
   readonly pullRequest: CompletedReviewPullRequest;
 }
 

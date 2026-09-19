@@ -5,6 +5,7 @@ import {
   changeBranchSchema,
   planningBranchFor,
   planningBranchSchema,
+  type PlanningBranch,
 } from "./change-branch.ts";
 import { commitHashSchema } from "./change-artifact-model.ts";
 import {
@@ -64,7 +65,7 @@ export interface PlanningBranchService {
     workspaceDirectory: string,
     session: PendingPlanningBranchSession,
     signal?: AbortSignal,
-  ): Promise<string>;
+  ): Promise<PlanningBranch>;
 }
 
 export interface PlanningBranchServiceOptions {

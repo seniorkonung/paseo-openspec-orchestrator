@@ -7,6 +7,7 @@ import { createChangePublicationService } from "./change-publication.ts";
 import { createChangeReviewService } from "./change-review.ts";
 import { createChangeFindingResolutionService } from "./change-finding-resolution.ts";
 import { createImplementationFindingResolutionService } from "./implementation-finding-resolution.ts";
+import { createImplementationRunVerifier } from "./implementation-run-verification.ts";
 import { createChangeTaskExecutionService } from "./change-task-execution.ts";
 import { readGitBranch } from "./git-branch.ts";
 import { readGitWorktreeStatus } from "./git-worktree.ts";
@@ -15,6 +16,10 @@ import { inspectMiseToolchain } from "./mise-toolchain.ts";
 import { verifyOpenSpecChange } from "./openspec-change.ts";
 import { createPlanningBranchService } from "./planning-branch.ts";
 import { createPlanningMergeService } from "./planning-merge.ts";
+import { createImplementationBranchService } from "./implementation-branch.ts";
+import { createImplementationReviewService } from "./implementation-review.ts";
+import { createImplementationPullRequestService } from "./implementation-pull-request.ts";
+import { createPrFeedbackReviewService } from "./pr-feedback-review.ts";
 import type { OrchestratorEngine } from "./orchestrator-engine.ts";
 import { OrchestratorLedger, type WaitResult } from "./orchestrator-ledger.ts";
 import {
@@ -157,6 +162,11 @@ export class OrchestratorController {
       changeInitialization: createChangeInitializationService(),
       planningBranch: createPlanningBranchService(),
       planningMerge: createPlanningMergeService(),
+      implementationBranch: createImplementationBranchService(),
+      implementationReview: createImplementationReviewService({ createAgent }),
+      implementationPullRequest: createImplementationPullRequestService(),
+      prFeedbackReview: createPrFeedbackReviewService({ createAgent }),
+      implementationRunVerification: createImplementationRunVerifier(),
       verifyChange: verifyOpenSpecChange,
       changeArtifacts: createChangeArtifactCreationService({ createAgent }),
       changePublication: createChangePublicationService({ createAgent }),

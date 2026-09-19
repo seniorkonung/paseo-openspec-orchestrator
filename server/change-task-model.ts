@@ -6,12 +6,17 @@ import {
   type GitHubRemoteIdentity,
 } from "./github-repository-identity.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
+import {
+  changeBranchFor,
+  changeBranchSchema,
+  implementationBranchFor,
+  implementationBranchSchema,
+  type ImplementationBranch,
+} from "./change-branch.ts";
 
 export const TASK_REMOTE = "origin";
 export const MAX_TASKS = 4_096;
 export const MAX_TASK_DESCRIPTION_LENGTH = 4_096;
-export const MAX_TASK_PR_TITLE_LENGTH = 256;
-export const MAX_TASK_PR_BODY_LENGTH = 65_536;
 
 const MAX_TASK_ID_LENGTH = 128;
 const MAX_TASK_NUMBER_LENGTH = 128;
@@ -64,26 +69,6 @@ export const taskHttpsUrlSchema = z
   .url()
   .max(MAX_URL_LENGTH)
   .refine((value) => new URL(value).protocol === "https:", "Ожидался HTTPS URL");
-export const taskPullRequestNumberSchema = z
-  .number()
-  .int()
-  .positive()
-  .max(Number.MAX_SAFE_INTEGER);
-export const taskPullRequestTitleSchema = z
-  .string()
-  .trim()
-  .min(1)
-  .max(MAX_TASK_PR_TITLE_LENGTH)
-  .regex(
-    /^[\p{L}\p{N} .,:«»—–/_-]+$/u,
-    "Название PR содержит небезопасные или нестабильные символы",
-  );
-export const taskPullRequestBodySchema = z
-  .string()
-  .min(1)
-  .max(MAX_TASK_PR_BODY_LENGTH)
-  .refine((value) => value.trim().length > 0, "Описание PR не может быть пустым")
-  .refine((value) => !value.includes("\0"), "Описание PR содержит недопустимый символ");
 
 export const applyTaskSchema = z
   .object({
@@ -117,36 +102,7 @@ export const taskRepositorySchema = z
   })
   .strict();
 
-export const taskPullRequestSchema = z
-  .object({
-    number: taskPullRequestNumberSchema,
-    url: taskHttpsUrlSchema,
-    state: z.enum(["OPEN", "CLOSED", "MERGED"]),
-    isDraft: z.boolean(),
-    isCrossRepository: z.boolean(),
-    baseRefName: taskBranchSchema.or(z.literal("main")),
-    headRefName: taskBranchSchema,
-    headRefOid: commitHashSchema,
-    title: z.string().max(MAX_TASK_PR_TITLE_LENGTH),
-    body: z.string().max(MAX_TASK_PR_BODY_LENGTH),
-  })
-  .strict();
-
-export const taskCompletionInputSchema = z
-  .object({
-    pullRequestNumber: taskPullRequestNumberSchema,
-    title: taskPullRequestTitleSchema,
-    body: taskPullRequestBodySchema,
-  })
-  .strict();
-
-export const completedTaskPullRequestSchema = z
-  .object({
-    number: taskPullRequestNumberSchema,
-    url: taskHttpsUrlSchema,
-    title: taskPullRequestTitleSchema,
-  })
-  .strict();
+export const taskCompletionInputSchema = z.object({}).strict();
 
 export const pendingTaskExecutionSessionSchema = z
   .object({
@@ -155,9 +111,9 @@ export const pendingTaskExecutionSessionSchema = z
     taskId: taskIdSchema,
     taskNumber: taskNumberSchema,
     taskDescription: taskDescriptionSchema,
-    parentBranch: taskBranchSchema,
-    parentBaseBranch: taskBranchSchema.or(z.literal("main")),
-    taskBranch: taskBranchSchema,
+    changeBranch: changeBranchSchema,
+    implementationBranch: implementationBranchSchema,
+    rootBaselineCommit: commitHashSchema,
     baselineCommit: commitHashSchema,
     tasksBeforeDigest: taskDigestSchema,
     tasksAfterDigest: taskDigestSchema,
@@ -166,15 +122,21 @@ export const pendingTaskExecutionSessionSchema = z
     repositoryHost: taskGithubHostSchema,
     repositoryNameWithOwner: taskRepositoryNameWithOwnerSchema,
     repositoryUrl: taskHttpsUrlSchema,
-    parentPullRequestNumber: taskPullRequestNumberSchema,
   })
   .strict()
   .superRefine((session, context) => {
-    if (session.taskBranch !== `${session.changeId}-task-${session.taskNumber}`) {
+    if (session.changeBranch !== changeBranchFor(session.changeId)) {
       context.addIssue({
         code: "custom",
-        path: ["taskBranch"],
-        message: "Task-ветка не соответствует change и номеру задачи",
+        path: ["changeBranch"],
+        message: "Корневая ветка task-сессии не соответствует change",
+      });
+    }
+    if (session.implementationBranch !== implementationBranchFor(session.changeId)) {
+      context.addIssue({
+        code: "custom",
+        path: ["implementationBranch"],
+        message: "Implementation-ветка task-сессии не соответствует change",
       });
     }
     if (session.progressComplete >= session.progressTotal) {
@@ -189,7 +151,6 @@ export const pendingTaskExecutionSessionSchema = z
 export type ApplyTask = z.output<typeof applyTaskSchema>;
 export type ApplyInstructions = z.output<typeof applyInstructionsSchema>;
 export type TaskCompletionInput = z.output<typeof taskCompletionInputSchema>;
-export type TaskPullRequest = z.output<typeof taskPullRequestSchema>;
 export type PendingTaskExecutionSession = z.infer<
   typeof pendingTaskExecutionSessionSchema
 >;
@@ -204,18 +165,13 @@ export type ChangeTaskExecutionPlan =
       readonly session: PendingTaskExecutionSession;
     };
 
-export interface CompletedTaskPullRequest {
-  readonly number: number;
-  readonly url: string;
-  readonly title: string;
-}
-
 export interface CompletedChangeTask {
   readonly changeId: string;
+  readonly taskId: string;
   readonly taskNumber: string;
-  readonly branch: string;
+  readonly branch: ImplementationBranch;
+  readonly commit: string;
   readonly remainingTasks: number;
-  readonly pullRequest: CompletedTaskPullRequest;
 }
 
 export type TaskGitHubRemoteIdentity = GitHubRemoteIdentity;

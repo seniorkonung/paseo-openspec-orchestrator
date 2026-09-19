@@ -12,6 +12,7 @@ import type {
   WorkflowStepDefinition,
   WorkflowStepResult,
 } from "../types.ts";
+import { collectImplementationTask } from "../../implementation-run-model.ts";
 
 export interface ExecuteChangeTasksDependencies {
   readonly workspaceDirectory: string;
@@ -23,8 +24,8 @@ async function executeChangeTasksStep(
   dependencies: ExecuteChangeTasksDependencies,
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
-  const { activeBranch, change } = context.state;
-  if (!activeBranch || !change) {
+  const { activeBranch, change, implementationRun } = context.state;
+  if (!activeBranch || !change || !implementationRun) {
     return {
       kind: "halt",
       summary: "Недостаточно данных для выполнения OpenSpec-задач",
@@ -49,15 +50,31 @@ async function executeChangeTasksStep(
     try {
       const plan = await dependencies.taskExecution.plan(
         dependencies.workspaceDirectory,
-        change.id,
-        activeBranch,
+        implementationRun,
         context.signal,
       );
       if (plan.kind === "complete") {
+        if (implementationRun.batch.kind === "collecting") {
+          return {
+            kind: "continue",
+            next: "review-implementation",
+            state: { pendingTaskExecutionSession: null },
+            summary: `Пакет из ${implementationRun.batch.tasks.length} задач готов к implementation review`,
+          };
+        }
+        if (implementationRun.lastDeliveryHead === null) {
+          return {
+            kind: "halt",
+            summary: "После planning merge нет implementation-коммитов",
+            message:
+              "OpenSpec не содержит задач для выполнения; пустой implementation pull request не создаётся",
+          };
+        }
         return {
-          kind: "complete",
+          kind: "continue",
+          next: "inspect-implementation-feedback",
           state: { pendingTaskExecutionSession: null },
-          summary: `Все OpenSpec-задачи change ${change.id} выполнены`,
+          summary: `Все OpenSpec-задачи change ${change.id} выполнены; проверяю PR feedback`,
         };
       }
       session = plan.session;
@@ -112,23 +129,34 @@ async function executeChangeTasksStep(
         ]);
       },
       onTaskCompleted: async (task) => {
+        const nextRun = collectImplementationTask(implementationRun, {
+          taskId: task.taskId,
+          taskNumber: task.taskNumber,
+          commit: task.commit,
+        });
         await context.checkpointState({
           ...context.state,
           activeBranch: task.branch,
+          implementationRun: nextRun,
           pendingTaskExecutionSession: null,
         });
       },
+    });
+    const nextRun = collectImplementationTask(implementationRun, {
+      taskId: completed.taskId,
+      taskNumber: completed.taskNumber,
+      commit: completed.commit,
     });
     return {
       kind: "continue",
       next: "execute-change-tasks",
       state: {
         activeBranch: completed.branch,
+        implementationRun: nextRun,
         pendingTaskExecutionSession: null,
       },
       summary:
-        `Задача ${completed.taskNumber} опубликована в PR #${completed.pullRequest.number}; ` +
-        `осталось ${completed.remainingTasks}`,
+        `Задача ${completed.taskNumber} добавлена в implementation-пакет; осталось ${completed.remainingTasks}`,
     };
   } catch (error) {
     return taskFailure(context, error, "Не удалось завершить OpenSpec-задачу");

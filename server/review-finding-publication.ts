@@ -6,7 +6,14 @@ import {
 import { commitHashSchema } from "./change-artifact-model.ts";
 import { reviewFindingIdSchema } from "./change-review-report.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
-import { changeBranchFor, planningBranchFor, planningBranchSchema } from "./change-branch.ts";
+import {
+  changeBranchFor,
+  implementationBranchFor,
+  implementationBranchSchema,
+  planningBranchFor,
+  planningBranchSchema,
+} from "./change-branch.ts";
+import { implementationPullRequestTitle } from "./implementation-publication.ts";
 import {
   listReviewPullRequests,
   readRemoteReviewBranchCommit,
@@ -283,7 +290,7 @@ function parseActiveReviewPullRequest(
       request.workspaceDirectory,
     ),
     changeId: openSpecChangeIdSchema.parse(request.changeId),
-    branch: planningBranchSchema.parse(request.branch),
+    branch: z.union([planningBranchSchema, implementationBranchSchema]).parse(request.branch),
     signal: request.signal,
   };
 }
@@ -335,15 +342,21 @@ async function inspectActiveReviewPullRequest(
     request.signal,
   );
   assertPullRequestRepository(pullRequest, repository.url);
+  const planningTarget = request.branch === planningBranchFor(request.changeId);
+  const implementationTarget =
+    request.branch === implementationBranchFor(request.changeId);
+  const expectedTitle = planningTarget
+    ? reviewPullRequestTitle(request.changeId)
+    : implementationPullRequestTitle(request.changeId);
   if (
     pullRequest.state !== "OPEN" ||
-    pullRequest.isDraft ||
+    (planningTarget ? pullRequest.isDraft : !pullRequest.isDraft) ||
     pullRequest.isCrossRepository ||
     pullRequest.headRefName !== request.branch ||
-    request.branch !== planningBranchFor(request.changeId) ||
+    (!planningTarget && !implementationTarget) ||
     pullRequest.baseRefName !== changeBranchFor(request.changeId) ||
     pullRequest.headRefOid !== remoteHead ||
-    pullRequest.title !== reviewPullRequestTitle(request.changeId)
+    pullRequest.title !== expectedTitle
   ) {
     throw new ChangeReviewPublicationError(
       "Review pull request выбранной ветки не соответствует опубликованной цепочке PR",

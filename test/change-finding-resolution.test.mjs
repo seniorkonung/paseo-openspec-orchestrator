@@ -251,10 +251,10 @@ test("plan выбирает первую finding в порядке review и з�
   await execFileAsync("git", ["add", fixture.reviewPath], { cwd: fixture.workspace });
   await execFileAsync("git", ["commit", "-m", "docs(openspec): clear review findings"], { cwd: fixture.workspace });
   await execFileAsync("git", ["push", "origin", branch], { cwd: fixture.workspace });
-  assert.deepEqual(await service.plan(fixture.workspace, changeId, branch), {
-    kind: "no-findings",
-    reviewPath: `openspec/changes/${changeId}/review.md`,
-  });
+  const cleanPlan = await service.plan(fixture.workspace, changeId, branch);
+  assert.equal(cleanPlan.kind, "no-findings");
+  assert.equal(cleanPlan.reviewPath, `openspec/changes/${changeId}/review.md`);
+  assert.match(cleanPlan.headCommit, /^[0-9a-f]{40}$/u);
 });
 
 test("High Sandbox ждёт scoped MCP и завершает finding только после commit и push", async (context) => {

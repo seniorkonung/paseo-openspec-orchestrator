@@ -12,14 +12,14 @@ import {
   implementationFindingResolutionPrompt,
 } from "../server/implementation-finding-resolution.ts";
 import {
-  reviewPullRequestBody,
-  reviewPullRequestTitle,
-} from "../server/change-review-publication.ts";
+  implementationPullRequestTitle,
+  renderImplementationSummary,
+} from "../server/implementation-publication.ts";
 
 const execFileAsync = promisify(execFile);
 const changeId = "resolve-implementation-findings";
 const parentBranch = `change/${changeId}`;
-const branch = `planning/${changeId}`;
+const branch = `implementation/${changeId}`;
 const reviewedBase = "a".repeat(40);
 const reviewedHead = "b".repeat(40);
 const publishInput = {
@@ -170,13 +170,27 @@ async function createRepository(context, findingIds = ["F1", "F3"], { report = t
       number: 44,
       url: "https://github.com/example/project/pull/44",
       state: "OPEN",
-      isDraft: false,
+      isDraft: true,
       isCrossRepository: false,
       baseRefName: parentBranch,
       headRefName: branch,
       headRefOid: baselineCommit,
-      title: reviewPullRequestTitle(changeId),
-      body: reviewPullRequestBody(changeId),
+      title: implementationPullRequestTitle(changeId),
+      body: renderImplementationSummary({
+        changeId,
+        changeBranch: parentBranch,
+        implementationBranch: branch,
+        rootBaselineCommit: reviewedBase,
+        repository: {
+          host: "github.com",
+          nameWithOwner: "example/project",
+          url: "https://github.com/example/project",
+        },
+        publication: { kind: "unpublished" },
+        batch: { kind: "empty", baseCommit: reviewedBase },
+        lastDeliveryHead: reviewedHead,
+        processedFeedbackFingerprints: [],
+      }),
     },
   };
 }
@@ -290,6 +304,7 @@ test("plan выбирает первую implementation finding, а отсутс
   assert.deepEqual(await missingService.plan(missingFixture.workspace, changeId, branch), {
     kind: "no-findings",
     reviewPath: `openspec/changes/${changeId}/implementation-review.md`,
+    headCommit: missingFixture.baselineCommit,
   });
 });
 
@@ -606,7 +621,7 @@ test("prompt содержит точный skill, два разрешения, c
   assert.match(prompt, /separate second explicit permission/);
   assert.match(
     prompt,
-    /git push --set-upstream origin planning\/resolve-implementation-findings/,
+    /git push --set-upstream origin implementation\/resolve-implementation-findings/,
   );
   assert.match(prompt, /complete_implementation_review_finding/);
   assert.match(prompt, /"mode":"publish"/);

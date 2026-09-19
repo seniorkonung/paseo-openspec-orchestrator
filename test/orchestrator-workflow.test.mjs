@@ -9,14 +9,21 @@ import { REQUIRED_AGENT_PROFILE_NAMES } from "../server/agent-profiles.ts";
 import { readGitBranch } from "../server/git-branch.ts";
 import { readGitWorktreeStatus } from "../server/git-worktree.ts";
 import { OpenSpecOrchestratorEngine } from "../server/openspec-orchestrator-engine.ts";
-import { OrchestratorController } from "../server/orchestrator-controller.ts";
 import { OrchestratorLedger } from "../server/orchestrator-ledger.ts";
 import { createOpenSpecWorkflow } from "../server/workflow/steps/index.ts";
+import { workflowCheckpointSchema } from "../server/workflow/types.ts";
 
 const execFileAsync = promisify(execFile);
 const changeId = "selected-change";
 const changeBranch = `change/${changeId}`;
 const planningBranch = `planning/${changeId}`;
+const implementationBranch = `implementation/${changeId}`;
+const hashes = Object.fromEntries("abcdefgh".split("").map((key) => [key, key.repeat(40)]));
+const repository = {
+  host: "github.com",
+  nameWithOwner: "example/project",
+  url: "https://github.com/example/project",
+};
 
 async function temporaryHome(context, prefix = "openspec-workflow-") {
   const directory = await mkdtemp(join(tmpdir(), prefix));
@@ -25,515 +32,414 @@ async function temporaryHome(context, prefix = "openspec-workflow-") {
 }
 
 async function settleWorkflow() {
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  await new Promise((resolve) => setTimeout(resolve, 200));
 }
 
-function requiredAgentProfiles() {
+function profiles() {
   return REQUIRED_AGENT_PROFILE_NAMES.map((name) => ({
     id: `profile-${name.toLowerCase().replaceAll(" ", "-")}`,
     name,
     provider: "codex",
-    model: "gpt-5.5",
+    model: "gpt-6-astra",
     modeId: "default",
-    thinkingOptionId: "medium",
+    thinkingOptionId: "high",
   }));
 }
 
-function mergedPlanningSession() {
-  return {
-    changeId,
-    changeBranch,
-    planningBranch,
-    planningPullRequestNumber: 43,
-    mergedPlanningHead: "d".repeat(40),
-    repositoryHost: "github.com",
-    repositoryNameWithOwner: "example/project",
-    repositoryUrl: "https://github.com/example/project",
-  };
-}
-
-function workflowHarness(options = {}) {
+function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree } = {}) {
   const calls = [];
-  let branchRead = 0;
-  let mergeInspection = 0;
-  const rootPullRequest = {
-    number: 41,
-    url: "https://github.com/example/project/pull/41",
+  let branchReads = 0;
+  let planningInspections = 0;
+  let taskPlans = 0;
+  let feedbackInspections = 0;
+  const feedbackItem = {
+    source: "comment",
+    nodeId: "IC_kwDOExample",
+    updatedAt: "2026-09-19T10:00:00Z",
+    body: "Проверьте обработку ошибки",
+    fingerprint: "9".repeat(64),
   };
-  const planningPullRequest = {
-    number: 43,
-    url: "https://github.com/example/project/pull/43",
-    title: "Первичное ревью OpenSpec change",
+  const implementationPullRequest = {
+    number: 51,
+    url: "https://github.com/example/project/pull/51",
+    title: `Реализация OpenSpec change «${changeId}»`,
   };
-
   const workflow = createOpenSpecWorkflow({
     workspaceDirectory: "/workspace/project",
-    readAgentProfiles:
-      options.readAgentProfiles ?? (async () => requiredAgentProfiles()),
-    gitBranch: async () => {
-      branchRead += 1;
-      return {
-        kind: "non-main",
-        name: branchRead === 1 ? changeBranch : planningBranch,
-      };
+    readAgentProfiles: async () => profiles(),
+    gitBranch: async () => ({
+      kind: "non-main",
+      name: ++branchReads === 1 ? changeBranch : planningBranch,
+    }),
+    gitWorktree: worktree ?? (async () => ({ kind: "clean" })),
+    miseToolchain: async () => ({ kind: "available" }),
+    implementationRunVerification: {
+      async assertCurrent(_workspace, run) {
+        calls.push("implementation.verify");
+        return run.batch.kind === "reviewed"
+          ? run.batch.reviewCommit
+          : run.batch.kind === "collecting"
+            ? run.batch.headCommit
+            : run.batch.baseCommit;
+      },
     },
-    gitWorktree: options.gitWorktree ?? (async () => ({ kind: "clean" })),
-    miseToolchain: options.miseToolchain ?? (async () => ({ kind: "available" })),
     changeInitialization: {
-      async prepare(_workspace, selectedId, rootBranch) {
-        calls.push(["initialize.prepare", selectedId, rootBranch]);
+      async prepare() {
+        calls.push("initialize.prepare");
         return {
-          changeId: selectedId,
-          changeBranch: rootBranch,
-          baselineCommit: "a".repeat(40),
-          changeExisted: options.changeExisted ?? true,
+          changeId,
+          changeBranch,
+          baselineCommit: hashes.a,
+          changeExisted: true,
           openSpecRoot: "/workspace/project",
           existingRootPullRequest: null,
         };
       },
       async initialize(_workspace, session) {
-        calls.push(["initialize.initialize", session.changeBranch]);
+        calls.push("initialize.initialize");
         return {
           change: { id: session.changeId },
-          changeBranch: session.changeBranch,
-          pullRequest: rootPullRequest,
+          changeBranch,
+          pullRequest: { number: 41, url: "https://github.com/example/project/pull/41" },
         };
       },
     },
     planningBranch: {
-      async prepare(_workspace, selectedId, rootBranch) {
-        calls.push(["planning.prepare", selectedId, rootBranch]);
-        return {
-          changeId: selectedId,
-          changeBranch: rootBranch,
-          planningBranch,
-          baselineCommit: "a".repeat(40),
-        };
+      async prepare() {
+        calls.push("planning.prepare");
+        return { changeId, changeBranch, planningBranch, baselineCommit: hashes.a };
       },
-      async activate(_workspace, session) {
-        calls.push(["planning.activate", session.planningBranch]);
-        return session.planningBranch;
+      async activate() {
+        calls.push("planning.activate");
+        return planningBranch;
       },
     },
-    verifyChange: async (_workspace, selectedId) => {
-      calls.push(["change.verify", selectedId]);
-      return { id: selectedId };
+    verifyChange: async () => {
+      calls.push("change.verify");
+      return { id: changeId };
     },
     changeArtifacts: {
-      async inspect() {
-        calls.push(["artifacts.inspect"]);
-        return { kind: "complete", schemaName: "spec-driven" };
-      },
-      async prepare() {
-        throw new Error("Завершённому change не нужен следующий артефакт");
-      },
-      async create() {
-        throw new Error("Завершённому change не нужен агент артефакта");
-      },
-      async verifyApply() {
-        calls.push(["artifacts.verifyApply"]);
-      },
+      async inspect() { return { kind: "complete", schemaName: "spec-driven" }; },
+      async prepare() { throw new Error("не требуется"); },
+      async create() { throw new Error("не требуется"); },
+      async verifyApply() {},
     },
     changePublication: {
       async publish(request) {
-        calls.push([
-          "publication.publish",
-          request.changeBranch,
-          request.activeBranch,
-        ]);
-        request.onAgentCreated("agent-publication");
-        return {
-          number: rootPullRequest.number,
-          url: rootPullRequest.url,
-          title: "Опубликовать change",
-        };
+        calls.push("publication.publish");
+        request.onAgentCreated("publication-agent");
+        return { number: 41, url: "https://github.com/example/project/pull/41", title: "Change" };
       },
     },
     changeReview: {
-      async plan(_workspace, selectedId, rootBranch, activeBranch) {
-        calls.push(["review.plan", rootBranch, activeBranch]);
+      async plan() {
         return {
-          changeId: selectedId,
-          parentBranch: rootBranch,
-          reviewBranch: activeBranch,
-          parentBaselineCommit: "a".repeat(40),
-          baselineCommit: "c".repeat(40),
-          repositoryHost: "github.com",
-          repositoryNameWithOwner: "example/project",
-          repositoryUrl: "https://github.com/example/project",
-          parentPullRequestNumber: rootPullRequest.number,
+          changeId,
+          parentBranch: changeBranch,
+          reviewBranch: planningBranch,
+          parentBaselineCommit: hashes.a,
+          baselineCommit: hashes.b,
+          repositoryHost: repository.host,
+          repositoryNameWithOwner: repository.nameWithOwner,
+          repositoryUrl: repository.url,
+          parentPullRequestNumber: 41,
         };
       },
       async run(request) {
-        calls.push(["review.run", request.session.reviewBranch]);
-        request.onAgentCreated("agent-review");
+        request.onAgentCreated("planning-review-agent");
         return {
           changeId,
           reviewPath: `openspec/changes/${changeId}/review.md`,
           branch: planningBranch,
-          pullRequest: planningPullRequest,
+          pullRequest: { number: 43, url: "https://github.com/example/project/pull/43", title: "Review" },
         };
       },
     },
     changeFindingResolution: {
-      async plan(_workspace, selectedId, branch) {
-        calls.push(["findings.plan", branch]);
+      async plan(_workspace, _change, branch) {
+        calls.push(`review-findings:${branch}`);
         return {
           kind: "no-findings",
-          reviewPath: `openspec/changes/${selectedId}/review.md`,
+          reviewPath: `openspec/changes/${changeId}/review.md`,
+          headCommit: branch === planningBranch ? hashes.c : hashes.f,
         };
       },
-      async run() {
-        throw new Error("Findings отсутствуют");
-      },
-    },
-    implementationFindingResolution: {
-      async plan(_workspace, selectedId, branch) {
-        calls.push(["implementation-findings.plan", branch]);
-        return {
-          kind: "no-findings",
-          reviewPath: `openspec/changes/${selectedId}/implementation-review.md`,
-        };
-      },
-      async run() {
-        throw new Error("Implementation findings отсутствуют");
-      },
+      async run() { throw new Error("findings отсутствуют"); },
     },
     planningMerge: {
-      async inspect(_workspace, selectedId, rootBranch, activeBranch) {
-        mergeInspection += 1;
-        calls.push(["merge.inspect", rootBranch, activeBranch]);
-        if (options.mergeOpenOnce && mergeInspection === 1) {
-          return { kind: "open", pullRequest: planningPullRequest };
+      async inspect() {
+        planningInspections += 1;
+        if (mergeOpenOnce && planningInspections === 1) {
+          return { kind: "open", pullRequest: { number: 43, url: "https://github.com/example/project/pull/43", title: "Review" } };
         }
-        return { kind: "merged", session: mergedPlanningSession() };
+        return {
+          kind: "merged",
+          session: {
+            changeId,
+            changeBranch,
+            planningBranch,
+            planningPullRequestNumber: 43,
+            mergedPlanningHead: hashes.c,
+            repositoryHost: repository.host,
+            repositoryNameWithOwner: repository.nameWithOwner,
+            repositoryUrl: repository.url,
+          },
+        };
       },
-      async complete(_workspace, session) {
-        calls.push(["merge.complete", session.changeBranch]);
-        return session.changeBranch;
+      async complete() { calls.push("planning.merge"); return changeBranch; },
+    },
+    implementationBranch: {
+      async prepare() {
+        calls.push("implementation.prepare");
+        return { changeId, changeBranch, implementationBranch, rootBaselineCommit: hashes.d, repository };
+      },
+      async activate() {
+        calls.push("implementation.activate");
+        return {
+          changeId,
+          changeBranch,
+          implementationBranch,
+          rootBaselineCommit: hashes.d,
+          repository,
+          publication: { kind: "unpublished" },
+          batch: { kind: "empty", baseCommit: hashes.d },
+          lastDeliveryHead: null,
+          processedFeedbackFingerprints: [],
+        };
       },
     },
     changeTaskExecution: {
-      async plan(_workspace, selectedId, branch) {
-        calls.push(["tasks.plan", selectedId, branch]);
-        return { kind: "complete", schemaName: "spec-driven" };
+      async plan() {
+        taskPlans += 1;
+        calls.push("tasks.plan");
+        if (taskPlans > 1) return { kind: "complete", schemaName: "spec-driven" };
+        return {
+          kind: "next-task",
+          session: {
+            changeId,
+            schemaName: "spec-driven",
+            taskId: "task-a",
+            taskNumber: "1.1",
+            taskDescription: "1.1 Реализовать поведение",
+            changeBranch,
+            implementationBranch,
+            rootBaselineCommit: hashes.d,
+            baselineCommit: hashes.d,
+            tasksBeforeDigest: "1".repeat(64),
+            tasksAfterDigest: "2".repeat(64),
+            progressTotal: 1,
+            progressComplete: 0,
+            repositoryHost: repository.host,
+            repositoryNameWithOwner: repository.nameWithOwner,
+            repositoryUrl: repository.url,
+          },
+        };
       },
-      async run() {
-        throw new Error("Все задачи уже выполнены");
+      async run(request) {
+        request.onAgentCreated("task-agent");
+        const result = {
+          changeId,
+          taskId: "task-a",
+          taskNumber: "1.1",
+          branch: implementationBranch,
+          commit: hashes.e,
+          remainingTasks: 0,
+        };
+        await request.onTaskCompleted(result);
+        return result;
+      },
+    },
+    implementationReview: {
+      async plan(_workspace, run) {
+        return {
+          changeId,
+          changeBranch,
+          implementationBranch,
+          rootBaselineCommit: hashes.d,
+          baseCommit: run.batch.baseCommit,
+          reviewedHead: run.batch.headCommit,
+          tasks: run.batch.tasks,
+          repository,
+        };
+      },
+      async run(request) {
+        request.onAgentCreated("implementation-review-agent");
+        const result = {
+          changeId,
+          branch: implementationBranch,
+          baseCommit: hashes.d,
+          reviewedHead: hashes.e,
+          reviewCommit: hashes.f,
+          pullRequest: implementationPullRequest,
+        };
+        await request.onReviewCompleted(result);
+        return result;
+      },
+    },
+    implementationFindingResolution: {
+      async plan() {
+        calls.push("implementation-findings");
+        return {
+          kind: "no-findings",
+          reviewPath: `openspec/changes/${changeId}/implementation-review.md`,
+          headCommit: hashes.f,
+        };
+      },
+      async run() { throw new Error("findings отсутствуют"); },
+    },
+    implementationPullRequest: {
+      async inspectFeedback() {
+        calls.push("feedback.inspect");
+        feedbackInspections += 1;
+        return feedbackOnce && feedbackInspections === 1
+          ? { kind: "feedback", items: [feedbackItem] }
+          : { kind: "clean" };
+      },
+      async markReady() { calls.push("pr.ready"); return { kind: "clean" }; },
+      async inspectReadyGate() {
+        calls.push("merge.gate");
+        return {
+          kind: "merged",
+          session: {
+            changeId,
+            changeBranch,
+            implementationBranch,
+            rootBaselineCommit: hashes.d,
+            finalImplementationHead: hashes.f,
+            pullRequestNumber: 51,
+          },
+        };
+      },
+      async completeMerge() { calls.push("implementation.merge"); return hashes.g; },
+    },
+    prFeedbackReview: {
+      async plan(_workspace, run, items) {
+        calls.push("feedback.plan");
+        return {
+          changeId,
+          changeBranch,
+          implementationBranch,
+          rootBaselineCommit: hashes.d,
+          rangeHead: hashes.e,
+          baselineCommit: run.batch.baseCommit,
+          reportBlob: "8".repeat(40),
+          repository,
+          items,
+        };
+      },
+      async run(request) {
+        calls.push("feedback.run");
+        request.onAgentCreated("feedback-agent");
+        const result = {
+          changeId,
+          branch: implementationBranch,
+          mode: "no-report-change",
+          head: hashes.f,
+          processedFingerprints: [feedbackItem.fingerprint],
+        };
+        await request.onFeedbackReviewed(result);
+        return result;
       },
     },
   });
-
   return { workflow, calls };
 }
 
-async function createEngine(context, harness) {
+async function engineHarness(context, workflow) {
   const paseoHome = await temporaryHome(context);
   const ledger = new OrchestratorLedger({ paseoHome });
-  await ledger.open("workspace-1");
+  await ledger.open("workspace");
   const engine = new OpenSpecOrchestratorEngine(ledger);
-  engine.initialize("workspace-1", {
+  engine.initialize("workspace", {
     workspaceDisplay: { projectName: null, workspaceName: null },
-    refreshWorkspaceDisplay: async () => ({
-      projectName: null,
-      workspaceName: null,
-    }),
-    workflow: harness.workflow,
+    refreshWorkspaceDisplay: async () => ({ projectName: null, workspaceName: null }),
+    workflow,
   });
-  context.after(async () => {
-    await engine.dispose();
-    await ledger.close();
-  });
+  context.after(async () => { await engine.dispose(); await ledger.close(); });
   return { engine, ledger };
 }
 
 test("определяет реальную Git-ветку и состояние рабочего дерева", async (context) => {
   const workspace = await temporaryHome(context, "openspec-git-");
   await execFileAsync("git", ["init", "-b", changeBranch], { cwd: workspace });
-  assert.deepEqual(await readGitBranch(workspace), {
-    kind: "non-main",
-    name: changeBranch,
-  });
+  assert.deepEqual(await readGitBranch(workspace), { kind: "non-main", name: changeBranch });
   assert.deepEqual(await readGitWorktreeStatus(workspace), { kind: "clean" });
-  await writeFile(join(workspace, "untracked.txt"), "изменение\n");
+  await writeFile(join(workspace, "dirty.txt"), "изменение\n");
   assert.deepEqual(await readGitWorktreeStatus(workspace), { kind: "dirty" });
 });
 
-test("Git probe различает main, non-main, detached HEAD и небезопасный вывод", async () => {
+test("workflow выполняет задачи, review и merge в одной implementation-ветке", async (context) => {
+  const harness = workflowHarness();
+  const { engine, ledger } = await engineHarness(context, harness.workflow);
+  engine.command("workspace", "start");
+  await settleWorkflow();
+  const snapshot = ledger.get("workspace");
+  assert.equal(snapshot.lifecycle.status, "completed");
+  assert.ok(harness.calls.includes("implementation.prepare"));
+  assert.equal(harness.calls.filter((call) => call === "tasks.plan").length, 3);
   assert.deepEqual(
-    await readGitBranch("/workspace", { command: async () => "main\n" }),
-    { kind: "main", name: "main" },
+    snapshot.history.flatMap(({ links }) => links).map(({ agentId }) => agentId),
+    ["publication-agent", "planning-review-agent", "task-agent", "implementation-review-agent"],
   );
-  assert.deepEqual(
-    await readGitBranch("/workspace", {
-      command: async () => `${changeBranch}\n`,
-    }),
-    { kind: "non-main", name: changeBranch },
-  );
-  assert.deepEqual(
-    await readGitBranch("/workspace", { command: async () => "\n" }),
-    { kind: "detached" },
-  );
-  await assert.rejects(
-    readGitBranch("/workspace", {
-      command: async () => "change/unsafe\u0001branch\n",
-    }),
-    /недопустимое имя ветки/,
-  );
+  assert.equal(ledger.getWorkflowCheckpoint("workspace"), null);
 });
 
-test("полный workflow получает change из root-ветки и запускает задачи после merge", async (context) => {
-  const harness = workflowHarness();
-  const { engine, ledger } = await createEngine(context, harness);
-  engine.command("workspace-1", "start");
+test("PR feedback проходит отдельный audit и возвращается в task-цикл", async (context) => {
+  const harness = workflowHarness({ feedbackOnce: true });
+  const { engine, ledger } = await engineHarness(context, harness.workflow);
+  engine.command("workspace", "start");
   await settleWorkflow();
-
-  const snapshot = ledger.get("workspace-1");
+  const snapshot = ledger.get("workspace");
   assert.equal(snapshot.lifecycle.status, "completed");
-  assert.equal(snapshot.change?.id, changeId);
-  assert.deepEqual(harness.calls, [
-    ["initialize.prepare", changeId, changeBranch],
-    ["initialize.initialize", changeBranch],
-    ["planning.prepare", changeId, changeBranch],
-    ["planning.activate", planningBranch],
-    ["change.verify", changeId],
-    ["artifacts.inspect"],
-    ["artifacts.verifyApply"],
-    ["change.verify", changeId],
-    ["artifacts.inspect"],
-    ["artifacts.verifyApply"],
-    ["publication.publish", changeBranch, planningBranch],
-    ["review.plan", changeBranch, planningBranch],
-    ["review.run", planningBranch],
-    ["findings.plan", planningBranch],
-    ["implementation-findings.plan", planningBranch],
-    ["merge.inspect", changeBranch, planningBranch],
-    ["merge.complete", changeBranch],
-    ["change.verify", changeId],
-    ["tasks.plan", changeId, changeBranch],
-  ]);
+  assert.equal(harness.calls.filter((call) => call === "feedback.run").length, 1);
+  assert.ok(harness.calls.indexOf("feedback.run") < harness.calls.lastIndexOf("tasks.plan"));
   assert.ok(
-    snapshot.history.some(({ text }) =>
-      text === `Planning PR слит; workflow продолжен из ${changeBranch}`
+    snapshot.history.flatMap(({ links }) => links).some(({ agentId }) =>
+      agentId === "feedback-agent"
     ),
   );
-  assert.deepEqual(
-    snapshot.history
-      .flatMap(({ links }) => links)
-      .map(({ agentId }) => agentId),
-    ["agent-publication", "agent-review"],
-  );
 });
 
-test("открытый planning PR останавливает workflow и Retry продолжает после merge", async (context) => {
+test("открытый planning PR сохраняет checkpoint v4 и Retry продолжает цикл", async (context) => {
   const harness = workflowHarness({ mergeOpenOnce: true });
-  const { engine, ledger } = await createEngine(context, harness);
-  engine.command("workspace-1", "start");
+  const { engine, ledger } = await engineHarness(context, harness.workflow);
+  engine.command("workspace", "start");
   await settleWorkflow();
-
-  let snapshot = ledger.get("workspace-1");
+  let snapshot = ledger.get("workspace");
   assert.equal(snapshot.lifecycle.status, "failed");
-  assert.equal(snapshot.lifecycle.availableCommand, "retry");
-  assert.match(snapshot.history.at(-1).text, /Planning PR #43 ожидает merge/);
-  const checkpoint = ledger.getWorkflowCheckpoint("workspace-1");
-  assert.equal(checkpoint?.version, 3);
-  assert.equal(checkpoint?.nextStepId, "await-planning-merge");
-  assert.equal(checkpoint?.state.changeBranch, changeBranch);
-  assert.equal(checkpoint?.state.activeBranch, planningBranch);
-
-  engine.command("workspace-1", "retry");
+  const checkpoint = ledger.getWorkflowCheckpoint("workspace");
+  assert.equal(checkpoint.version, 4);
+  assert.equal(checkpoint.nextStepId, "await-planning-merge");
+  engine.command("workspace", "retry");
   await settleWorkflow();
-  snapshot = ledger.get("workspace-1");
+  snapshot = ledger.get("workspace");
   assert.equal(snapshot.lifecycle.status, "completed");
-  assert.equal(
-    harness.calls.filter(([name]) => name === "publication.publish").length,
-    1,
-  );
-  assert.deepEqual(harness.calls.at(-1), ["tasks.plan", changeId, changeBranch]);
+  assert.equal(harness.calls.filter((call) => call === "publication.publish").length, 1);
 });
 
-test("dirty worktree блокирует эффекты и Retry повторяет проверку", async (context) => {
-  let worktreeReads = 0;
+test("грязное дерево блокирует эффекты до Retry", async (context) => {
+  let reads = 0;
   const harness = workflowHarness({
-    gitWorktree: async () => {
-      worktreeReads += 1;
-      return { kind: worktreeReads === 1 ? "dirty" : "clean" };
-    },
+    worktree: async () => ({ kind: ++reads === 1 ? "dirty" : "clean" }),
   });
-  const { engine, ledger } = await createEngine(context, harness);
-  engine.command("workspace-1", "start");
+  const { engine, ledger } = await engineHarness(context, harness.workflow);
+  engine.command("workspace", "start");
   await settleWorkflow();
-  assert.equal(ledger.get("workspace-1").lifecycle.status, "failed");
+  assert.equal(ledger.get("workspace").lifecycle.status, "failed");
   assert.equal(harness.calls.length, 0);
-
-  engine.command("workspace-1", "retry");
+  engine.command("workspace", "retry");
   await settleWorkflow();
-  assert.equal(ledger.get("workspace-1").lifecycle.status, "completed");
-  assert.equal(worktreeReads, 3);
+  assert.equal(ledger.get("workspace").lifecycle.status, "completed");
 });
 
-test("невалидная root-ветка блокирует workflow до OpenSpec и GitHub", async (context) => {
-  const harness = workflowHarness();
-  const invalidWorkflow = createOpenSpecWorkflow({
-    ...workflowDependenciesForBlockedBranch(),
-    gitBranch: async () => ({ kind: "non-main", name: planningBranch }),
-  });
-  const invalidHarness = { workflow: invalidWorkflow };
-  const { engine, ledger } = await createEngine(context, invalidHarness);
-  engine.command("workspace-1", "start");
-  await settleWorkflow();
-  const snapshot = ledger.get("workspace-1");
-  assert.equal(snapshot.lifecycle.status, "failed");
-  assert.match(snapshot.history.at(-1).text, /change\/<change-id>/);
-  assert.equal(harness.calls.length, 0);
-});
-
-test("checkpoint v3 восстанавливает точный шаг и пару root/active веток", async (context) => {
-  const paseoHome = await temporaryHome(context);
-  const ledger = new OrchestratorLedger({ paseoHome });
-  await ledger.open("workspace-recovery");
-  let executions = 0;
-  const workflow = {
-    startStepId: "save-branches",
-    steps: [
-      {
-        id: "save-branches",
-        label: "Сохраняю ветки",
-        async run() {
-          return {
-            kind: "continue",
-            next: "recover-here",
-            state: {
-              changeBranch,
-              activeBranch: planningBranch,
-              change: { id: changeId },
-            },
-          };
-        },
-      },
-      {
-        id: "recover-here",
-        label: "Восстанавливаю шаг",
-        async run({ state }) {
-          executions += 1;
-          assert.equal(state.changeBranch, changeBranch);
-          assert.equal(state.activeBranch, planningBranch);
-          return executions === 1
-            ? { kind: "halt", summary: "Ожидаю retry", message: "Повторите" }
-            : { kind: "complete", summary: "Восстановлено" };
-        },
-      },
-    ],
-  };
-  const contextValue = {
-    workspaceDisplay: { projectName: null, workspaceName: null },
-    refreshWorkspaceDisplay: async () => ({ projectName: null, workspaceName: null }),
-    workflow,
-  };
-  let engine = new OpenSpecOrchestratorEngine(ledger);
-  engine.initialize("workspace-recovery", contextValue);
-  engine.command("workspace-recovery", "start");
-  await settleWorkflow();
-  assert.equal(
-    ledger.getWorkflowCheckpoint("workspace-recovery")?.nextStepId,
-    "recover-here",
-  );
-  await engine.dispose();
-
-  engine = new OpenSpecOrchestratorEngine(ledger);
-  engine.initialize("workspace-recovery", contextValue);
-  engine.command("workspace-recovery", "retry");
-  await settleWorkflow();
-  assert.equal(ledger.get("workspace-recovery").lifecycle.status, "completed");
-  await engine.dispose();
-  await ledger.close();
-});
-
-test("clear отменяет активный шаг и удаляет checkpoint", async (context) => {
-  const paseoHome = await temporaryHome(context);
-  const ledger = new OrchestratorLedger({ paseoHome });
-  await ledger.open("workspace-clear");
-  let aborted = false;
-  let markStarted;
-  const started = new Promise((resolve) => { markStarted = resolve; });
-  const engine = new OpenSpecOrchestratorEngine(ledger);
-  engine.initialize("workspace-clear", {
-    workspaceDisplay: { projectName: null, workspaceName: null },
-    refreshWorkspaceDisplay: async () => ({ projectName: null, workspaceName: null }),
-    workflow: {
-      startStepId: "wait",
-      steps: [{
-        id: "wait",
-        label: "Ожидаю",
-        run: ({ signal }) => new Promise((_resolve, reject) => {
-          markStarted();
-          signal.addEventListener("abort", () => {
-            aborted = true;
-            reject(new DOMException("Операция отменена", "AbortError"));
-          }, { once: true });
-        }),
-      }],
+test("checkpoint v3 несовместим с v4", () => {
+  assert.throws(() => workflowCheckpointSchema.parse({
+    version: 3,
+    nextStepId: "execute-change-tasks",
+    state: {
+      changeBranch,
+      activeBranch: implementationBranch,
+      change: { id: changeId },
     },
-  });
-  engine.command("workspace-clear", "start");
-  await started;
-  engine.command("workspace-clear", "clear");
-  await settleWorkflow();
-  assert.equal(aborted, true);
-  assert.equal(ledger.getWorkflowCheckpoint("workspace-clear"), null);
-  assert.deepEqual(ledger.get("workspace-clear").history, []);
-  await engine.dispose();
-  await ledger.close();
+  }));
 });
-
-test("контроллер не создаёт ledger для workspace без директории", async (context) => {
-  const paseoHome = await temporaryHome(context);
-  const ledger = new OrchestratorLedger({ paseoHome });
-  const controller = new OrchestratorController({
-    ledger,
-    createEngine: () => ({
-      initialize() {},
-      command() {},
-      async dispose() {},
-    }),
-  });
-  const paseo = {
-    workspaces: {
-      ref() {
-        return { directory: null, async refresh() { return null; } };
-      },
-    },
-  };
-  await assert.rejects(
-    controller.get("missing-workspace", paseo),
-    /не имеет директории/,
-  );
-  assert.equal(ledger.has("missing-workspace"), false);
-  await controller.close();
-});
-
-function workflowDependenciesForBlockedBranch() {
-  return {
-    workspaceDirectory: "/workspace/project",
-    readAgentProfiles: async () => requiredAgentProfiles(),
-    gitBranch: async () => ({ kind: "non-main", name: changeBranch }),
-    gitWorktree: async () => ({ kind: "clean" }),
-    miseToolchain: async () => ({ kind: "available" }),
-    changeInitialization: {
-      async prepare() { throw new Error("Не должен вызываться"); },
-      async initialize() { throw new Error("Не должен вызываться"); },
-    },
-    planningBranch: {
-      async prepare() { throw new Error("Не должен вызываться"); },
-      async activate() { throw new Error("Не должен вызываться"); },
-    },
-    verifyChange: async () => { throw new Error("Не должен вызываться"); },
-    changeArtifacts: { inspect() {}, prepare() {}, create() {}, verifyApply() {} },
-    changePublication: { publish() {} },
-    changeReview: { plan() {}, run() {} },
-    changeFindingResolution: { plan() {}, run() {} },
-    implementationFindingResolution: { plan() {}, run() {} },
-    planningMerge: { inspect() {}, complete() {} },
-    changeTaskExecution: { plan() {}, run() {} },
-  };
-}

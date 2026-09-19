@@ -39,8 +39,27 @@ export const planningBranchSchema = z
     return `planning/${parsedChangeId.data}` as const;
   });
 
+export const implementationBranchSchema = z
+  .string()
+  .min(1)
+  .max(MAX_BRANCH_LENGTH)
+  .transform((branch, context) => {
+    const match = /^implementation\/([^/]+)$/u.exec(branch);
+    const changeId = match?.[1];
+    const parsedChangeId = openSpecChangeIdSchema.safeParse(changeId);
+    if (!parsedChangeId.success || changeId !== parsedChangeId.data) {
+      context.addIssue({
+        code: "custom",
+        message: "Implementation-ветка должна иметь формат implementation/<change-id>",
+      });
+      return z.NEVER;
+    }
+    return `implementation/${parsedChangeId.data}` as const;
+  });
+
 export type ChangeBranch = z.output<typeof changeBranchSchema>;
 export type PlanningBranch = z.output<typeof planningBranchSchema>;
+export type ImplementationBranch = z.output<typeof implementationBranchSchema>;
 
 export class ChangeBranchError extends Error {
   constructor(message: string) {
@@ -69,6 +88,26 @@ export function changeBranchFor(changeId: string): ChangeBranch {
 
 export function planningBranchFor(changeId: string): PlanningBranch {
   return planningBranchSchema.parse(`planning/${openSpecChangeIdSchema.parse(changeId)}`);
+}
+
+export function implementationBranchFor(changeId: string): ImplementationBranch {
+  return implementationBranchSchema.parse(
+    `implementation/${openSpecChangeIdSchema.parse(changeId)}`,
+  );
+}
+
+export function assertImplementationBranchFor(
+  branch: string,
+  changeId: string,
+): ImplementationBranch {
+  const parsed = implementationBranchSchema.safeParse(branch);
+  const expected = implementationBranchFor(changeId);
+  if (!parsed.success || parsed.data !== expected) {
+    throw new ChangeBranchError(
+      `Для change «${openSpecChangeIdSchema.parse(changeId)}» требуется implementation-ветка «${expected}»`,
+    );
+  }
+  return parsed.data;
 }
 
 export function assertPlanningBranchFor(

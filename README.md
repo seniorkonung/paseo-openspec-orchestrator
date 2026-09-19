@@ -24,9 +24,14 @@ The plugin:
   preserving its existing Draft/Ready state;
 - creates one Ready PR from `planning/<change-id>` to `change/<change-id>` and
   waits for its manual merge;
-- returns to the saved root branch through fetch and fast-forward before
-  executing OpenSpec implementation tasks;
-- executes unfinished tasks one at a time on stacked task branches and PRs;
+- returns to the saved root branch through fetch and fast-forward, then creates
+  one collision-free `implementation/<change-id>` branch;
+- executes every unfinished task sequentially on that branch, with one agent
+  session and one Conventional Commit per task;
+- reviews each new batch of task commits, resolves both review reports, audits
+  untrusted PR feedback, and re-enters the task cycle until it is clean;
+- creates and reuses one Draft implementation PR, promotes it to Ready only
+  after a clean cycle, and waits for its manual merge;
 - delivers optional ntfy notifications;
 - gives every interactive agent only its stage-specific MCP completion tool.
 
@@ -60,15 +65,15 @@ main
   | root PR
 change/<id>                         fast-forwarded from origin
   ^
-  | first task PR
-<id>-task-1
-  ^
-  | next task PR
-<id>-task-2 ...
+  | one implementation PR (Draft while cycling, then Ready)
+implementation/<id>                all task, review, and remediation commits
 ```
 
-Task PRs are merged from the last task back toward `change/<id>`. The root PR is
-merged to `main` after the task stack has been integrated.
+The implementation branch and PR live for the entire implementation stage.
+Task branches and per-task PRs are not created. After the implementation PR is
+merged, the local root branch is updated only by fetching it and applying a
+fast-forward merge. Planning another work batch is intentionally outside this
+workflow stage.
 
 ## Architecture
 
@@ -98,14 +103,15 @@ The main boundaries are:
   receives a smaller consumer-owned dependency contract.
 - `server/openspec-orchestrator-engine.ts` handles lifecycle commands, explicit
   transitions, retry, pause, checkpoint recovery, and completion reporting.
-- `server/workflow/types.ts` defines durable state. Checkpoint version 3 stores
-  `changeBranch` separately from `activeBranch` and allows only one pending
-  external-effect session at a time.
+- `server/workflow/types.ts` defines durable state. Checkpoint version 4 stores
+  the implementation run, publication and batch unions, processed feedback
+  fingerprints, and at most one pending external-effect session.
 - `server/orchestrator-ledger.ts` persists data below
-  `$PASEO_HOME/plugin-data/paseo-openspec-orchestrator/`. A version 2 checkpoint
-  is not migrated because it cannot reconstruct the root branch safely. Its
-  ledger remains read-only and available for explicit state clearing.
-- `server/change-branch.ts` validates the root and planning namespaces.
+  `$PASEO_HOME/plugin-data/paseo-openspec-orchestrator/`. Checkpoints older than
+  version 4 are not migrated. Their ledger remains read-only and available for
+  explicit state clearing.
+- `server/change-branch.ts` validates the root, planning, and implementation
+  namespaces.
 - `server/change-initialization.ts` owns `list/new/status --json`, scaffold
   commit recovery, root push, and root PR reconciliation.
 - `server/planning-branch.ts` owns collision-free creation of the planning
@@ -120,8 +126,11 @@ The main boundaries are:
   to that same planning PR.
 - `server/planning-merge.ts` validates the PR state and performs the guarded
   return to the root branch.
-- task modules own one independently verified task commit and Ready PR per
-  iteration.
+- task modules own one independently verified task commit per iteration on the
+  shared implementation branch.
+- implementation review, publication, feedback, and merge modules own the exact
+  batch range, single Draft/Ready PR, bounded GraphQL feedback ingress, and
+  guarded return to the root branch.
 
 External JSON, Git refs, paths, repository identities, PR metadata, persisted
 state, RPC payloads, and MCP inputs are validated before entering trusted code.
@@ -171,11 +180,10 @@ Review stays on `planning/<id>`. The review agent writes or materially updates
 `review.md`, creates exactly one review commit, pushes it, and creates one Ready
 PR from `planning/<id>` to `change/<id>`. It never creates a `*-review` branch.
 
-Review and implementation-review findings are resolved one at a time through
-additional commits on the same planning branch. Their completion tools verify
-the report, commit, remote head, Ready planning PR, and deterministic PR-body
-entry. A retry can acknowledge an already published outcome without duplicating
-it.
+Before the planning merge, only `review.md` findings are resolved, one at a
+time, on the planning branch. Their completion tools verify the report, commit,
+remote head, Ready planning PR, and deterministic PR-body entry. Implementation
+review does not run before implementation exists.
 
 When findings are exhausted, the merge gate behaves as follows:
 
@@ -189,18 +197,48 @@ When findings are exhausted, the merge gate behaves as follows:
 The orchestrator revalidates the OpenSpec change after the switch and records
 the root as the active branch before starting tasks.
 
-### Implementation tasks
+### Implementation cycle and merge gate
 
 `execute-change-tasks` selects the first unfinished task returned by OpenSpec.
-The first task is based on the updated `change/<id>` root; every later task is
-based on the previous task branch. Each iteration gets one High Sandbox agent,
-one conventional commit, one push, and one Ready non-fork PR. Completion checks
-parent immutability, task-state changes, local/remote heads, commit count and
-subject, and exact GitHub metadata before advancing the stack.
+Before it starts, the orchestrator creates `implementation/<id>` exactly at the
+updated root baseline after rejecting local refs, remote refs, and historical
+PRs with that head. Every task uses the same branch. Each iteration gets one
+High agent, one Conventional Commit, and one push; the agent cannot create a
+branch or PR and does not receive PR metadata through `complete_change_task`.
+Completion checks root immutability, repository identity, the exact task-state
+transition, changed paths, commit count and subject, ancestry, and remote head.
+
+When all current tasks are done, the collected non-empty batch is reviewed by
+an Ultra Sandbox agent over its exact `base..head`. The validated report must
+cover every task commit and is the only file in one review commit. The first
+successful review creates one Draft PR from `implementation/<id>` to
+`change/<id>`; later cycles reuse it. Its managed Russian summary is updated
+without replacing user-authored text or the managed finding-results section.
+
+After every batch review, `review.md` findings are resolved first and
+`implementation-review.md` findings second, on the Draft implementation PR.
+The batch baseline is then reset at the current head and task execution starts
+again, so remediation can add tracked tasks and each new batch receives its own
+bounded review.
+
+With no tasks or findings, the orchestrator reads all ordinary PR comments,
+non-empty submitted review summaries, and unresolved review-thread comments
+through paginated GitHub GraphQL. Bodies are bounded untrusted JSON data. A
+feedback agent has no GitHub responsibility and may add a finding only after
+independently proving it against the fixed cumulative implementation range.
+Processed fingerprints include GraphQL node ID and `updatedAt`, so edits are
+audited again while rejected feedback is not repeatedly reviewed.
+
+A clean Draft PR is atomically promoted to Ready and checked again for racing
+feedback. The Ready gate halts until Retry. Retry gives merge status priority,
+returns the PR to Draft when new feedback exists, halts again when it remains
+open and clean, and rejects a closed unmerged PR. After merge, the same PR and
+final implementation head are verified before `change/<id>` is fetched and
+updated with `git merge --ff-only FETCH_HEAD`.
 
 ## Recovery and operations
 
-Every mutating stage stores a pending version 3 session before external effects.
+Every mutating stage stores a pending version 4 session before external effects.
 Recovery accepts only known intermediate states and verifies already-created
 commits, pushes, refs, and PRs. It never force-pushes, resets, reopens a closed
 PR, or silently switches from an unrelated branch.

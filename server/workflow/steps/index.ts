@@ -12,6 +12,11 @@ import type { MiseToolchainProbe } from "../../mise-toolchain.ts";
 import type { OpenSpecChangeVerifier } from "../../openspec-change.ts";
 import type { PlanningBranchService } from "../../planning-branch.ts";
 import type { PlanningMergeService } from "../../planning-merge.ts";
+import type { ImplementationBranchService } from "../../implementation-branch.ts";
+import type { ImplementationReviewService } from "../../implementation-review.ts";
+import type { ImplementationPullRequestService } from "../../implementation-pull-request.ts";
+import type { PrFeedbackReviewService } from "../../pr-feedback-review.ts";
+import type { ImplementationRunVerifier } from "../../implementation-run-verification.ts";
 import type { WorkflowDefinition } from "../types.ts";
 import { createCheckAgentProfilesStep } from "./check-agent-profiles.ts";
 import { createCheckGitBranchStep } from "./check-git-branch.ts";
@@ -27,6 +32,11 @@ import { createInitializeChangeStep } from "./initialize-change.ts";
 import { createPreparePlanningBranchStep } from "./prepare-planning-branch.ts";
 import { createInspectChangeStep } from "./inspect-change.ts";
 import { createAwaitPlanningMergeStep } from "./await-planning-merge.ts";
+import { createPrepareImplementationBranchStep } from "./prepare-implementation-branch.ts";
+import { createReviewImplementationStep } from "./review-implementation.ts";
+import { createInspectImplementationFeedbackStep } from "./inspect-implementation-feedback.ts";
+import { createReviewPrFeedbackStep } from "./review-pr-feedback.ts";
+import { createAwaitImplementationMergeStep } from "./await-implementation-merge.ts";
 
 /**
  * Все конкретные зависимости стандартного OpenSpec workflow.
@@ -44,6 +54,11 @@ export interface OpenSpecWorkflowDependencies {
   readonly changeInitialization: ChangeInitializationService;
   readonly planningBranch: PlanningBranchService;
   readonly planningMerge: PlanningMergeService;
+  readonly implementationBranch: ImplementationBranchService;
+  readonly implementationReview: ImplementationReviewService;
+  readonly implementationPullRequest: ImplementationPullRequestService;
+  readonly prFeedbackReview: PrFeedbackReviewService;
+  readonly implementationRunVerification: ImplementationRunVerifier;
   readonly verifyChange: OpenSpecChangeVerifier;
   readonly changeArtifacts: ChangeArtifactCreationService;
   readonly changePublication: ChangePublicationService;
@@ -114,21 +129,48 @@ export function createOpenSpecWorkflow(
         workspaceDirectory: dependencies.workspaceDirectory,
         readAgentProfiles: dependencies.readAgentProfiles,
         findingResolution: dependencies.changeFindingResolution,
-      }),
-      createResolveImplementationReviewFindingsStep({
-        workspaceDirectory: dependencies.workspaceDirectory,
-        readAgentProfiles: dependencies.readAgentProfiles,
-        findingResolution: dependencies.implementationFindingResolution,
+        implementationRunVerification: dependencies.implementationRunVerification,
       }),
       createAwaitPlanningMergeStep({
         workspaceDirectory: dependencies.workspaceDirectory,
         planningMerge: dependencies.planningMerge,
         verifyChange: dependencies.verifyChange,
       }),
+      createPrepareImplementationBranchStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        implementationBranch: dependencies.implementationBranch,
+      }),
       createExecuteChangeTasksStep({
         workspaceDirectory: dependencies.workspaceDirectory,
         readAgentProfiles: dependencies.readAgentProfiles,
         taskExecution: dependencies.changeTaskExecution,
+      }),
+      createReviewImplementationStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        readAgentProfiles: dependencies.readAgentProfiles,
+        implementationReview: dependencies.implementationReview,
+      }),
+      createResolveImplementationReviewFindingsStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        readAgentProfiles: dependencies.readAgentProfiles,
+        findingResolution: dependencies.implementationFindingResolution,
+        implementationRunVerification: dependencies.implementationRunVerification,
+      }),
+      createInspectImplementationFeedbackStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        pullRequest: dependencies.implementationPullRequest,
+        feedbackReview: dependencies.prFeedbackReview,
+      }),
+      createReviewPrFeedbackStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        readAgentProfiles: dependencies.readAgentProfiles,
+        feedbackReview: dependencies.prFeedbackReview,
+      }),
+      createAwaitImplementationMergeStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        pullRequest: dependencies.implementationPullRequest,
+        feedbackReview: dependencies.prFeedbackReview,
+        verifyChange: dependencies.verifyChange,
       }),
     ]),
   };

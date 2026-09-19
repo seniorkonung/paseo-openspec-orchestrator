@@ -43,6 +43,7 @@ export type ReviewFindingResolutionPlan<Session extends ReviewFindingResolutionS
   | {
       readonly kind: "no-findings";
       readonly reviewPath: string;
+      readonly headCommit: string;
     }
   | {
       readonly kind: "finding-required";

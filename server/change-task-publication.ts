@@ -2,15 +2,11 @@ import { createHash } from "node:crypto";
 import type { BoundedCommandRunner } from "./bounded-command.ts";
 import {
   assertCleanTaskWorktree as assertCleanWorktree,
-  assertReadyTaskPullRequest as assertReadyPullRequest,
   assertTaskCommitDescendsFrom as assertDescendsFrom,
-  assertTaskPullRequestRepository as assertPullRequestRepository,
-  listTaskPullRequests as listPullRequests,
   readCurrentTaskBranch as readCurrentBranch,
   readLocalTaskBranchCommit as readLocalBranchCommit,
   readOptionalRemoteTaskBranchCommit as readOptionalRemoteCommit,
   readRemoteTaskBranchCommit as readRemoteCommit,
-  readSingleOpenTaskPullRequest as readSingleOpenPullRequest,
   readTaskChangedPaths as readChangedPaths,
   readTaskCommitCount as readCommitCount,
   readTaskCommitSubject as readCommitSubject,
@@ -22,49 +18,67 @@ import {
   ChangeTaskExecutionError,
   applyInstructionsSchema,
   pendingTaskExecutionSessionSchema,
-  parseTaskBranch,
-  parseTaskChangeId,
   taskNumberSchema,
-  taskRepositoryFromSession,
   type ApplyInstructions,
   type ApplyTask,
   type ChangeTaskExecutionPlan,
   type CompletedChangeTask,
   type PendingTaskExecutionSession,
-  type TaskCompletionInput,
 } from "./change-task-model.ts";
+import {
+  implementationRunSchema,
+  type ImplementationRun,
+} from "./implementation-run-model.ts";
 import { runWorkspaceMiseCommand } from "./mise-toolchain.ts";
 
 const TASK_NUMBER_PREFIX = /^(\d+(?:\.\d+)+(?:[A-Za-z]+)?)(?=\s|$)/u;
 const CONVENTIONAL_COMMIT_SUBJECT =
   /^(?:feat|fix|refactor|test|docs|chore|build|ci|perf|style)(?:\([^\p{Cc}\p{Cf}\r\n()]{1,64}\))?!?: .+/u;
-const UNSTABLE_PR_TITLE = /\b(?:wip|draft)\b|чернов/iu;
 
 export interface TaskExecutionRecoveryState {
   readonly alreadyCommitted: boolean;
-  readonly existingPullRequest: number | null;
 }
 
 export async function planChangeTaskExecution(
   command: BoundedCommandRunner,
   workspaceDirectory: string,
-  changeIdInput: string,
-  branchInput: string,
+  runInput: ImplementationRun,
   signal?: AbortSignal,
 ): Promise<ChangeTaskExecutionPlan> {
-  const changeId = parseTaskChangeId(changeIdInput);
-  const parentBranch = parseTaskBranch(branchInput);
+  const run = implementationRunSchema.parse(runInput);
   const instructions = await readApplyInstructions(
     command,
     workspaceDirectory,
-    changeId,
+    run.changeId,
     signal,
   );
   if (instructions.state === "blocked") {
     throw new ChangeTaskExecutionError(
-      `OpenSpec apply для change «${changeId}» заблокирован: ${instructions.instruction}`,
+      `OpenSpec apply для change «${run.changeId}» заблокирован: ${instructions.instruction}`,
     );
   }
+  const gitRoot = await readTaskGitRoot(command, workspaceDirectory, signal);
+  await assertCleanWorktree(command, gitRoot, signal);
+  const [currentBranch, baselineCommit] = await Promise.all([
+    readCurrentBranch(command, gitRoot, signal),
+    readHeadCommit(command, gitRoot, signal),
+  ]);
+  if (currentBranch !== run.implementationBranch) {
+    throw new ChangeTaskExecutionError(
+      `Текущей должна быть implementation-ветка «${run.implementationBranch}»`,
+    );
+  }
+  const expectedHead = run.batch.kind === "empty"
+    ? run.batch.baseCommit
+    : run.batch.kind === "collecting"
+      ? run.batch.headCommit
+      : run.batch.reviewCommit;
+  if (baselineCommit !== expectedHead) {
+    throw new ChangeTaskExecutionError(
+      "Git HEAD не совпадает с сохранённым implementation-run",
+    );
+  }
+  await assertImplementationRunState(command, gitRoot, run, baselineCommit, signal);
   if (instructions.state === "all_done") {
     return { kind: "complete", schemaName: instructions.schemaName };
   }
@@ -76,69 +90,6 @@ export async function planChangeTaskExecution(
       "OpenSpec сообщает о незавершённой реализации, но не возвращает адресуемую задачу",
     );
   }
-  const taskBranch = parseTaskBranch(`${changeId}-task-${selected.number}`);
-  const gitRoot = await readTaskGitRoot(command, workspaceDirectory, signal);
-  await assertCleanWorktree(command, gitRoot, signal);
-  const [currentBranch, baselineCommit, repository] = await Promise.all([
-    readCurrentBranch(command, gitRoot, signal),
-    readHeadCommit(command, gitRoot, signal),
-    resolveRepository(command, gitRoot, signal),
-  ]);
-  if (currentBranch !== parentBranch) {
-    throw new ChangeTaskExecutionError(
-      `Текущая Git-ветка изменилась с «${parentBranch}» на «${currentBranch}»`,
-    );
-  }
-  const remoteParent = await readRemoteCommit(
-    command,
-    gitRoot,
-    parentBranch,
-    signal,
-  );
-  if (remoteParent !== baselineCommit) {
-    throw new ChangeTaskExecutionError(
-      `Git remote origin не содержит текущий HEAD parent-ветки «${parentBranch}»`,
-    );
-  }
-
-  const parentPullRequest = await readSingleOpenPullRequest(
-    command,
-    gitRoot,
-    repository,
-    parentBranch,
-    signal,
-  );
-  assertPullRequestRepository(parentPullRequest, repository.url);
-  assertReadyPullRequest(parentPullRequest, {
-    baseBranch: parentPullRequest.baseRefName,
-    headBranch: parentBranch,
-    headCommit: baselineCommit,
-    label: "Parent pull request",
-  });
-
-  if ((await readLocalBranchCommit(command, gitRoot, taskBranch, signal)) !== null) {
-    throw new ChangeTaskExecutionError(
-      `Локальная task-ветка «${taskBranch}» уже существует`,
-    );
-  }
-  if ((await readOptionalRemoteCommit(command, gitRoot, taskBranch, signal)) !== null) {
-    throw new ChangeTaskExecutionError(
-      `Task-ветка «${taskBranch}» уже существует в Git remote origin`,
-    );
-  }
-  const historicalPullRequests = await listPullRequests(
-    command,
-    gitRoot,
-    repository,
-    taskBranch,
-    "all",
-    signal,
-  );
-  if (historicalPullRequests.length > 0) {
-    throw new ChangeTaskExecutionError(
-      `Для task-ветки «${taskBranch}» уже существует pull request`,
-    );
-  }
 
   const expectedTasks = instructions.tasks.map((task) =>
     task.id === selected.task.id ? { ...task, done: true } : task,
@@ -146,23 +97,22 @@ export async function planChangeTaskExecution(
   return {
     kind: "next-task",
     session: pendingTaskExecutionSessionSchema.parse({
-      changeId,
+      changeId: run.changeId,
       schemaName: instructions.schemaName,
       taskId: selected.task.id,
       taskNumber: selected.number,
       taskDescription: selected.task.description,
-      parentBranch,
-      parentBaseBranch: parentPullRequest.baseRefName,
-      taskBranch,
+      changeBranch: run.changeBranch,
+      implementationBranch: run.implementationBranch,
+      rootBaselineCommit: run.rootBaselineCommit,
       baselineCommit,
       tasksBeforeDigest: taskListDigest(instructions.tasks),
       tasksAfterDigest: taskListDigest(expectedTasks),
       progressTotal: instructions.progress.total,
       progressComplete: instructions.progress.complete,
-      repositoryHost: repository.host,
-      repositoryNameWithOwner: repository.nameWithOwner,
-      repositoryUrl: repository.url,
-      parentPullRequestNumber: parentPullRequest.number,
+      repositoryHost: run.repository.host,
+      repositoryNameWithOwner: run.repository.nameWithOwner,
+      repositoryUrl: run.repository.url,
     }),
   };
 }
@@ -171,55 +121,12 @@ export async function inspectTaskExecutionRecovery(
   command: BoundedCommandRunner,
   workspaceDirectory: string,
   gitRoot: string,
-  session: PendingTaskExecutionSession,
+  sessionInput: PendingTaskExecutionSession,
   signal: AbortSignal,
 ): Promise<TaskExecutionRecoveryState> {
+  const session = pendingTaskExecutionSessionSchema.parse(sessionInput);
   await assertCleanWorktree(command, gitRoot, signal);
-  await assertParentState(command, gitRoot, session, signal);
-  const currentBranch = await readCurrentBranch(command, gitRoot, signal);
-  if (currentBranch !== session.parentBranch && currentBranch !== session.taskBranch) {
-    throw new ChangeTaskExecutionError(
-      `Для восстановления задачи требуется ветка «${session.parentBranch}» или «${session.taskBranch}», активна «${currentBranch}»`,
-    );
-  }
-
-  const localTaskHead = await readLocalBranchCommit(
-    command,
-    gitRoot,
-    session.taskBranch,
-    signal,
-  );
-  const remoteTaskHead = await readOptionalRemoteCommit(
-    command,
-    gitRoot,
-    session.taskBranch,
-    signal,
-  );
-  if (currentBranch === session.taskBranch && localTaskHead === null) {
-    throw new ChangeTaskExecutionError(
-      "Активная task-ветка отсутствует среди локальных refs",
-    );
-  }
-  if (localTaskHead !== null) {
-    await assertDescendsFrom(
-      command,
-      gitRoot,
-      session.baselineCommit,
-      localTaskHead,
-      "Task-ветка больше не продолжает сохранённый baseline",
-      signal,
-    );
-  }
-  if (
-    remoteTaskHead !== null &&
-    remoteTaskHead !== session.baselineCommit &&
-    remoteTaskHead !== localTaskHead
-  ) {
-    throw new ChangeTaskExecutionError(
-      `Git remote origin содержит неожиданное состояние task-ветки «${session.taskBranch}»`,
-    );
-  }
-
+  await assertTaskSessionState(command, gitRoot, session, signal);
   const instructions = await readApplyInstructions(
     command,
     workspaceDirectory,
@@ -228,86 +135,34 @@ export async function inspectTaskExecutionRecovery(
   );
   assertSessionSchema(instructions, session);
   const digest = taskListDigest(instructions.tasks);
-  let alreadyCommitted = false;
   if (digest === session.tasksAfterDigest) {
     await verifyLocalTaskCommit(command, gitRoot, session, instructions, signal);
-    alreadyCommitted = true;
-  } else if (digest === session.tasksBeforeDigest) {
-    if (localTaskHead !== null && localTaskHead !== session.baselineCommit) {
-      throw new ChangeTaskExecutionError(
-        "Task-ветка содержит commit, но выбранная OpenSpec-задача не отмечена выполненной",
-      );
-    }
-  } else {
+    return { alreadyCommitted: true };
+  }
+  if (digest !== session.tasksBeforeDigest) {
     throw new ChangeTaskExecutionError(
       "Список OpenSpec-задач изменился после сохранения checkpoint",
     );
   }
-
-  const repository = taskRepositoryFromSession(session);
-  const openPullRequests = await listPullRequests(
-    command,
-    gitRoot,
-    repository,
-    session.taskBranch,
-    "open",
-    signal,
-  );
-  if (openPullRequests.length > 1) {
+  const head = await readHeadCommit(command, gitRoot, signal);
+  if (head !== session.baselineCommit) {
     throw new ChangeTaskExecutionError(
-      `Для task-ветки «${session.taskBranch}» найдено несколько открытых pull request`,
+      "Implementation-ветка содержит commit, но выбранная задача не отмечена выполненной",
     );
   }
-  const existing = openPullRequests[0];
-  if (existing) {
-    assertPullRequestRepository(existing, session.repositoryUrl);
-    if (remoteTaskHead === null) {
-      throw new ChangeTaskExecutionError(
-        "Task pull request существует без опубликованной head-ветки",
-      );
-    }
-    assertReadyPullRequest(existing, {
-      baseBranch: session.parentBranch,
-      headBranch: session.taskBranch,
-      headCommit: remoteTaskHead,
-      label: "Task pull request",
-    });
-  } else {
-    const historical = await listPullRequests(
-      command,
-      gitRoot,
-      repository,
-      session.taskBranch,
-      "all",
-      signal,
-    );
-    if (historical.length > 0) {
-      throw new ChangeTaskExecutionError(
-        "Созданный task pull request больше не открыт; автоматическая замена запрещена",
-      );
-    }
-  }
-  return {
-    alreadyCommitted,
-    existingPullRequest: existing?.number ?? null,
-  };
+  return { alreadyCommitted: false };
 }
 
 export async function verifyCompletedTask(
   command: BoundedCommandRunner,
   workspaceDirectory: string,
   gitRoot: string,
-  session: PendingTaskExecutionSession,
-  input: TaskCompletionInput,
+  sessionInput: PendingTaskExecutionSession,
   signal: AbortSignal,
 ): Promise<CompletedChangeTask> {
-  if (!input.title.includes(session.taskNumber) || UNSTABLE_PR_TITLE.test(input.title)) {
-    throw new ChangeTaskExecutionError(
-      `Название task pull request должно содержать номер ${session.taskNumber} и не быть черновым`,
-    );
-  }
+  const session = pendingTaskExecutionSessionSchema.parse(sessionInput);
   await assertCleanWorktree(command, gitRoot, signal);
-  await assertParentState(command, gitRoot, session, signal);
+  await assertTaskSessionState(command, gitRoot, session, signal);
   const instructions = await readApplyInstructions(
     command,
     workspaceDirectory,
@@ -324,58 +179,21 @@ export async function verifyCompletedTask(
   const remoteHead = await readRemoteCommit(
     command,
     gitRoot,
-    session.taskBranch,
+    session.implementationBranch,
     signal,
   );
   if (remoteHead !== head) {
     throw new ChangeTaskExecutionError(
-      `Git remote origin не содержит текущий HEAD task-ветки «${session.taskBranch}»`,
+      `Git remote origin не содержит текущий HEAD implementation-ветки «${session.implementationBranch}»`,
     );
   }
-
-  const repository = taskRepositoryFromSession(session);
-  const openPullRequests = await listPullRequests(
-    command,
-    gitRoot,
-    repository,
-    session.taskBranch,
-    "open",
-    signal,
-  );
-  if (openPullRequests.length !== 1) {
-    throw new ChangeTaskExecutionError(
-      `Для task-ветки «${session.taskBranch}» должен существовать ровно один открытый pull request`,
-    );
-  }
-  const pullRequest = openPullRequests[0]!;
-  assertPullRequestRepository(pullRequest, session.repositoryUrl);
-  assertReadyPullRequest(pullRequest, {
-    baseBranch: session.parentBranch,
-    headBranch: session.taskBranch,
-    headCommit: head,
-    label: "Task pull request",
-  });
-  if (pullRequest.number !== input.pullRequestNumber) {
-    throw new ChangeTaskExecutionError(
-      `Ожидался task pull request #${pullRequest.number}, передан #${input.pullRequestNumber}`,
-    );
-  }
-  if (pullRequest.title !== input.title || pullRequest.body !== input.body) {
-    throw new ChangeTaskExecutionError(
-      "Название или описание task pull request не совпадает с подтверждаемым содержимым",
-    );
-  }
-
   return {
     changeId: session.changeId,
+    taskId: session.taskId,
     taskNumber: session.taskNumber,
-    branch: session.taskBranch,
+    branch: session.implementationBranch,
+    commit: head,
     remainingTasks: instructions.progress.remaining,
-    pullRequest: {
-      number: pullRequest.number,
-      url: pullRequest.url,
-      title: pullRequest.title,
-    },
   };
 }
 
@@ -400,7 +218,6 @@ async function readApplyInstructions(
       `Не удалось прочитать apply-инструкции OpenSpec change «${changeId}»`,
     );
   }
-
   let instructions: ApplyInstructions;
   try {
     instructions = applyInstructionsSchema.parse(JSON.parse(stdout) as unknown);
@@ -445,8 +262,7 @@ function numberPendingTasks(
         `Незавершённая OpenSpec-задача «${task.description}» не начинается с номера вида 1.1`,
       );
     }
-    const number = taskNumberSchema.parse(match[1]);
-    return { task, number };
+    return { task, number: taskNumberSchema.parse(match[1]) };
   });
   const normalized = numbered.map(({ number }) => number.toLowerCase());
   if (new Set(normalized).size !== normalized.length) {
@@ -486,9 +302,9 @@ async function verifyLocalTaskCommit(
     );
   }
   const currentBranch = await readCurrentBranch(command, gitRoot, signal);
-  if (currentBranch !== session.taskBranch) {
+  if (currentBranch !== session.implementationBranch) {
     throw new ChangeTaskExecutionError(
-      `Текущая Git-ветка должна быть task-веткой «${session.taskBranch}»`,
+      `Текущей должна быть implementation-ветка «${session.implementationBranch}»`,
     );
   }
   const head = await readHeadCommit(command, gitRoot, signal);
@@ -500,13 +316,7 @@ async function verifyLocalTaskCommit(
     "Текущий Git HEAD больше не продолжает baseline task-сессии",
     signal,
   );
-  const commitCount = await readCommitCount(
-    command,
-    gitRoot,
-    session.baselineCommit,
-    head,
-    signal,
-  );
+  const commitCount = await readCommitCount(command, gitRoot, session.baselineCommit, head, signal);
   if (commitCount !== 1) {
     throw new ChangeTaskExecutionError(
       `Для задачи ${session.taskNumber} требуется ровно один отдельный Git-коммит`,
@@ -548,52 +358,96 @@ function assertSessionSchema(
   }
 }
 
-async function assertParentState(
+async function assertImplementationRunState(
+  command: BoundedCommandRunner,
+  gitRoot: string,
+  run: ImplementationRun,
+  implementationHead: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const repository = await resolveRepository(command, gitRoot, signal);
+  if (
+    repository.host !== run.repository.host ||
+    repository.nameWithOwner.toLowerCase() !== run.repository.nameWithOwner.toLowerCase() ||
+    repository.url !== run.repository.url
+  ) {
+    throw new ChangeTaskExecutionError(
+      "Git remote origin больше не соответствует implementation-run",
+    );
+  }
+  const [localRoot, remoteRoot, remoteImplementation] = await Promise.all([
+    readLocalBranchCommit(command, gitRoot, run.changeBranch, signal),
+    readRemoteCommit(command, gitRoot, run.changeBranch, signal),
+    readOptionalRemoteCommit(command, gitRoot, run.implementationBranch, signal),
+  ]);
+  if (localRoot !== run.rootBaselineCommit || remoteRoot !== run.rootBaselineCommit) {
+    throw new ChangeTaskExecutionError(
+      `Корневая ветка «${run.changeBranch}» изменилась после начала implementation-run`,
+    );
+  }
+  await assertDescendsFrom(
+    command,
+    gitRoot,
+    run.rootBaselineCommit,
+    implementationHead,
+    "Implementation-ветка больше не продолжает root baseline",
+    signal,
+  );
+  if (remoteImplementation !== null && remoteImplementation !== implementationHead) {
+    throw new ChangeTaskExecutionError(
+      `Local и origin/${run.implementationBranch} расходятся перед новой задачей`,
+    );
+  }
+}
+
+async function assertTaskSessionState(
   command: BoundedCommandRunner,
   gitRoot: string,
   session: PendingTaskExecutionSession,
   signal: AbortSignal,
 ): Promise<void> {
+  const currentBranch = await readCurrentBranch(command, gitRoot, signal);
+  if (currentBranch !== session.implementationBranch) {
+    throw new ChangeTaskExecutionError(
+      `Для восстановления задачи требуется implementation-ветка «${session.implementationBranch}»`,
+    );
+  }
   const repository = await resolveRepository(command, gitRoot, signal);
   if (
     repository.host !== session.repositoryHost ||
-    repository.nameWithOwner.toLowerCase() !==
-      session.repositoryNameWithOwner.toLowerCase() ||
+    repository.nameWithOwner.toLowerCase() !== session.repositoryNameWithOwner.toLowerCase() ||
     repository.url !== session.repositoryUrl
   ) {
     throw new ChangeTaskExecutionError(
-      "Git remote origin больше не соответствует сохранённому GitHub-репозиторию",
+      "Git remote origin больше не соответствует сохранённому репозиторию",
     );
   }
-  const [localParent, remoteParent] = await Promise.all([
-    readLocalBranchCommit(command, gitRoot, session.parentBranch, signal),
-    readRemoteCommit(command, gitRoot, session.parentBranch, signal),
+  const [localRoot, remoteRoot, head, remoteImplementation] = await Promise.all([
+    readLocalBranchCommit(command, gitRoot, session.changeBranch, signal),
+    readRemoteCommit(command, gitRoot, session.changeBranch, signal),
+    readHeadCommit(command, gitRoot, signal),
+    readOptionalRemoteCommit(command, gitRoot, session.implementationBranch, signal),
   ]);
-  if (
-    localParent !== session.baselineCommit ||
-    remoteParent !== session.baselineCommit
-  ) {
+  if (localRoot !== session.rootBaselineCommit || remoteRoot !== session.rootBaselineCommit) {
     throw new ChangeTaskExecutionError(
-      `Parent-ветка «${session.parentBranch}» изменилась после начала task-этапа`,
+      `Корневая ветка «${session.changeBranch}» изменилась после начала task-сессии`,
     );
   }
-  const parentPullRequest = await readSingleOpenPullRequest(
+  await assertDescendsFrom(
     command,
     gitRoot,
-    repository,
-    session.parentBranch,
+    session.baselineCommit,
+    head,
+    "Implementation-ветка больше не продолжает baseline task-сессии",
     signal,
   );
-  if (parentPullRequest.number !== session.parentPullRequestNumber) {
+  if (
+    remoteImplementation !== null &&
+    remoteImplementation !== session.baselineCommit &&
+    remoteImplementation !== head
+  ) {
     throw new ChangeTaskExecutionError(
-      "Открытый pull request parent-ветки изменился после начала task-этапа",
+      `Origin/${session.implementationBranch} содержит неожиданный commit`,
     );
   }
-  assertPullRequestRepository(parentPullRequest, session.repositoryUrl);
-  assertReadyPullRequest(parentPullRequest, {
-    baseBranch: session.parentBaseBranch,
-    headBranch: session.parentBranch,
-    headCommit: session.baselineCommit,
-    label: "Parent pull request",
-  });
 }

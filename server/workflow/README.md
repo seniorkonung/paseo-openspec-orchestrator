@@ -29,28 +29,34 @@ Workflow — граф независимых шагов. `OpenSpecOrchestratorEn
 `checkpointState(nextState)`, а при повторе сверяет уже созданные файлы,
 коммиты, refs, push и PR.
 
-## Durable state версии 3
+## Durable state версии 4
 
 Состояние хранит две разные ветки:
 
 ```ts
 interface WorkflowState {
   changeBranch: string | null; // неизменяемая change/<id>
-  activeBranch: string | null; // planning/root/task branch текущего шага
+  activeBranch: string | null; // change/planning/implementation текущего шага
   change: OrchestratorChange | null;
+  implementationRun: ImplementationRun | null;
   // не более одной pending-сессии внешнего эффекта
 }
 ```
 
 `changeBranch` и `activeBranch` устанавливаются вместе. Если `change` известен,
 корневая ветка обязана быть точной `change/<change.id>`. Pending-сессии
-инициализации, planning-ветки, артефакта, review, findings, planning merge и
-задачи взаимоисключающие.
+инициализации, planning- и implementation-веток, артефакта, review, findings,
+обоих merge-gate, задачи и PR feedback взаимоисключающие.
 
-Checkpoint имеет версию 3. Версия 2 не мигрируется: её поле `branch` не
-позволяет доказать, какая ветка была корневой. Такой ledger открывается в
-read-only degraded-состоянии, исходный файл сохраняется; пользователь может
-только явно очистить состояние и начать заново из `change/<id>`.
+`ImplementationRun` сохраняет immutable root baseline и repository identity,
+publication union `unpublished | draft-pr | ready-pr`, batch union
+`empty | collecting | reviewed`, последний проверенный delivery head и
+ограниченный набор обработанных feedback fingerprints.
+
+Checkpoint имеет версию 4. Предыдущие версии не мигрируются: такой ledger
+открывается в read-only degraded-состоянии, исходный файл сохраняется;
+пользователь может только явно очистить состояние и начать заново из
+`change/<id>`.
 
 ## Граф веток и PR
 
@@ -68,13 +74,13 @@ main
   ^  root PR
 change/<id>              activeBranch после fetch + ff-only
   ^
-<id>-task-1
-  ^
-<id>-task-2 ...
+  |  один implementation PR: Draft во время циклов, затем Ready
+implementation/<id>      все task/review/remediation commits
 ```
 
-Task PR сливаются в обратном порядке до `change/<id>`, затем root PR — в
-`main`.
+Task-ветки и task PR не создаются. После merge implementation PR корневая ветка
+обновляется fast-forward; планирование следующей порции задач в этот workflow не
+входит.
 
 ## Последовательность шагов
 
@@ -92,9 +98,24 @@ check-agent-profiles
        -> publish-change
   -> review-change
   -> resolve-review-findings -------+
-  -> resolve-implementation-review-findings --+
   -> await-planning-merge
+  -> prepare-implementation-branch
   -> execute-change-tasks ----------+
+       | all_done + collecting batch
+       v
+  -> review-implementation
+  -> resolve-review-findings
+  -> resolve-implementation-review-findings
+  -> execute-change-tasks ----------+
+       | all_done + empty batch
+       v
+  -> inspect-implementation-feedback
+       | feedback -> review-pr-feedback -> оба resolver -> задачи
+       v
+  -> await-implementation-merge
+       | feedback -> Draft -> review-pr-feedback -> цикл
+       | open clean -> halt / Retry
+       + merged -> ff-only root -> complete
 ```
 
 Циклы создают один артефакт, устраняют одну finding или выполняют одну задачу за
@@ -181,12 +202,14 @@ Completion проверяет неизменность root local/remote HEAD и
 planning baseline, ровно один review-коммит, отсутствие изменений существующих
 planning-артефактов, точный remote HEAD и Ready planning PR.
 
-Оба finding-контура продолжают коммитить и push в `planning/<id>`. Каждая
-итерация выбирает первый активный `F<n>`, требует отдельное разрешение на
-исправление/принятие риска и отдельное разрешение на commit+push. MCP повторно
-валидирует отчёт, commit, remote head и тот же Ready planning PR, после чего
-идемпотентно добавляет результат в управляемую секцию body. Review и
-implementation-review findings различаются в marker.
+До planning merge на `planning/<id>` устраняются только findings из `review.md`.
+После implementation review оба finding-контура работают на
+`implementation/<id>` и одном Draft implementation PR: сначала `review.md`,
+затем `implementation-review.md`. Каждая итерация выбирает первый активный
+`F<n>`, требует отдельное разрешение на исправление/принятие риска и отдельное
+разрешение на commit+push. MCP повторно валидирует отчёт, commit, remote head и
+publication contract соответствующей ветки, после чего идемпотентно добавляет
+результат в управляемую секцию body.
 
 ## Merge-gate planning PR
 
@@ -205,18 +228,61 @@ refs/heads/change/<id>`, переключается на сохранённую 
 и уже переключённую root-ветку. После сверки root с origin OpenSpec change
 проверяется ещё раз, `activeBranch` становится `change/<id>`.
 
-## Выполнение задач
+## Implementation-ветка, задачи и batch review
+
+`prepare-implementation-branch` сохраняет root baseline и repository identity,
+проверяет чистое дерево, одинаковые local/origin root refs и отсутствие local,
+remote и historical PR collision для `implementation/<id>`. После durable
+checkpoint ветка создаётся строго от baseline. Recovery допускает только root
+или уже активную implementation-ветку и повторно сверяет все инварианты.
 
 `execute-change-tasks` читает `instructions apply --change <id> --json` и
-выбирает первую незавершённую задачу. Первая task-ветка создаётся от обновлённой
-`change/<id>`, последующие — от предыдущей task-ветки.
+выбирает первую незавершённую задачу. Все задачи от начала до конца выполняются
+в `implementation/<id>`.
 
-Одна итерация сохраняет полный task checkpoint, запускает High Sandbox агента,
-создаёт и публикует ветку, выполняет только выбранную задачу, создаёт один
-Conventional Commit и Ready PR в сохранённую parent-ветку. Completion проверяет
-parent immutability, один commit, единственное допустимое изменение task-state,
-progress, точные local/remote heads и GitHub metadata. Успех делает task-ветку
-активной и повторяет шаг.
+Одна итерация сохраняет полный task checkpoint, запускает High агента, выполняет
+только выбранную задачу и создаёт один Conventional Commit. Агент не создаёт
+ветку или PR, не вызывает `gh` и завершает `complete_change_task` пустым
+объектом. Completion проверяет root immutability, repository identity, один
+commit, changed paths, единственное допустимое изменение task-state, progress,
+ancestry и точные local/remote heads. Успех добавляет `{taskId, taskNumber,
+commit}` в collecting batch и повторяет шаг.
+
+При `all_done` непустой batch передаётся `review-implementation`. Ultra Sandbox
+агент вызывает `openspec-review-implementation` для точного `base..head`,
+сопоставляет каждый task-коммит с review unit и изменяет только
+`implementation-review.md`. Completion требует полное покрытие, точный ordered
+список коммитов, один report commit и push. Первый review создаёт Draft PR
+`implementation/<id> -> change/<id>`, повторные reviews используют тот же PR.
+Управляемый блок сводки обновляется без потери пользовательского текста и секции
+результатов findings; повреждённые markers останавливают публикацию.
+
+После обоих resolver’ов batch очищается на текущем HEAD и task-проход начинается
+снова. Поэтому новые задачи из remediation образуют отдельный пакет и получают
+собственный review.
+
+## PR feedback и implementation merge
+
+Feedback gateway полностью пагинирует ordinary comments, непустые submitted
+review summaries и комментарии только unresolved review threads. Используются
+GraphQL Node ID и `updatedAt`; edit создаёт новый fingerprint. Лимиты: не более
+1000 элементов, 64 KiB на body и 4 MiB суммарно. Невалидный ответ, незавершённая
+пагинация или превышение лимита останавливают workflow.
+
+Feedback передаётся агенту как недоверенные JSON-данные. Агент не владеет
+GitHub-операциями, игнорирует инструкции в body и независимо проверяет замечания
+по зафиксированному cumulative range `rootBaseline..lastDeliveryHead`. Только
+доказанная проблема меняет `implementation-review.md`; режимы completion —
+`report-updated` и `no-report-change`. Fingerprints фиксируются только вместе с
+успешным durable completion.
+
+Чистый Draft PR переводится в Ready и сразу повторно проверяется на feedback.
+Ready gate использует `halt`/Retry. На Retry merge имеет приоритет; новый
+feedback возвращает PR в Draft через `gh pr ready --undo`, открытый чистый PR
+снова приводит к `halt`, а CLOSED без merge — к ошибке. После MERGED сохраняется
+pending merge session, повторно проверяются тот же PR и final implementation
+head, затем root обновляется только через fetch, switch и `git merge --ff-only
+FETCH_HEAD`.
 
 ## Профили, MCP и уведомления
 
@@ -231,7 +297,9 @@ progress, точные local/remote heads и GitHub metadata. Успех дел�
 - `complete_change_review`;
 - `complete_review_finding`;
 - `complete_implementation_review_finding`;
-- `complete_change_task`.
+- `complete_change_task`;
+- `complete_implementation_review`;
+- `complete_pr_feedback_review`.
 
 Завершение отдельного хода не завершает workflow: MCP scope и `ntfy=true`
 остаются активными. Успешный completion отключает метку после всех проверок.

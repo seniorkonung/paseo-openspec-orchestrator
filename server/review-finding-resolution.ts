@@ -189,6 +189,7 @@ export function createReviewFindingResolutionService<
         return {
           kind: "no-findings",
           reviewPath: context.reviewRepositoryPath,
+          headCommit: head,
         };
       }
 
@@ -199,6 +200,7 @@ export function createReviewFindingResolutionService<
         return {
           kind: "no-findings",
           reviewPath: context.reviewRepositoryPath,
+          headCommit: head,
         };
       }
       return {

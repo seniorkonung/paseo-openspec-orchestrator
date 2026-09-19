@@ -4,6 +4,7 @@ import {
   changeBranchSchema,
   planningBranchFor,
   planningBranchSchema,
+  type ChangeBranch,
 } from "./change-branch.ts";
 import { commitHashSchema } from "./change-artifact-model.ts";
 import {
@@ -88,7 +89,7 @@ export interface PlanningMergeService {
     workspaceDirectory: string,
     session: PendingPlanningMergeSession,
     signal?: AbortSignal,
-  ): Promise<string>;
+  ): Promise<ChangeBranch>;
 }
 
 export interface PlanningMergeServiceOptions {

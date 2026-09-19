@@ -18,7 +18,6 @@ import {
   pendingTaskExecutionSessionSchema,
   type PendingTaskExecutionSession,
 } from "../change-task-execution.ts";
-import { taskBranchSchema } from "../change-task-model.ts";
 import {
   pendingChangeInitializationSessionSchema,
   type PendingChangeInitializationSession,
@@ -33,8 +32,32 @@ import {
 } from "../planning-merge.ts";
 import {
   changeBranchSchema,
+  implementationBranchSchema,
+  planningBranchSchema,
   type ChangeBranch,
+  type ImplementationBranch,
+  type PlanningBranch,
 } from "../change-branch.ts";
+import {
+  implementationRunSchema,
+  type ImplementationRun,
+} from "../implementation-run-model.ts";
+import {
+  pendingImplementationBranchSessionSchema,
+  type PendingImplementationBranchSession,
+} from "../implementation-branch.ts";
+import {
+  pendingImplementationReviewSessionSchema,
+  type PendingImplementationReviewSession,
+} from "../implementation-review.ts";
+import {
+  pendingPrFeedbackReviewSessionSchema,
+  type PendingPrFeedbackReviewSession,
+} from "../pr-feedback-review.ts";
+import {
+  pendingImplementationMergeSessionSchema,
+  type PendingImplementationMergeSession,
+} from "../implementation-pull-request.ts";
 import type { OrchestratorNotificationRequest } from "../../shared/orchestrator-notifications.ts";
 import {
   orchestratorChangeSchema,
@@ -45,11 +68,13 @@ import { z } from "zod";
 
 export interface WorkflowState {
   readonly changeBranch: ChangeBranch | null;
-  readonly activeBranch: string | null;
+  readonly activeBranch: ChangeBranch | PlanningBranch | ImplementationBranch | null;
   readonly change: OrchestratorChange | null;
+  readonly implementationRun: ImplementationRun | null;
   readonly pendingChangeInitializationSession: PendingChangeInitializationSession | null;
   readonly pendingPlanningBranchSession: PendingPlanningBranchSession | null;
   readonly pendingPlanningMergeSession: PendingPlanningMergeSession | null;
+  readonly pendingImplementationBranchSession: PendingImplementationBranchSession | null;
   readonly pendingArtifactSession: PendingArtifactSession | null;
   readonly pendingReviewSession: PendingReviewSession | null;
   readonly pendingFindingResolutionSession: PendingFindingResolutionSession | null;
@@ -57,6 +82,9 @@ export interface WorkflowState {
     | PendingImplementationFindingResolutionSession
     | null;
   readonly pendingTaskExecutionSession: PendingTaskExecutionSession | null;
+  readonly pendingImplementationReviewSession: PendingImplementationReviewSession | null;
+  readonly pendingPrFeedbackReviewSession: PendingPrFeedbackReviewSession | null;
+  readonly pendingImplementationMergeSession: PendingImplementationMergeSession | null;
 }
 
 export type WorkflowStepId = string;
@@ -69,8 +97,11 @@ export type WorkflowStepId = string;
 export const workflowStateSchema = z
   .object({
     changeBranch: changeBranchSchema.nullable(),
-    activeBranch: taskBranchSchema.nullable(),
+    activeBranch: z
+      .union([changeBranchSchema, planningBranchSchema, implementationBranchSchema])
+      .nullable(),
     change: orchestratorChangeSchema.nullable().default(null),
+    implementationRun: implementationRunSchema.nullable().default(null),
     pendingChangeInitializationSession: pendingChangeInitializationSessionSchema
       .nullable()
       .default(null),
@@ -78,6 +109,9 @@ export const workflowStateSchema = z
       .nullable()
       .default(null),
     pendingPlanningMergeSession: pendingPlanningMergeSessionSchema
+      .nullable()
+      .default(null),
+    pendingImplementationBranchSession: pendingImplementationBranchSessionSchema
       .nullable()
       .default(null),
     pendingArtifactSession: pendingArtifactSessionSchema.nullable().default(null),
@@ -88,6 +122,15 @@ export const workflowStateSchema = z
     pendingImplementationFindingResolutionSession:
       pendingImplementationFindingResolutionSessionSchema.nullable().default(null),
     pendingTaskExecutionSession: pendingTaskExecutionSessionSchema.nullable().default(null),
+    pendingImplementationReviewSession: pendingImplementationReviewSessionSchema
+      .nullable()
+      .default(null),
+    pendingPrFeedbackReviewSession: pendingPrFeedbackReviewSessionSchema
+      .nullable()
+      .default(null),
+    pendingImplementationMergeSession: pendingImplementationMergeSessionSchema
+      .nullable()
+      .default(null),
   })
   .strict()
   .superRefine((state, context) => {
@@ -95,11 +138,15 @@ export const workflowStateSchema = z
       state.pendingChangeInitializationSession,
       state.pendingPlanningBranchSession,
       state.pendingPlanningMergeSession,
+      state.pendingImplementationBranchSession,
       state.pendingArtifactSession,
       state.pendingReviewSession,
       state.pendingFindingResolutionSession,
       state.pendingImplementationFindingResolutionSession,
       state.pendingTaskExecutionSession,
+      state.pendingImplementationReviewSession,
+      state.pendingPrFeedbackReviewSession,
+      state.pendingImplementationMergeSession,
     ].filter(Boolean).length;
     if (pendingSessions > 1) {
       context.addIssue({
@@ -197,7 +244,15 @@ export const workflowStateSchema = z
     const task = state.pendingTaskExecutionSession;
     if (
       task &&
-      (state.change?.id !== task.changeId || state.activeBranch !== task.parentBranch)
+      (state.change?.id !== task.changeId ||
+        state.activeBranch !== task.implementationBranch ||
+        !state.implementationRun ||
+        state.implementationRun.changeBranch !== task.changeBranch ||
+        state.implementationRun.rootBaselineCommit !== task.rootBaselineCommit ||
+        state.implementationRun.repository.host !== task.repositoryHost ||
+        state.implementationRun.repository.nameWithOwner.toLowerCase() !==
+          task.repositoryNameWithOwner.toLowerCase() ||
+        state.implementationRun.repository.url !== task.repositoryUrl)
     ) {
       context.addIssue({
         code: "custom",
@@ -205,11 +260,112 @@ export const workflowStateSchema = z
         message: "Сессия задачи не соответствует сохранённым change и activeBranch",
       });
     }
+    const run = state.implementationRun;
+    if (
+      run &&
+      (state.change?.id !== run.changeId ||
+        state.changeBranch !== run.changeBranch ||
+        state.activeBranch !== run.implementationBranch)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["implementationRun"],
+        message: "Implementation-run не соответствует сохранённым change и веткам",
+      });
+    }
+    const implementationBranch = state.pendingImplementationBranchSession;
+    if (
+      implementationBranch &&
+      (state.change?.id !== implementationBranch.changeId ||
+        state.changeBranch !== implementationBranch.changeBranch ||
+        state.activeBranch !== implementationBranch.changeBranch)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["pendingImplementationBranchSession"],
+        message: "Сессия подготовки implementation-ветки не соответствует change",
+      });
+    }
+    for (const [path, session] of [
+      ["pendingImplementationReviewSession", state.pendingImplementationReviewSession],
+      ["pendingPrFeedbackReviewSession", state.pendingPrFeedbackReviewSession],
+      ["pendingImplementationMergeSession", state.pendingImplementationMergeSession],
+    ] as const) {
+      if (
+        session &&
+        (state.change?.id !== session.changeId ||
+          state.activeBranch !== session.implementationBranch ||
+          !run ||
+          run.changeBranch !== session.changeBranch ||
+          run.rootBaselineCommit !== session.rootBaselineCommit)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: [path],
+          message: "Implementation-сессия не соответствует change и activeBranch",
+        });
+      }
+    }
+    const implementationReview = state.pendingImplementationReviewSession;
+    if (
+      implementationReview &&
+      run &&
+      (run.repository.host !== implementationReview.repository.host ||
+        run.repository.nameWithOwner.toLowerCase() !==
+          implementationReview.repository.nameWithOwner.toLowerCase() ||
+        run.repository.url !== implementationReview.repository.url ||
+        run.batch.kind !== "collecting" ||
+        run.batch.baseCommit !== implementationReview.baseCommit ||
+        run.batch.headCommit !== implementationReview.reviewedHead)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["pendingImplementationReviewSession"],
+        message: "Implementation review session не соответствует текущему run-пакету",
+      });
+    }
+    const feedback = state.pendingPrFeedbackReviewSession;
+    if (
+      feedback &&
+      run &&
+      (run.batch.kind !== "empty" ||
+        run.lastDeliveryHead !== feedback.rangeHead ||
+        run.batch.baseCommit !== feedback.baselineCommit)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["pendingPrFeedbackReviewSession"],
+        message: "Feedback review session не соответствует implementation-run",
+      });
+    }
+    const implementationMerge = state.pendingImplementationMergeSession;
+    if (
+      implementationMerge &&
+      run &&
+      (run.batch.kind !== "empty" ||
+        run.publication.kind === "unpublished" ||
+        run.publication.number !== implementationMerge.pullRequestNumber ||
+        run.batch.baseCommit !== implementationMerge.finalImplementationHead)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["pendingImplementationMergeSession"],
+        message: "Implementation merge session не соответствует финальному run",
+      });
+    }
+    const implementationFinding = state.pendingImplementationFindingResolutionSession;
+    if (implementationFinding && !run) {
+      context.addIssue({
+        code: "custom",
+        path: ["pendingImplementationFindingResolutionSession"],
+        message: "Implementation finding session требует implementation-run",
+      });
+    }
   });
 
 export const workflowCheckpointSchema = z
   .object({
-    version: z.literal(3),
+    version: z.literal(4),
     nextStepId: z.string().trim().min(1).max(128),
     state: workflowStateSchema,
   })
@@ -268,13 +424,18 @@ export function createInitialWorkflowState(): WorkflowState {
     changeBranch: null,
     activeBranch: null,
     change: null,
+    implementationRun: null,
     pendingChangeInitializationSession: null,
     pendingPlanningBranchSession: null,
     pendingPlanningMergeSession: null,
+    pendingImplementationBranchSession: null,
     pendingArtifactSession: null,
     pendingReviewSession: null,
     pendingFindingResolutionSession: null,
     pendingImplementationFindingResolutionSession: null,
     pendingTaskExecutionSession: null,
+    pendingImplementationReviewSession: null,
+    pendingPrFeedbackReviewSession: null,
+    pendingImplementationMergeSession: null,
   };
 }

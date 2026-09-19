@@ -26,9 +26,19 @@ export interface ParsedImplementationReviewReport {
   readonly changeId: string;
   readonly result: ImplementationReviewResult;
   readonly coverageStatus: CoverageStatus;
+  readonly baseCommit: string;
+  readonly reviewedHead: string;
+  readonly targetCommits: readonly string[];
+  readonly reviewUnits: readonly ImplementationReviewUnit[];
   readonly findings: readonly ImplementationReviewFinding[];
   readonly acceptedRisks: readonly ImplementationReviewAcceptedRisk[];
   readonly acceptedRiskIds: readonly string[];
+}
+
+export interface ImplementationReviewUnit {
+  readonly id: string;
+  readonly workItems: readonly string[];
+  readonly implementationTarget: readonly string[];
 }
 
 export interface ImplementationReviewFinding {
@@ -91,6 +101,7 @@ interface ParsedAcceptedRiskEntry {
 
 interface ParsedReviewUnit {
   readonly id: string;
+  readonly workItems: readonly string[];
   readonly implementationTarget: readonly string[];
 }
 
@@ -351,6 +362,18 @@ export function parseImplementationReviewReport(
     changeId,
     result,
     coverageStatus,
+    baseCommit: valueAsString(reviewTarget, "Base commit"),
+    reviewedHead: valueAsString(reviewTarget, "Reviewed head"),
+    targetCommits: Object.freeze([
+      ...valueAsStringArray(reviewTarget, "Target commits"),
+    ]),
+    reviewUnits: Object.freeze(
+      reviewUnits.map(({ id, workItems, implementationTarget }) => Object.freeze({
+        id,
+        workItems: Object.freeze([...workItems]),
+        implementationTarget: Object.freeze([...implementationTarget]),
+      })),
+    ),
     findings: Object.freeze(
       findings.map(({ id, severity, title }) => Object.freeze({ id, severity, title })),
     ),
@@ -582,6 +605,7 @@ function parseReviewUnits(lines: readonly SourceLine[]): ParsedReviewUnit[] {
     const fields = parseFields(record.body, REVIEW_UNIT_FIELDS, record.id, "- ");
     return {
       id: record.id,
+      workItems: valueAsStringArray(fields, "Work items"),
       implementationTarget: valueAsStringArray(fields, "Implementation target"),
     };
   });

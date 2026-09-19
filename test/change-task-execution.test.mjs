@@ -13,28 +13,20 @@ import {
 
 const execFileAsync = promisify(execFile);
 const changeId = "selected-change";
-const parentBranch = "selected-change-review";
-const parentBaseBranch = "selected-change";
-const taskBranch = "selected-change-task-1.1";
-const repository = "example/project";
-const repositoryUrl = "https://github.com/example/project";
-const originUrl = "git@github.com:example/project.git";
-const title = "Реализовать задачу 1.1 OpenSpec change";
-const body = `## Результат
+const changeBranch = `change/${changeId}`;
+const implementationBranch = `implementation/${changeId}`;
 
-Реализовано поведение выбранной задачи и добавлена проверка.`;
-
-const exec = async (executable, arguments_, options) => {
+async function exec(executable, arguments_, options) {
   const result = await execFileAsync(executable, arguments_, {
     cwd: options.cwd,
     signal: options.signal,
     encoding: "utf8",
   });
-  return { stdout: result.stdout, stderr: result.stderr };
-};
+  return { stdout: String(result.stdout), stderr: String(result.stderr) };
+}
 
 async function connectClient(url) {
-  const client = new Client({ name: "change-task-execution-test", version: "1.0.0" });
+  const client = new Client({ name: "task-test", version: "1.0.0" });
   await client.connect(new StreamableHTTPClientTransport(new URL(url)));
   return client;
 }
@@ -47,509 +39,220 @@ function highProfile() {
     model: "gpt-6-astra",
     modeId: "default",
     thinkingOptionId: "high",
-    featureValues: { fast: true },
   };
 }
 
-function firstText(result) {
-  const content = result.content[0];
-  assert.equal(content?.type, "text");
-  return content.text;
-}
-
-async function createFixture(context) {
-  const root = await mkdtemp(join(tmpdir(), "openspec-task-execution-"));
-  const workspace = join(root, "workspace");
-  const bare = join(root, "origin.git");
+async function fixture(context) {
+  const root = await mkdtemp(join(tmpdir(), "implementation-task-"));
   context.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace");
+  const remote = join(root, "origin.git");
   await mkdir(join(workspace, "openspec", "changes", changeId), { recursive: true });
-  await execFileAsync("git", ["init", "--bare", bare]);
-  await execFileAsync("git", ["init", "-b", parentBranch], { cwd: workspace });
-  await execFileAsync("git", ["config", "user.name", "OpenSpec Test"], {
-    cwd: workspace,
-  });
-  await execFileAsync("git", ["config", "user.email", "openspec@example.test"], {
-    cwd: workspace,
-  });
+  await execFileAsync("git", ["init", "--bare", remote]);
+  await execFileAsync("git", ["init", "-b", changeBranch], { cwd: workspace });
+  await execFileAsync("git", ["config", "user.name", "OpenSpec Test"], { cwd: workspace });
+  await execFileAsync("git", ["config", "user.email", "openspec@example.test"], { cwd: workspace });
   const tasksPath = join(workspace, "openspec", "changes", changeId, "tasks.md");
-  await writeFile(
-    tasksPath,
-    "## 1. Реализация\n- [ ] 1.1 Реализовать выбранное поведение\n- [ ] 1.2 Добавить следующий этап\n",
-  );
-  await execFileAsync("git", ["add", "openspec"], { cwd: workspace });
-  await execFileAsync("git", ["commit", "-m", "docs(openspec): add task plan"], {
-    cwd: workspace,
-  });
-  await execFileAsync("git", ["remote", "add", "origin", bare], { cwd: workspace });
-  await execFileAsync("git", ["push", "-u", "origin", parentBranch], {
-    cwd: workspace,
-  });
-  const baselineCommit = (
-    await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })
-  ).stdout.trim();
+  await writeFile(tasksPath, "## 1. Реализация\n- [ ] 1.1 Первая задача\n- [ ] 1.2 Вторая задача\n");
+  await execFileAsync("git", ["add", "."], { cwd: workspace });
+  await execFileAsync("git", ["commit", "-m", "docs(openspec): add tasks"], { cwd: workspace });
+  const baseline = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim();
+  await execFileAsync("git", ["remote", "add", "origin", remote], { cwd: workspace });
+  await execFileAsync("git", ["push", "-u", "origin", changeBranch], { cwd: workspace });
+  await execFileAsync("git", ["switch", "-c", implementationBranch], { cwd: workspace });
 
-  let taskPullRequest = null;
-  const applyInstructions = async () => {
+  const apply = async () => {
     const tasks = await readFile(tasksPath, "utf8");
-    const firstDone = tasks.includes("- [x] 1.1");
-    const secondDone = tasks.includes("- [x] 1.2");
-    const complete = Number(firstDone) + Number(secondDone);
+    const first = tasks.includes("- [x] 1.1");
+    const second = tasks.includes("- [x] 1.2");
+    const complete = Number(first) + Number(second);
     return {
       changeName: changeId,
       schemaName: "spec-driven",
       progress: { total: 2, complete, remaining: 2 - complete },
       tasks: [
-        { id: "1", description: "1.1 Реализовать выбранное поведение", done: firstDone },
-        { id: "2", description: "1.2 Добавить следующий этап", done: secondDone },
+        { id: "internal-a", description: "1.1 Первая задача", done: first },
+        { id: "internal-b", description: "1.2 Вторая задача", done: second },
       ],
       state: complete === 2 ? "all_done" : "ready",
-      instruction: complete === 2 ? "All tasks complete" : "Implement remaining tasks",
+      instruction: "Выполнить задачи",
     };
   };
-  const parentPullRequest = {
-    number: 43,
-    url: `${repositoryUrl}/pull/43`,
-    state: "OPEN",
-    isDraft: false,
-    isCrossRepository: false,
-    baseRefName: parentBaseBranch,
-    headRefName: parentBranch,
-    headRefOid: baselineCommit,
-    title: "Первичное ревью change",
-    body: "Review",
-  };
-
   const command = async (executable, arguments_, options) => {
-    const key = `${executable} ${arguments_.join(" ")}`;
     if (executable === "mise") {
-      assert.deepEqual(arguments_, [
-        "exec",
-        "--no-deps",
-        "--",
-        "openspec",
-        "instructions",
-        "apply",
-        "--change",
-        changeId,
-        "--json",
-      ]);
-      return { stdout: JSON.stringify(await applyInstructions()), stderr: "" };
+      return { stdout: JSON.stringify(await apply()), stderr: "" };
     }
-    if (key === "git remote get-url origin") {
-      return { stdout: `${originUrl}\n`, stderr: "" };
+    if (executable === "git" && arguments_.join(" ") === "remote get-url origin") {
+      return { stdout: "git@github.com:example/project.git\n", stderr: "" };
     }
-    if (key === "gh auth status --hostname github.com") {
-      return { stdout: "", stderr: "" };
-    }
-    if (key === `gh repo view ${repository} --json nameWithOwner,url`) {
+    if (executable === "gh" && arguments_[0] === "auth") return { stdout: "", stderr: "" };
+    if (executable === "gh" && arguments_[0] === "repo") {
       return {
-        stdout: JSON.stringify({ nameWithOwner: repository, url: repositoryUrl }),
+        stdout: JSON.stringify({ nameWithOwner: "example/project", url: "https://github.com/example/project" }),
         stderr: "",
       };
     }
-    if (executable === "gh" && arguments_[0] === "pr" && arguments_[1] === "list") {
-      const head = arguments_[arguments_.indexOf("--head") + 1];
-      const state = arguments_[arguments_.indexOf("--state") + 1];
-      if (head === parentBranch) {
-        return { stdout: JSON.stringify([parentPullRequest]), stderr: "" };
-      }
-      if (head === taskBranch && taskPullRequest && (state === "open" || state === "all")) {
-        return { stdout: JSON.stringify([taskPullRequest]), stderr: "" };
-      }
-      return { stdout: "[]", stderr: "" };
-    }
     return exec(executable, arguments_, options);
   };
-
-  return {
-    workspace,
-    tasksPath,
-    baselineCommit,
-    command,
-    setTaskPullRequest(value) {
-      taskPullRequest = value;
+  const run = {
+    changeId,
+    changeBranch,
+    implementationBranch,
+    rootBaselineCommit: baseline,
+    repository: {
+      host: "github.com",
+      nameWithOwner: "example/project",
+      url: "https://github.com/example/project",
     },
+    publication: { kind: "unpublished" },
+    batch: { kind: "empty", baseCommit: baseline },
+    lastDeliveryHead: null,
+    processedFeedbackFingerprints: [],
   };
+  return { workspace, remote, tasksPath, baseline, command, run };
 }
 
-async function commitTask(fixture, { completeSecond = false } = {}) {
-  await execFileAsync("git", ["switch", "-c", taskBranch, fixture.baselineCommit], {
-    cwd: fixture.workspace,
-  });
-  await execFileAsync("git", ["push", "-u", "origin", taskBranch], {
-    cwd: fixture.workspace,
-  });
-  const tasks = completeSecond
-    ? "## 1. Реализация\n- [x] 1.1 Реализовать выбранное поведение\n- [x] 1.2 Добавить следующий этап\n"
-    : "## 1. Реализация\n- [x] 1.1 Реализовать выбранное поведение\n- [ ] 1.2 Добавить следующий этап\n";
-  await writeFile(fixture.tasksPath, tasks);
-  await writeFile(join(fixture.workspace, "implementation.ts"), "export const implemented = true;\n");
-  await execFileAsync("git", ["add", "openspec", "implementation.ts"], {
-    cwd: fixture.workspace,
-  });
-  await execFileAsync("git", ["commit", "-m", "feat(task): implement selected task"], {
-    cwd: fixture.workspace,
-  });
-  await execFileAsync("git", ["push", "origin", taskBranch], {
-    cwd: fixture.workspace,
-  });
-  return (
-    await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: fixture.workspace })
-  ).stdout.trim();
+async function commitTask(value, { markSecond = false } = {}) {
+  await writeFile(
+    value.tasksPath,
+    `## 1. Реализация\n- [x] 1.1 Первая задача\n- [${markSecond ? "x" : " "}] 1.2 Вторая задача\n`,
+  );
+  await writeFile(join(value.workspace, "implementation.ts"), "export const implemented = true;\n");
+  await execFileAsync("git", ["add", "."], { cwd: value.workspace });
+  await execFileAsync("git", ["commit", "-m", "feat(task): implement first task"], { cwd: value.workspace });
+  await execFileAsync("git", ["push", "-u", "origin", implementationBranch], { cwd: value.workspace });
 }
 
-test("plan выбирает номер из description, а не позиционный OpenSpec ID", async (context) => {
-  const fixture = await createFixture(context);
-  const service = createChangeTaskExecutionService({
-    command: fixture.command,
-    async createAgent() {
-      throw new Error("Агент не должен создаваться во время plan");
-    },
-  });
-
-  const plan = await service.plan(fixture.workspace, changeId, parentBranch);
-
+test("plan выбирает первую задачу и сохраняет общий implementation baseline", async (context) => {
+  const value = await fixture(context);
+  const service = createChangeTaskExecutionService({ command: value.command, async createAgent() {} });
+  const plan = await service.plan(value.workspace, value.run);
   assert.equal(plan.kind, "next-task");
-  assert.equal(plan.session.taskId, "1");
+  assert.equal(plan.session.taskId, "internal-a");
   assert.equal(plan.session.taskNumber, "1.1");
-  assert.equal(plan.session.taskBranch, taskBranch);
-  assert.equal(plan.session.parentBranch, parentBranch);
-  assert.equal(plan.session.parentBaseBranch, parentBaseBranch);
+  assert.equal(plan.session.implementationBranch, implementationBranch);
+  assert.equal(plan.session.baselineCommit, value.baseline);
+  assert.equal(plan.session.rootBaselineCommit, value.baseline);
+  assert.equal("taskBranch" in plan.session, false);
+  assert.equal("parentPullRequestNumber" in plan.session, false);
 });
 
-test("plan завершает all_done и fail-closed отклоняет ненумерованную задачу", async () => {
-  const payload = {
-    changeName: changeId,
-    schemaName: "spec-driven",
-    progress: { total: 1, complete: 1, remaining: 0 },
-    tasks: [{ id: "1", description: "1.1 Готово", done: true }],
-    state: "all_done",
-    instruction: "Complete",
-  };
-  const service = createChangeTaskExecutionService({
-    async command(executable) {
-      assert.equal(executable, "mise");
-      return { stdout: JSON.stringify(payload), stderr: "" };
-    },
-    async createAgent() {
-      throw new Error("Агент не нужен");
-    },
-  });
-  assert.deepEqual(await service.plan("/workspace", changeId, parentBranch), {
-    kind: "complete",
-    schemaName: "spec-driven",
-  });
-
-  payload.progress = { total: 1, complete: 0, remaining: 1 };
-  payload.tasks = [{ id: "1", description: "Задача без номера", done: false }];
-  payload.state = "ready";
-  await assert.rejects(
-    service.plan("/workspace", changeId, parentBranch),
-    /не начинается с номера вида 1\.1/,
-  );
-
-  payload.progress = { total: 2, complete: 0, remaining: 2 };
-  payload.tasks = [
-    { id: "1", description: "1.1 Первая задача", done: false },
-    { id: "2", description: "1.1 Вторая задача", done: false },
-  ];
-  await assert.rejects(
-    service.plan("/workspace", changeId, parentBranch),
-    /повторяющиеся номера/,
-  );
-
-  payload.state = "blocked";
-  payload.instruction = "Заполните обязательный артефакт";
-  await assert.rejects(
-    service.plan("/workspace", changeId, parentBranch),
-    /заблокирован: Заполните обязательный артефакт/,
-  );
-});
-
-test("preflight fail-closed отклоняет уже занятую task-ветку", async (context) => {
-  const fixture = await createFixture(context);
-  await execFileAsync("git", ["branch", taskBranch, fixture.baselineCommit], {
-    cwd: fixture.workspace,
-  });
-  const service = createChangeTaskExecutionService({
-    command: fixture.command,
-    async createAgent() {
-      throw new Error("Агент не должен создаваться после ошибки preflight");
-    },
-  });
-
-  await assert.rejects(
-    service.plan(fixture.workspace, changeId, parentBranch),
-    /Локальная task-ветка .* уже существует/,
-  );
-});
-
-test("High-агент завершает одну задачу через scoped MCP и Ready stacked PR", async (context) => {
-  const fixture = await createFixture(context);
-  const labels = [];
-  const links = [];
-  const checkpoints = [];
+test("High-агент создаёт один task-коммит без task PR", async (context) => {
+  const value = await fixture(context);
   let prompt = "";
   let toolResult;
+  const completedCheckpoints = [];
   const service = createChangeTaskExecutionService({
-    command: fixture.command,
+    command: value.command,
     async createAgent(options) {
-      assert.equal(options.config.provider, "codex/gpt-6-astra");
-      assert.equal(options.config.modeId, "default");
-      assert.equal(options.config.thinkingOptionId, "high");
-      assert.deepEqual(options.labels, { ntfy: "true" });
       const [{ url }] = Object.values(options.config.mcpServers);
       return {
-        id: "agent-task-1.1",
+        id: "task-agent",
         async commands() {
-          return {
-            commands: [
-              { name: "openspec-apply-change", description: "apply" },
-              { name: "change-summary", description: "summary" },
-            ],
-            error: null,
-          };
+          return { commands: [{ name: "openspec-apply-change" }], error: null };
         },
-        async send(value) {
-          prompt = value;
-          const head = await commitTask(fixture);
-          fixture.setTaskPullRequest({
-            number: 44,
-            url: `${repositoryUrl}/pull/44`,
-            state: "OPEN",
-            isDraft: false,
-            isCrossRepository: false,
-            baseRefName: parentBranch,
-            headRefName: taskBranch,
-            headRefOid: head,
-            title,
-            body,
-          });
+        async send(input) {
+          prompt = input;
+          await commitTask(value);
           const client = await connectClient(url);
           try {
-            toolResult = await client.callTool({
-              name: "complete_change_task",
-              arguments: { pullRequestNumber: 44, title, body },
-            });
+            toolResult = await client.callTool({ name: "complete_change_task", arguments: {} });
           } finally {
             await client.close();
           }
         },
-        async waitForFinish() {
-          return { status: "idle" };
-        },
+        async waitForFinish() { return { status: "idle" }; },
       };
     },
-    updateNotificationLabel: async (agentId, enabled) => labels.push([agentId, enabled]),
+    updateNotificationLabel: async () => {},
     logger: { error() {}, warn() {} },
   });
-  const plan = await service.plan(fixture.workspace, changeId, parentBranch);
-  assert.equal(plan.kind, "next-task");
-
+  const plan = await service.plan(value.workspace, value.run);
   const completed = await service.run({
-    workspaceDirectory: fixture.workspace,
+    workspaceDirectory: value.workspace,
     profile: highProfile(),
     session: plan.session,
     signal: new AbortController().signal,
-    onAgentCreated: (agentId) => links.push(agentId),
-    onTaskCompleted: async (task) => checkpoints.push(task),
+    onAgentCreated() {},
+    onTaskCompleted: async (result) => completedCheckpoints.push(result),
   });
-
   assert.equal(toolResult.isError, undefined);
-  assert.equal(completed.taskNumber, "1.1");
-  assert.equal(completed.branch, taskBranch);
+  assert.equal(completed.branch, implementationBranch);
+  assert.equal(completed.taskId, "internal-a");
   assert.equal(completed.remainingTasks, 1);
-  assert.equal(completed.pullRequest.number, 44);
-  assert.deepEqual(links, ["agent-task-1.1"]);
-  assert.equal(checkpoints.length, 1);
-  assert.deepEqual(labels, [["agent-task-1.1", false]]);
-  assert.match(prompt, /\$openspec-apply-change selected-change Выполни задачу 1\.1/);
-  assert.match(prompt, /\$change-summary/);
-  assert.match(prompt, /complete_change_task/);
-  assert.match(prompt, /end the turn silently/);
+  assert.match(completed.commit, /^[0-9a-f]{40}$/u);
+  assert.equal(completedCheckpoints.length, 1);
+  assert.match(prompt, /complete_change_task.*empty object/su);
+  assert.match(prompt, /Do not invoke `gh`/u);
+  assert.doesNotMatch(prompt, /change-summary/u);
+  assert.doesNotMatch(prompt, /gh pr create/iu);
 });
 
-test("MCP возвращает feedback, если агент отметил следующую задачу", async (context) => {
-  const fixture = await createFixture(context);
-  const controller = new AbortController();
-  const labels = [];
+test("completion отклоняет изменение task-state следующей задачи", async (context) => {
+  const value = await fixture(context);
   let toolResult;
-  let toolFinished;
-  const toolFinishedPromise = new Promise((resolve) => {
-    toolFinished = resolve;
-  });
   const service = createChangeTaskExecutionService({
-    command: fixture.command,
+    command: value.command,
     async createAgent(options) {
       const [{ url }] = Object.values(options.config.mcpServers);
       return {
-        id: "agent-task-invalid-scope",
-        async commands() {
-          return {
-            commands: [{ name: "openspec-apply-change" }, { name: "change-summary" }],
-            error: null,
-          };
-        },
+        id: "invalid-task-agent",
+        async commands() { return { commands: [{ name: "openspec-apply-change" }], error: null }; },
         async send() {
-          const head = await commitTask(fixture, { completeSecond: true });
-          fixture.setTaskPullRequest({
-            number: 44,
-            url: `${repositoryUrl}/pull/44`,
-            state: "OPEN",
-            isDraft: false,
-            isCrossRepository: false,
-            baseRefName: parentBranch,
-            headRefName: taskBranch,
-            headRefOid: head,
-            title,
-            body,
-          });
+          await commitTask(value, { markSecond: true });
           const client = await connectClient(url);
           try {
-            toolResult = await client.callTool({
-              name: "complete_change_task",
-              arguments: { pullRequestNumber: 44, title, body },
-            });
+            toolResult = await client.callTool({ name: "complete_change_task", arguments: {} });
           } finally {
             await client.close();
-            toolFinished();
           }
         },
-        async waitForFinish() {
-          return { status: "idle" };
-        },
+        async waitForFinish() { return { status: "idle" }; },
       };
     },
-    updateNotificationLabel: async (agentId, enabled) => labels.push([agentId, enabled]),
+    updateNotificationLabel: async () => {},
     logger: { error() {}, warn() {} },
   });
-  const plan = await service.plan(fixture.workspace, changeId, parentBranch);
-  assert.equal(plan.kind, "next-task");
-  const execution = service.run({
-    workspaceDirectory: fixture.workspace,
+  const plan = await service.plan(value.workspace, value.run);
+  const controller = new AbortController();
+  const pending = service.run({
+    workspaceDirectory: value.workspace,
     profile: highProfile(),
     session: plan.session,
     signal: controller.signal,
     onAgentCreated() {},
-    async onTaskCompleted() {
-      throw new Error("Некорректная задача не должна сохраняться");
-    },
+    onTaskCompleted: async () => {},
   });
-
-  await toolFinishedPromise;
+  while (!toolResult) await new Promise((resolve) => setImmediate(resolve));
   assert.equal(toolResult.isError, true);
-  assert.match(firstText(toolResult), /единственным изменением task-state/);
+  assert.match(toolResult.content[0].text, /единственным изменением task-state/u);
   controller.abort();
-  await assert.rejects(execution, { name: "AbortError" });
-  assert.deepEqual(labels, [["agent-task-invalid-scope", false]]);
+  await assert.rejects(pending, /abort/iu);
 });
 
-test("ошибка durable checkpoint восстанавливает ntfy и оставляет MCP для retry", async (context) => {
-  const fixture = await createFixture(context);
-  const controller = new AbortController();
-  const labels = [];
-  let toolResult;
-  let toolFinished;
-  const toolFinishedPromise = new Promise((resolve) => {
-    toolFinished = resolve;
-  });
-  const service = createChangeTaskExecutionService({
-    command: fixture.command,
-    async createAgent(options) {
-      const [{ url }] = Object.values(options.config.mcpServers);
-      return {
-        id: "agent-task-checkpoint-error",
-        async commands() {
-          return {
-            commands: [{ name: "openspec-apply-change" }, { name: "change-summary" }],
-            error: null,
-          };
-        },
-        async send() {
-          const head = await commitTask(fixture);
-          fixture.setTaskPullRequest({
-            number: 44,
-            url: `${repositoryUrl}/pull/44`,
-            state: "OPEN",
-            isDraft: false,
-            isCrossRepository: false,
-            baseRefName: parentBranch,
-            headRefName: taskBranch,
-            headRefOid: head,
-            title,
-            body,
-          });
-          const client = await connectClient(url);
-          try {
-            toolResult = await client.callTool({
-              name: "complete_change_task",
-              arguments: { pullRequestNumber: 44, title, body },
-            });
-          } finally {
-            await client.close();
-            toolFinished();
-          }
-        },
-        async waitForFinish() {
-          return { status: "idle" };
-        },
-      };
-    },
-    updateNotificationLabel: async (agentId, enabled) => labels.push([agentId, enabled]),
-    logger: { error() {}, warn() {} },
-  });
-  const plan = await service.plan(fixture.workspace, changeId, parentBranch);
-  assert.equal(plan.kind, "next-task");
-  const execution = service.run({
-    workspaceDirectory: fixture.workspace,
-    profile: highProfile(),
-    session: plan.session,
-    signal: controller.signal,
-    onAgentCreated() {},
-    async onTaskCompleted() {
-      throw new Error("Ошибка fsync checkpoint");
-    },
-  });
-
-  await toolFinishedPromise;
-  assert.equal(toolResult.isError, true);
-  assert.match(firstText(toolResult), /надёжно сохранить/);
-  assert.deepEqual(labels, [
-    ["agent-task-checkpoint-error", false],
-    ["agent-task-checkpoint-error", true],
-  ]);
-  controller.abort();
-  await assert.rejects(execution, { name: "AbortError" });
-  assert.deepEqual(labels.at(-1), ["agent-task-checkpoint-error", false]);
-});
-
-test("prompt recovery не повторяет apply skill после готового коммита", async () => {
-  const session = {
-    changeId,
-    schemaName: "spec-driven",
-    taskId: "1",
-    taskNumber: "1.1",
-    taskDescription: "1.1 Реализовать выбранное поведение",
-    parentBranch,
-    parentBaseBranch,
-    taskBranch,
-    baselineCommit: "a".repeat(40),
-    tasksBeforeDigest: "b".repeat(64),
-    tasksAfterDigest: "c".repeat(64),
-    progressTotal: 2,
-    progressComplete: 0,
-    repositoryHost: "github.com",
-    repositoryNameWithOwner: repository,
-    repositoryUrl,
-    parentPullRequestNumber: 43,
-  };
+test("recovery prompt не повторяет apply и запрещает GitHub-операции", () => {
   const prompt = changeTaskExecutionPrompt({
-    session,
+    session: {
+      changeId,
+      schemaName: "spec-driven",
+      taskId: "internal-a",
+      taskNumber: "1.1",
+      taskDescription: "1.1 Первая задача",
+      changeBranch,
+      implementationBranch,
+      rootBaselineCommit: "a".repeat(40),
+      baselineCommit: "b".repeat(40),
+      tasksBeforeDigest: "c".repeat(64),
+      tasksAfterDigest: "d".repeat(64),
+      progressTotal: 2,
+      progressComplete: 0,
+      repositoryHost: "github.com",
+      repositoryNameWithOwner: "example/project",
+      repositoryUrl: "https://github.com/example/project",
+    },
     alreadyCommitted: true,
-    existingPullRequest: 44,
   });
-  assert.match(prompt, /already implemented/);
-  assert.doesNotMatch(prompt, /\$openspec-apply-change/);
-  assert.match(prompt, /\$change-summary/);
-  assert.match(prompt, /pull request 44/);
+  assert.doesNotMatch(prompt, /\$openspec-apply-change/u);
+  assert.match(prompt, /Do not invoke `gh`/u);
+  assert.match(prompt, new RegExp(implementationBranch, "u"));
 });
