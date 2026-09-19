@@ -52,9 +52,10 @@ interface WorkflowState {
 инициализации, planning- и implementation-веток, артефакта, review, findings,
 обоих merge-gate, phase planning, задачи и PR feedback взаимоисключающие.
 
-`PhaseProgress` хранит fingerprints известных фаз и ordered task-префикса, а
-также следующий монотонный номер implementation run. Ранее известные фазы,
-task ID, номера и описания неизменяемы; завершённую задачу нельзя открыть снова.
+`PhaseProgress` хранит номера распознанных фаз, fingerprints ordered
+task-префикса и следующий монотонный номер implementation run. Содержимое
+секций фаз не фиксируется и может меняться; task ID, номера и описания
+неизменяемы, а завершённую задачу нельзя открыть снова.
 `PlanningRun` и `ImplementationRun` взаимоисключающие и всегда относятся к
 одной целевой фазе.
 
@@ -248,9 +249,9 @@ planning-артефактов, точный remote HEAD и Ready planning PR.
 `implementation/<id>/phase-N/run-M` и одном Draft implementation PR: сначала `review.md`,
 затем `implementation-review.md`. Каждая итерация выбирает первый активный
 `F<n>`, требует отдельное разрешение на исправление/принятие риска и отдельное
-разрешение на commit+push. MCP повторно валидирует отчёт, commit, remote head и
-publication contract соответствующей ветки, после чего идемпотентно добавляет
-результат в управляемую секцию body.
+разрешение на commit+push. MCP подтверждает исчезновение выбранного
+finding-заголовка, commit, remote head и publication contract соответствующей
+ветки, после чего идемпотентно добавляет результат в управляемую секцию body.
 
 ## Merge-gate planning PR
 
@@ -281,10 +282,10 @@ worktree, divergence или несовпадающий root PR head остана
 
 Инспектор безопасно читает обязательный `<changeRoot>/plan.md`: файл должен
 быть обычным, не symlink, не больше 256 KiB, иметь корректный UTF-8 и находиться
-внутри change root и Git root. Fenced code blocks игнорируются. Остальные
-заголовки обязаны быть последовательными `## Phase N: ...` без дублей и
-пропусков, а каждая фаза — содержать заполненные `Objective`, `Outcome`,
-`Boundaries` и `Ready to advance`.
+внутри change root и Git root. Из документа извлекаются только уникальные номера
+из распознанных строк-заголовков `## Phase N...`; fenced code blocks и всё
+остальное содержимое игнорируются. Последовательность номеров, поля секций и
+остальная Markdown-структура не проверяются и не создают ошибок.
 
 Task-артефакты определяются по `applyRequires` и concrete paths из OpenSpec
 status JSON. Номер задачи берётся из начала description; первый сегмент `N.*`
@@ -292,8 +293,9 @@ status JSON. Номер задачи берётся из начала descriptio
 противоречивый progress, `blocked` и задачи после первой нераспланированной фазы
 fail closed. Решение типизировано:
 
-- `implementation-required` — минимальная фаза с незавершённой задачей;
-- `planning-required` — первая фаза без задач;
+- `implementation-required` — первая по порядку заголовков фаза с
+  незавершённой задачей;
+- `planning-required` — первая по порядку заголовков фаза без задач;
 - `change-complete` — каждая фаза имеет задачи и все они завершены.
 
 Для `planning-required` root PR гарантированно переводится в Draft и создаётся
@@ -307,8 +309,9 @@ Conventional Commit, только task-файлы, точный старый tas
 Затем planning-ветка публикуется, а `openspec-review-change` проверяет именно
 полноту и непротиворечивость задач Phase N. После записи `review.md` всегда
 последовательно проходят `resolve-review-findings` и
-`resolve-implementation-review-findings`; отсутствие отчёта или findings —
-успешный no-op. `validate-phase-planning` повторно сверяет fingerprints и
+`resolve-implementation-review-findings`; отсутствие отчёта или распознанных
+заголовков `F<n>` — успешный no-op. Формат и полнота review-файлов не
+проверяются. `validate-phase-planning` повторно сверяет историю задач и
 ограничение Phase N, а также допускает изменения только task-файлов,
 `review.md` и `implementation-review.md` перед ручным merge planning PR.
 
@@ -336,8 +339,9 @@ commit}` в collecting batch и повторяет шаг.
 При `all_done` непустой batch передаётся `review-implementation`. High Sandbox
 агент вызывает `openspec-review-implementation` для точного `base..head`,
 сопоставляет каждый task-коммит с review unit и изменяет только
-`implementation-review.md`. Completion требует полное покрытие, точный ordered
-список коммитов, один report commit и push. Первый review создаёт Draft PR
+`implementation-review.md`. Completion требует один report commit и push, но
+не перепроверяет структуру, coverage или записанный в отчёте список коммитов.
+Первый review создаёт Draft PR
 текущего `phase-N/run-M -> change/<id>`, повторные reviews используют тот же PR.
 Управляемый блок сводки обновляется без потери пользовательского текста и секции
 результатов findings; повреждённые markers останавливают публикацию.
@@ -359,7 +363,8 @@ Feedback передаётся High Sandbox агенту как недовере�
 замечания по зафиксированному cumulative range
 `rootBaseline..lastDeliveryHead`. Только
 доказанная проблема меняет `implementation-review.md`; режимы completion —
-`report-updated` и `no-report-change`. Fingerprints фиксируются только вместе с
+`report-updated` и `no-report-change`. Содержимое отчёта и его blob fingerprint
+не сверяются оркестратором. Feedback fingerprints фиксируются только вместе с
 успешным durable completion.
 
 Чистый Draft PR переводится в Ready и сразу повторно проверяется на feedback.

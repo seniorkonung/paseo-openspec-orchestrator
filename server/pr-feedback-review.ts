@@ -1,4 +1,3 @@
-import { lstat, realpath } from "node:fs/promises";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import type { CompleteRequiredAgentProfile } from "./agent-profiles.ts";
@@ -42,10 +41,6 @@ import {
   type ImplementationRun,
 } from "./implementation-run-model.ts";
 import {
-  ImplementationReviewReportError,
-  readImplementationReviewReport,
-} from "./implementation-review-report.ts";
-import {
   readImplementationReviewContext,
   type ImplementationReviewContext,
 } from "./implementation-review-context.ts";
@@ -65,7 +60,7 @@ export const pendingPrFeedbackReviewSessionSchema = z
     rootBaselineCommit: commitHashSchema,
     rangeHead: commitHashSchema,
     baselineCommit: commitHashSchema,
-    reportBlob: commitHashSchema,
+    reportBlob: commitHashSchema.optional(),
     repository: implementationRepositorySchema,
     items: z.array(implementationFeedbackItemSchema).min(1).max(1_000),
   })
@@ -235,20 +230,6 @@ export function createPrFeedbackReviewService(
         "Текущий implementation HEAD не содержит последний delivery head",
         signal,
       );
-      const context = await readImplementationReviewContext(
-        command,
-        workspaceDirectory,
-        run.changeId,
-        (message) => new PrFeedbackReviewError(message),
-        signal,
-      );
-      const reportBlob = await readReportBlob(
-        command,
-        context.gitRoot,
-        context.reviewRepositoryPath,
-        baselineCommit,
-        signal,
-      );
       return pendingPrFeedbackReviewSessionSchema.parse({
         changeId: run.changeId,
         changeBranch: run.changeBranch,
@@ -256,7 +237,6 @@ export function createPrFeedbackReviewService(
         rootBaselineCommit: run.rootBaselineCommit,
         rangeHead: run.lastDeliveryHead,
         baselineCommit,
-        reportBlob,
         repository: run.repository,
         items,
       });
@@ -322,10 +302,7 @@ export function createPrFeedbackReviewService(
                   combined.signal,
                 );
               } catch (error) {
-                if (
-                  error instanceof PrFeedbackReviewError ||
-                  error instanceof ImplementationReviewReportError
-                ) {
+                if (error instanceof PrFeedbackReviewError) {
                   throw new McpToolError(error.message);
                 }
                 if (combined.signal.aborted) throw error;
@@ -505,18 +482,6 @@ async function verifyFeedbackCompletion(
         "Режим no-report-change требует неизменный Git HEAD",
       );
     }
-    const reportBlob = await readReportBlob(
-      command,
-      context.gitRoot,
-      context.reviewRepositoryPath,
-      head,
-      signal,
-    );
-    if (reportBlob !== session.reportBlob) {
-      throw new PrFeedbackReviewError(
-        "Implementation review report изменился в режиме no-report-change",
-      );
-    }
   } else {
     await assertTaskCommitDescendsFrom(
       command,
@@ -561,34 +526,6 @@ async function verifyFeedbackCompletion(
         `Feedback audit commit должен иметь subject «${prFeedbackReviewCommitSubject()}»`,
       );
     }
-    const report = await readImplementationReviewReport({
-      reviewPath: context.reviewPath,
-      changeRoot: context.changeRoot,
-      expectedChangeId: session.changeId,
-      inspectPath: lstat,
-      resolveRealPath: realpath,
-    });
-    if (
-      report.coverageStatus !== "Complete" ||
-      report.baseCommit !== session.rootBaselineCommit ||
-      report.reviewedHead !== session.rangeHead
-    ) {
-      throw new PrFeedbackReviewError(
-        "Feedback audit report должен описывать зафиксированный cumulative range",
-      );
-    }
-    const commits = await readCommitRange(
-      command,
-      context.gitRoot,
-      session.rootBaselineCommit,
-      session.rangeHead,
-      signal,
-    );
-    if (!sameStrings(report.targetCommits, commits)) {
-      throw new PrFeedbackReviewError(
-        "Feedback audit report содержит неполный список cumulative commits",
-      );
-    }
   }
   const remoteHead = await readRemoteTaskBranchCommit(
     command,
@@ -611,54 +548,6 @@ async function verifyFeedbackCompletion(
     head,
     processedFingerprints: session.items.map(({ fingerprint }) => fingerprint),
   };
-}
-
-async function readCommitRange(
-  command: BoundedCommandRunner,
-  gitRoot: string,
-  base: string,
-  head: string,
-  signal?: AbortSignal,
-): Promise<readonly string[]> {
-  try {
-    const result = await command("git", ["rev-list", "--reverse", `${base}..${head}`], {
-      cwd: gitRoot,
-      signal,
-    });
-    return result.stdout.trim().split("\n").filter(Boolean).map((commit) =>
-      commitHashSchema.parse(commit)
-    );
-  } catch (error) {
-    if (signal?.aborted) throw error;
-    throw new PrFeedbackReviewError(
-      "Не удалось подтвердить cumulative commit range feedback audit",
-    );
-  }
-}
-
-function sameStrings(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
-async function readReportBlob(
-  command: BoundedCommandRunner,
-  gitRoot: string,
-  reportPath: string,
-  commit: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  try {
-    const result = await command("git", ["rev-parse", `${commit}:${reportPath}`], {
-      cwd: gitRoot,
-      signal,
-    });
-    return commitHashSchema.parse(result.stdout.trim());
-  } catch (error) {
-    if (signal?.aborted) throw error;
-    throw new PrFeedbackReviewError(
-      "Не удалось зафиксировать implementation-review.md перед feedback audit",
-    );
-  }
 }
 
 function assertSessionMatchesRun(

@@ -20,23 +20,15 @@ import { openSpecChangeIdSchema } from "./openspec-change.ts";
 const MAX_PLAN_BYTES = 256 * 1024;
 const MAX_PHASES = 256;
 const TASK_NUMBER_PREFIX = /^(\d+(?:\.\d+)+(?:[A-Za-z]+)?)(?=\s|$)/u;
-const PHASE_HEADING = /^## Phase ([1-9][0-9]*):\s*(\S(?:.*\S)?)\s*$/u;
-const ANY_PHASE_HEADING = /^##\s+Phase\b/u;
-const REQUIRED_FIELDS = [
-  "Objective",
-  "Outcome",
-  "Boundaries",
-  "Ready to advance",
-] as const;
+const PHASE_HEADING = /^\s{0,3}##[ \t]+Phase[ \t]+([1-9][0-9]*)\b/iu;
 
 const fingerprintSchema = z.string().regex(/^[0-9a-f]{64}$/u);
 
-export const phaseFingerprintSchema = z
+export const phaseReferenceSchema = z
   .object({
-    number: z.number().int().positive().max(MAX_PHASES),
-    fingerprint: fingerprintSchema,
+    number: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   })
-  .strict();
+  .strip();
 
 export const taskFingerprintSchema = z
   .object({
@@ -50,20 +42,22 @@ export const taskFingerprintSchema = z
 
 export const phaseProgressSchema = z
   .object({
-    phases: z.array(phaseFingerprintSchema).min(1).max(MAX_PHASES),
+    phases: z.array(phaseReferenceSchema).max(MAX_PHASES),
     tasks: z.array(taskFingerprintSchema).max(4_096),
     nextImplementationRun: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   })
   .strict()
   .superRefine((progress, context) => {
+    const phaseNumbers = new Set<number>();
     progress.phases.forEach((phase, index) => {
-      if (phase.number !== index + 1) {
+      if (phaseNumbers.has(phase.number)) {
         context.addIssue({
           code: "custom",
           path: ["phases", index, "number"],
-          message: "Сохранённые фазы должны идти последовательно с Phase 1",
+          message: "Сохранённые номера фаз не должны повторяться",
         });
       }
+      phaseNumbers.add(phase.number);
     });
     const knownPhases = new Set(progress.phases.map(({ number }) => number));
     const ids = new Set<string>();
@@ -106,8 +100,6 @@ export type PhaseProgress = z.infer<typeof phaseProgressSchema>;
 
 export interface ParsedPhase {
   readonly number: number;
-  readonly title: string;
-  readonly fingerprint: string;
 }
 
 export interface PhaseTaskSnapshot {
@@ -242,62 +234,26 @@ export function createPhaseWorkService(
 export function parsePhasedPlan(markdown: string): readonly ParsedPhase[] {
   const normalized = markdown.replace(/\r\n?/gu, "\n");
   const lines = normalized.split("\n");
-  const visibleLines = [...lines];
-  const starts: Array<{ number: number; title: string; line: number }> = [];
+  const phases: ParsedPhase[] = [];
+  const seen = new Set<number>();
   let fence: { marker: "`" | "~"; length: number } | null = null;
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index]!;
+  for (const line of lines) {
     const fenceMatch = /^\s*(`{3,}|~{3,})/u.exec(line);
     if (fenceMatch?.[1]) {
       const marker = fenceMatch[1][0] as "`" | "~";
       if (!fence) fence = { marker, length: fenceMatch[1].length };
       else if (marker === fence.marker && fenceMatch[1].length >= fence.length) fence = null;
-      visibleLines[index] = "";
       continue;
     }
-    if (fence) {
-      visibleLines[index] = "";
-      continue;
-    }
+    if (fence) continue;
     const match = PHASE_HEADING.exec(line);
-    if (match?.[1] && match[2]) {
-      starts.push({ number: Number(match[1]), title: match[2], line: index });
-      continue;
-    }
-    if (ANY_PHASE_HEADING.test(line)) {
-      throw new PhaseWorkError(`Некорректный заголовок фазы в plan.md: строка ${index + 1}`);
-    }
+    if (!match?.[1]) continue;
+    const number = Number(match[1]);
+    if (seen.has(number) || phases.length >= MAX_PHASES) continue;
+    seen.add(number);
+    phases.push(Object.freeze({ number }));
   }
-  if (fence) throw new PhaseWorkError("В plan.md не закрыт fenced code block");
-  if (starts.length === 0) throw new PhaseWorkError("plan.md не содержит ни одной Phase N");
-  if (starts.length > MAX_PHASES) throw new PhaseWorkError("plan.md содержит слишком много фаз");
-
-  return starts.map((start, index) => {
-    const expected = index + 1;
-    if (start.number !== expected) {
-      throw new PhaseWorkError(
-        `Фазы plan.md должны идти без пропусков и дублей: ожидалась Phase ${expected}`,
-      );
-    }
-    const end = starts[index + 1]?.line ?? lines.length;
-    const section = lines.slice(start.line, end).join("\n").trimEnd();
-    const visibleSection = visibleLines.slice(start.line, end).join("\n").trimEnd();
-    for (const field of REQUIRED_FIELDS) {
-      const count = [...visibleSection.matchAll(
-        new RegExp(`^\\*\\*${escapeRegExp(field)}:\\*\\*[ \\t]+\\S`, "gmu"),
-      )].length;
-      if (count !== 1) {
-        throw new PhaseWorkError(
-          `Phase ${start.number} должна содержать ровно одно заполненное поле «${field}»`,
-        );
-      }
-    }
-    return Object.freeze({
-      number: start.number,
-      title: start.title,
-      fingerprint: digest(section),
-    });
-  });
+  return Object.freeze(phases);
 }
 
 export function classifyPhaseWork(
@@ -341,7 +297,7 @@ export function classifyPhaseWork(
   }
 
   const progress = phaseProgressSchema.parse({
-    phases: snapshot.phases.map(({ number, fingerprint }) => ({ number, fingerprint })),
+    phases: snapshot.phases.map(({ number }) => ({ number })),
     tasks: snapshot.tasks.map(({ id, number, description, done, fingerprint }) => ({
       id,
       number,
@@ -351,9 +307,15 @@ export function classifyPhaseWork(
     })),
     nextImplementationRun: previous?.nextImplementationRun ?? 1,
   });
+  const phaseOrder = new Map(
+    snapshot.phases.map(({ number }, index) => [number, index]),
+  );
   const unfinished = snapshot.tasks
     .filter(({ done }) => !done)
-    .sort((left, right) => left.phaseNumber - right.phaseNumber)[0];
+    .sort(
+      (left, right) =>
+        phaseOrder.get(left.phaseNumber)! - phaseOrder.get(right.phaseNumber)!,
+    )[0];
   if (unfinished) {
     return {
       kind: "implementation-required",
@@ -428,15 +390,6 @@ function assertHistoricalProgress(
   previous: PhaseProgress | null,
 ): void {
   if (!previous) return;
-  if (snapshot.phases.length < previous.phases.length) {
-    throw new PhaseWorkError("Из plan.md удалена ранее известная фаза");
-  }
-  previous.phases.forEach((known, index) => {
-    const current = snapshot.phases[index];
-    if (!current || current.number !== known.number || current.fingerprint !== known.fingerprint) {
-      throw new PhaseWorkError(`Ранее известная Phase ${known.number} была изменена`);
-    }
-  });
   if (snapshot.tasks.length < previous.tasks.length) {
     throw new PhaseWorkError("Из OpenSpec удалена ранее известная задача");
   }
@@ -549,8 +502,4 @@ export function phaseTaskFingerprint(
   description: string,
 ): string {
   return digest(JSON.stringify([id, number, description]));
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }

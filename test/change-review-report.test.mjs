@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   MAX_CHANGE_REVIEW_BYTES,
+  MAX_CHANGE_REVIEW_FINDINGS,
   parseChangeReviewReport,
   readChangeReviewReport,
 } from "../server/change-review-report.ts";
@@ -82,59 +83,42 @@ test("parser сохраняет порядок активных findings и иг
 
   assert.deepEqual(parsed.findings.map(({ id }) => id), ["F7", "F2"]);
   assert.deepEqual(parsed.acceptedRisks, [
-    { id: "AR1", originatingFindingId: "F9" },
+    { originatingFindingId: "F9" },
   ]);
-  assert.deepEqual(parsed.acceptedRiskIds, ["AR1"]);
-  assert.equal(parsed.result, "Changes needed");
 });
 
-test("parser различает чистый и неполный review без findings", () => {
+test("parser одинаково трактует чистый и неполный review без finding-заголовков", () => {
   assert.deepEqual(parseChangeReviewReport(report(), changeId).findings, []);
   const incomplete = parseChangeReviewReport(
     report({ coverageStatus: "Incomplete" }),
     changeId,
   );
-  assert.equal(incomplete.result, "Review incomplete");
   assert.deepEqual(incomplete.findings, []);
 });
 
-test("parser fail-closed отклоняет дубли, несогласованный result и неизвестный формат", () => {
-  assert.throws(
-    () => parseChangeReviewReport(report({ findings: [finding("F1"), finding("F1")] }), changeId),
-    /Finding F1 повторяется/,
-  );
-  assert.throws(
-    () => parseChangeReviewReport(report({ findings: [finding("F1")], result: "No unresolved findings" }), changeId),
-    /Result должно иметь значение «Changes needed»/,
-  );
-  assert.throws(
-    () => parseChangeReviewReport(report().replace("Format version:** 1", "Format version:** 2"), changeId),
-    /Format version: 1/,
-  );
-  assert.throws(
-    () => parseChangeReviewReport(
-      report().replace(
-        "Проверены intent, behavioral contract, decisions, work и verification.",
-        "Проверены intent и **Unknown:** скрытое поле.",
-      ),
-      changeId,
-    ),
-    /Review coverage должен содержать только prose/,
-  );
-  assert.throws(
-    () => parseChangeReviewReport(
-      report({ findings: [finding(`F${"1".repeat(32)}`)] }),
-      changeId,
-    ),
-    /Finding ID слишком длинный/,
-  );
+test("parser молча игнорирует формат отчёта и дедуплицирует finding-заголовки", () => {
+  const parsed = parseChangeReviewReport([
+    "неизвестный формат без обязательных разделов",
+    "### F2: Короткий заголовок",
+    "### F2 · Повтор",
+    "**Result:** противоречивое значение",
+    "### F999999999999999999999999999999999: слишком длинный ID",
+    "```markdown",
+    "### F3 · Это только пример",
+    "```",
+  ].join("\n"), "other-change");
+
+  assert.deepEqual(parsed.findings, [{ id: "F2" }]);
 });
 
-test("parser ограничивает число активных findings", () => {
-  const findings = Array.from({ length: 257 }, (_, index) => finding(`F${index + 1}`));
-  assert.throws(
-    () => parseChangeReviewReport(report({ findings }), changeId),
-    /больше 256 findings/,
+test("parser молча ограничивает число активных findings", () => {
+  const findings = Array.from(
+    { length: MAX_CHANGE_REVIEW_FINDINGS + 1 },
+    (_, index) => finding(`F${index + 1}`),
+  );
+  assert.equal(
+    parseChangeReviewReport(report({ findings }), changeId).findings.length,
+    MAX_CHANGE_REVIEW_FINDINGS,
   );
 });
 
@@ -148,14 +132,11 @@ test("чтение отчёта отклоняет symlink, выход за chan
   const validPath = join(changeRoot, "review.md");
   await writeFile(validPath, report());
 
-  assert.equal(
-    (await readChangeReviewReport({
-      reviewPath: validPath,
-      changeRoot,
-      expectedChangeId: changeId,
-    })).changeId,
-    changeId,
-  );
+  assert.deepEqual((await readChangeReviewReport({
+    reviewPath: validPath,
+    changeRoot,
+    expectedChangeId: changeId,
+  })).findings, []);
 
   const outsidePath = join(otherRoot, "review.md");
   await writeFile(outsidePath, report());

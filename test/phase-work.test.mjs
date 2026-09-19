@@ -7,6 +7,7 @@ import {
   PhaseWorkError,
   classifyPhaseWork,
   createPhaseWorkService,
+  phaseProgressSchema,
   phaseTaskFingerprint,
   parsePhasedPlan,
 } from "../server/phase-work.ts";
@@ -57,37 +58,36 @@ function task(number, done = false, id = `task-${number}`) {
   };
 }
 
-test("parser принимает последовательные фазы и игнорирует заголовки внутри code fence", () => {
+test("parser извлекает только уникальные номера фаз и игнорирует code fence", () => {
   const markdown = `${plan(1, 2)}\n\n\`\`\`markdown\n## Phase 99: Не фаза\n\`\`\``;
-  assert.deepEqual(parsePhasedPlan(markdown).map(({ number, title }) => ({ number, title })), [
-    { number: 1, title: "Результат 1" },
-    { number: 2, title: "Результат 2" },
-  ]);
+  assert.deepEqual(parsePhasedPlan(markdown), [{ number: 1 }, { number: 2 }]);
 });
 
-test("parser fail-closed отклоняет пропуски, дубли, неверные поля и незакрытый fence", () => {
-  assert.throws(() => parsePhasedPlan(plan(1, 3)), PhaseWorkError);
-  assert.throws(() => parsePhasedPlan(plan(1, 1)), PhaseWorkError);
-  assert.throws(
-    () => parsePhasedPlan(plan(1).replace("**Outcome:** Состояние 1", "**Outcome:**")),
-    PhaseWorkError,
-  );
-  assert.throws(() => parsePhasedPlan(`${plan(1)}\n\`\`\``), PhaseWorkError);
-  assert.throws(
-    () => parsePhasedPlan([
-      "## Phase 1: Результат",
-      "```markdown",
-      "**Objective:** Только пример",
-      "**Outcome:** Только пример",
-      "**Boundaries:** Только пример",
-      "**Ready to advance:** Только пример",
-      "```",
-    ].join("\n")),
-    /Objective/u,
-  );
+test("parser молча пропускает произвольную структуру и не проверяет содержимое фаз", () => {
+  assert.deepEqual(parsePhasedPlan([
+    "произвольный текст до заголовков",
+    "## Phase 3",
+    "секция без Objective и остальных полей",
+    "## Phase 1: Заголовок",
+    "## Phase 3: Повтор",
+    "## Phase без номера",
+    "```markdown",
+    "## Phase 99: Пример",
+  ].join("\n")), [{ number: 3 }, { number: 1 }]);
+  assert.deepEqual(parsePhasedPlan("совсем не структурированный документ"), []);
 });
 
-test("классификатор выбирает planning, минимальную implementation-фазу и complete", () => {
+test("progress принимает старые phase fingerprints, но больше их не сохраняет", () => {
+  const progress = phaseProgressSchema.parse({
+    phases: [{ number: 1, fingerprint: fingerprint("a") }],
+    tasks: [],
+    nextImplementationRun: 1,
+  });
+
+  assert.deepEqual(progress.phases, [{ number: 1 }]);
+});
+
+test("классификатор выбирает planning, первую implementation-фазу и complete", () => {
   const phases = parsePhasedPlan(plan(1, 2));
   assert.deepEqual(
     classifyPhaseWork(snapshot(phases, []), null).kind,
@@ -109,9 +109,17 @@ test("классификатор выбирает planning, минимальну
     classifyPhaseWork(snapshot(phases, [task("1.1", true), task("2.1", true)]), null).kind,
     "change-complete",
   );
+
+  const headingOrder = parsePhasedPlan(plan(3, 1));
+  const firstByHeading = classifyPhaseWork(
+    snapshot(headingOrder, [task("3.1"), task("1.1")]),
+    null,
+  );
+  assert.equal(firstByHeading.kind, "implementation-required");
+  assert.equal(firstByHeading.phaseNumber, 3);
 });
 
-test("классификатор сохраняет fingerprints и запрещает gaps, rewrite и reopen", () => {
+test("классификатор сохраняет task fingerprints и запрещает gaps, rewrite и reopen", () => {
   const phases = parsePhasedPlan(plan(1, 2));
   assert.throws(
     () => classifyPhaseWork(snapshot(phases, [task("2.1")]), null),

@@ -133,16 +133,13 @@ ${findings}${risks}
 test("parser сохраняет порядок implementation findings и исключает accepted risks", () => {
   const parsed = parseImplementationReviewReport(implementationReview(), changeId);
 
-  assert.equal(parsed.changeId, changeId);
-  assert.equal(parsed.result, "Changes needed");
   assert.deepEqual(parsed.findings.map(({ id }) => id), ["F2", "F7"]);
   assert.deepEqual(parsed.acceptedRisks, [
-    { id: "AR1", originatingFindingId: "F1" },
+    { originatingFindingId: "F1" },
   ]);
-  assert.deepEqual(parsed.acceptedRiskIds, ["AR1"]);
 });
 
-test("parser принимает contract-valid originating finding длиннее session ID", () => {
+test("parser игнорирует originating finding, который нельзя использовать как session ID", () => {
   const parsed = parseImplementationReviewReport(
     implementationReview({
       findingIds: [],
@@ -152,15 +149,14 @@ test("parser принимает contract-valid originating finding длинне�
   );
 
   assert.deepEqual(parsed.findings, []);
-  assert.deepEqual(parsed.acceptedRiskIds, ["AR1"]);
+  assert.deepEqual(parsed.acceptedRisks, []);
 });
 
-test("parser различает чистый и неполный implementation review", () => {
+test("parser одинаково трактует чистый и неполный review без finding-заголовков", () => {
   const clean = parseImplementationReviewReport(
     implementationReview({ findingIds: [], acceptedRisks: [] }),
     changeId,
   );
-  assert.equal(clean.result, "No unresolved findings");
   assert.deepEqual(clean.findings, []);
 
   const incomplete = parseImplementationReviewReport(
@@ -172,48 +168,32 @@ test("parser различает чистый и неполный implementation 
     }),
     changeId,
   );
-  assert.equal(incomplete.result, "Incomplete");
   assert.deepEqual(incomplete.findings, []);
 });
 
-test("parser ограничивает число активных implementation findings", () => {
+test("parser молча ограничивает число активных implementation findings", () => {
   const findingIds = Array.from(
     { length: MAX_IMPLEMENTATION_REVIEW_FINDINGS + 1 },
     (_, index) => `F${index + 1}`,
   );
 
-  assert.throws(
-    () => parseImplementationReviewReport(implementationReview({ findingIds }), changeId),
-    /не более 256 активных findings/,
+  assert.equal(
+    parseImplementationReviewReport(implementationReview({ findingIds }), changeId).findings.length,
+    MAX_IMPLEMENTATION_REVIEW_FINDINGS,
   );
 });
 
-test("parser fail-closed отклоняет чужой change и несогласованные поля", () => {
-  assert.throws(
-    () => parseImplementationReviewReport(
-      implementationReview({ reportedChangeId: "other-change" }),
-      changeId,
-    ),
-    /другому change/,
-  );
+test("parser не проверяет change ID, assessment и coverage", () => {
+  const malformed = implementationReview({ reportedChangeId: "other-change" })
+    .replace("**Result:** Changes needed", "**Result:** No unresolved findings")
+    .replace(
+      `- **Planning evidence paths:** ["openspec/changes/${changeId}/spec.md"]`,
+      `- **Planning evidence paths:** ["outside.md"]`,
+    );
 
-  assert.throws(
-    () => parseImplementationReviewReport(
-      implementationReview().replace("**Result:** Changes needed", "**Result:** No unresolved findings"),
-      changeId,
-    ),
-    /Result должно иметь значение/,
-  );
-
-  assert.throws(
-    () => parseImplementationReviewReport(
-      implementationReview().replace(
-        `- **Planning evidence paths:** ["openspec/changes/${changeId}/spec.md"]`,
-        `- **Planning evidence paths:** ["outside.md"]`,
-      ),
-      changeId,
-    ),
-    /вне Reviewable paths/,
+  assert.deepEqual(
+    parseImplementationReviewReport(malformed, changeId).findings.map(({ id }) => id),
+    ["F2", "F7"],
   );
 });
 

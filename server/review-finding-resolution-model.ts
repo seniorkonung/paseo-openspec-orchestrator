@@ -93,7 +93,6 @@ export interface ReviewFindingReportLocation {
 export interface ActiveReviewFindingReport {
   readonly findings: readonly { readonly id: ReviewFindingId }[];
   readonly acceptedRisks: readonly {
-    readonly id: string;
     readonly originatingFindingId: string;
   }[];
 }
@@ -142,7 +141,7 @@ export function buildFindingResolutionPrompt(
 
 1. Explain the finding in Russian to someone who has never seen it: what is wrong, how it affects the product, and what you recommend. Where the resolution depends on a product, contract, architecture, data, security, privacy, or cost choice, give the real options and trade-offs; for an obvious technical correction, explain why product behavior stays the same.
 2. Get the user's first explicit permission before changing any artifact or accepting residual risk. A recommendation is not permission, and acceptance is never inferred: on acceptance let the skill record it through its own procedure instead of claiming a fix.
-3. Let the skill resolve only this finding and keep later findings intact unless current evidence changes them. The resolution holds only when the agreed outcome is durably owned by the OpenSpec artifacts, any remaining implementation is tracked work, the finding is gone from Findings, and the report still validates.
+3. Let the skill resolve only this finding and keep later findings intact unless current evidence changes them. The resolution holds only when the agreed outcome is durably owned by the OpenSpec artifacts, any remaining implementation is tracked work, and the finding heading is gone from Findings.
 4. Show the resulting artifact changes, report state, and validation, then get a separate second explicit permission to commit. If anything changes after that permission, show it and ask again. Then stage only files inside the change root and create exactly one commit with subject \`${subject}\`; never amend or add a second commit.`;
   const completion = input.publicationAlreadyCompleted
     ? `Finish by calling the orchestrator MCP tool \`${variant.toolName}\` with \`{"mode":"acknowledge-existing"}\`. If it reports an error, follow its feedback and retry the same tool.`

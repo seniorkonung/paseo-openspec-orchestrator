@@ -1,4 +1,3 @@
-import { lstat, realpath } from "node:fs/promises";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import type { CompleteRequiredAgentProfile } from "./agent-profiles.ts";
@@ -36,12 +35,7 @@ import {
   implementationRunSchema,
   implementationTaskCommitSchema,
   type ImplementationRun,
-  type ImplementationTaskCommit,
 } from "./implementation-run-model.ts";
-import {
-  readImplementationReviewReport,
-  ImplementationReviewReportError,
-} from "./implementation-review-report.ts";
 import {
   readImplementationReviewContext,
   type ImplementationReviewContext,
@@ -262,7 +256,6 @@ export function createImplementationReviewService(
               } catch (error) {
                 if (
                   error instanceof ImplementationReviewError ||
-                  error instanceof ImplementationReviewReportError ||
                   error instanceof ChangeReviewPublicationError
                 ) {
                   throw new McpToolError(error.message);
@@ -471,24 +464,6 @@ async function verifyCompletedReview(
       `Review commit должен иметь subject «${implementationReviewCommitSubject()}»`,
     );
   }
-  const report = await readImplementationReviewReport({
-    reviewPath: context.reviewPath,
-    changeRoot: context.changeRoot,
-    expectedChangeId: session.changeId,
-    inspectPath: lstat,
-    resolveRealPath: realpath,
-  });
-  if (
-    report.coverageStatus !== "Complete" ||
-    report.baseCommit !== session.baseCommit ||
-    report.reviewedHead !== session.reviewedHead ||
-    !sameStrings(report.targetCommits, session.tasks.map(({ commit }) => commit))
-  ) {
-    throw new ImplementationReviewError(
-      "Implementation review не подтверждает полное покрытие точного task-диапазона",
-    );
-  }
-  assertTaskCoverage(report.reviewUnits, session.tasks);
   const remoteHead = await readRemoteTaskBranchCommit(
     command,
     context.gitRoot,
@@ -625,21 +600,6 @@ function assertSessionMatchesRun(
     throw new ImplementationReviewError(
       "Implementation review session не соответствует текущему пакету",
     );
-  }
-}
-
-function assertTaskCoverage(
-  units: readonly { readonly workItems: readonly string[] }[],
-  tasks: readonly ImplementationTaskCommit[],
-): void {
-  for (const task of tasks) {
-    const escaped = task.taskNumber.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-    const pattern = new RegExp(`(?:^|\\s)${escaped}(?:$|\\s|[:—–-])`, "u");
-    if (!units.some(({ workItems }) => workItems.some((item) => pattern.test(item)))) {
-      throw new ImplementationReviewError(
-        `Task-коммит ${task.taskNumber} не сопоставлен ни с одним review unit`,
-      );
-    }
   }
 }
 

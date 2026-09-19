@@ -24,8 +24,9 @@ The plugin:
   orchestrator-owned REST gateway while preserving its existing Draft/Ready state;
 - creates one Ready PR from each planning branch to `change/<change-id>` and
   waits for its manual merge;
-- parses the required phased `plan.md`, fingerprints phases and tasks, and
-  chooses the earliest phase that needs planning or implementation;
+- scans bounded `plan.md` phase headings, snapshots OpenSpec tasks, and chooses
+  the earliest phase that needs planning or implementation without validating
+  the rest of the plan's Markdown structure;
 - creates a collision-free `implementation/<change-id>/phase-N/run-M` for one
   phase, with a durable monotonic run number;
 - executes only that phase's unfinished tasks sequentially, with one agent
@@ -113,8 +114,9 @@ The main boundaries are:
   rules, the stage contract, and one completion contract. A stage prompt states
   only what the invoked skill cannot know.
 - `server/workflow/types.ts` defines durable state. Checkpoint version 5 stores
-  phase/task fingerprints, planning and implementation runs, the monotonic run
-  counter, root PR identity, and at most one pending external-effect session.
+  known phase numbers, task fingerprints, planning and implementation runs, the
+  monotonic run counter, root PR identity, and at most one pending
+  external-effect session.
 - `server/orchestrator-ledger.ts` persists data below
   `$PASEO_HOME/plugin-data/paseo-openspec-orchestrator/`. Checkpoints older than
   version 5 are not migrated. Their ledger remains read-only and available for
@@ -125,8 +127,8 @@ The main boundaries are:
   commit recovery, root push, and root PR reconciliation.
 - `server/planning-branch.ts` owns collision-free creation of the planning
   branch from the durable root baseline.
-- `server/phase-work.ts` owns bounded `plan.md` parsing, task reconciliation,
-  immutable fingerprints, and the typed phase decision.
+- `server/phase-work.ts` owns bounded phase-heading extraction from `plan.md`,
+  task reconciliation, task fingerprints, and the typed phase decision.
 - `server/phase-task-planning.ts` owns the Ultra Sandbox
   `openspec-update-change` session and exact task-only commit verification.
 - `server/root-pull-request.ts` owns guarded root synchronization and the final
@@ -219,11 +221,12 @@ When findings are exhausted, the merge gate behaves as follows:
   source planning SHA with the post-merge root SHA.
 
 The orchestrator revalidates the OpenSpec change after the switch and enters a
-shared phase inspector. It reads bounded, regular, in-root `plan.md`, requires
-sequential `## Phase N: ...` sections with the phased-planning fields, and maps
-tasks to phases by the first segment of their `N.*` number. Missing tasks route
-to phase planning; unfinished tasks route to implementation; only a fully
-planned and completed change reaches the root gate.
+shared phase inspector. It reads bounded, regular, in-root `plan.md` and scans
+recognizable `## Phase N...` heading lines while ignoring all other content and
+silently deduplicating phase numbers. It maps tasks to phases by the first
+segment of their `N.*` number. Missing tasks route to phase planning; unfinished
+tasks route to implementation; only a fully planned and completed change reaches
+the root gate.
 
 For a phase without tasks, `planning/<id>/phase-N` is created from the current
 root baseline. An Ultra Sandbox agent is instructed directly to invoke
@@ -231,9 +234,10 @@ root baseline. An Ultra Sandbox agent is instructed directly to invoke
 `N.*` tasks while preserving the old task list as an exact prefix and leaving
 `plan.md` and code unchanged. Publication and a focused
 `openspec-review-change` follow; both finding resolvers run in order, with a
-missing report or no findings treated as a no-op. The final validation again
-enforces the preserved plan/task fingerprints and rejects changes outside the
-task files and two review reports before the manual planning merge.
+missing report or no recognizable `F<n>` finding headings treated as a no-op.
+Review report structure is not validated. The final validation enforces the
+preserved task history and target phase and rejects changes outside the task
+files and two review reports before the manual planning merge.
 
 ### Implementation cycle and merge gate
 
@@ -248,14 +252,18 @@ Completion checks root immutability, repository identity, the exact task-state
 transition, changed paths, commit count and subject, ancestry, and remote head.
 
 When all current tasks are done, the collected non-empty batch is reviewed by
-a High Sandbox agent over its exact `base..head`. The validated report must
-cover every task commit and is the only file in one review commit. The first
-successful review creates one Draft PR from the current implementation run to
+a High Sandbox agent over its exact `base..head`. The report is the only file in
+one review commit; the orchestrator does not validate its Markdown schema or
+repeat the agent's coverage assessment. The first successful review creates one
+Draft PR from the current implementation run to
 `change/<id>`; later cycles reuse it. Its managed Russian summary is updated
 without replacing user-authored text or the managed finding-results section.
 
-After every batch review, `review.md` findings are resolved first and
-`implementation-review.md` findings second, on the Draft implementation PR.
+After every batch review, the orchestrator scans only `F<n>` heading lines from
+`review.md` first and `implementation-review.md` second, on the Draft
+implementation PR. Other report content is ignored. An originating `F<n>`
+reference inside an accepted-risk entry is read only to preserve the published
+resolution outcome.
 The batch baseline is then reset at the current head and task execution starts
 again, so remediation can add tracked tasks and each new batch receives its own
 bounded review.

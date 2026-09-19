@@ -44,15 +44,21 @@ export const planningRunSchema = z
         message: "Planning-ветка не соответствует целевой фазе",
       });
     }
-    const taskPhases = run.baselineProgress.tasks.map(({ number }) =>
+    const taskPhases = new Set(run.baselineProgress.tasks.map(({ number }) =>
       Number(number.split(".")[0]),
+    ));
+    const phaseIndex = run.baselineProgress.phases.findIndex(
+      ({ number }) => number === run.phaseNumber,
+    );
+    const earlierPhases = run.baselineProgress.phases.slice(0, phaseIndex);
+    const targetAndLaterPhases = new Set(
+      run.baselineProgress.phases.slice(phaseIndex).map(({ number }) => number),
     );
     if (
-      !run.baselineProgress.phases.some(({ number }) => number === run.phaseNumber) ||
+      phaseIndex < 0 ||
       run.baselineProgress.tasks.some(({ done }) => !done) ||
-      taskPhases.some((number) => number >= run.phaseNumber) ||
-      Array.from({ length: run.phaseNumber - 1 }, (_, index) => index + 1)
-        .some((number) => !taskPhases.includes(number))
+      earlierPhases.some(({ number }) => !taskPhases.has(number)) ||
+      [...taskPhases].some((number) => targetAndLaterPhases.has(number))
     ) {
       context.addIssue({
         code: "custom",
