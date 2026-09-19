@@ -7,6 +7,7 @@ const changeId = "delivery-gate";
 const root = "a".repeat(40);
 const delivery = "b".repeat(40);
 const finalHead = "c".repeat(40);
+const rebasedRootHead = "d".repeat(40);
 const changeBranch = `change/${changeId}`;
 const implementationBranch = `implementation/${changeId}/phase-1/run-1`;
 const repository = {
@@ -34,7 +35,7 @@ function run(publicationKind = "ready-pr") {
   };
 }
 
-function pullRequest(state, isDraft = false) {
+function pullRequest(state, isDraft = false, mergedRoot = finalHead) {
   return {
     number: 51,
     url: "https://github.com/example/project/pull/51",
@@ -44,6 +45,7 @@ function pullRequest(state, isDraft = false) {
     baseRefName: changeBranch,
     headRefName: implementationBranch,
     headRefOid: finalHead,
+    mergeCommit: state === "MERGED" ? { oid: mergedRoot } : null,
     title: implementationPullRequestTitle(changeId),
     body: "Описание пользователя",
   };
@@ -93,7 +95,7 @@ function gateCommand(options = {}) {
       return { stdout: `${head}\n`, stderr: "" };
     }
     if (executable === "git" && joined === "rev-parse FETCH_HEAD") {
-      return { stdout: `${finalHead}\n`, stderr: "" };
+      return { stdout: `${options.fetchedRoot ?? finalHead}\n`, stderr: "" };
     }
     if (executable === "git" && arguments_[0] === "for-each-ref") {
       return { stdout: `${localRoot}\0refs/heads/${changeBranch}\n`, stderr: "" };
@@ -112,14 +114,18 @@ function gateCommand(options = {}) {
       return { stdout: "git@github.com:example/project.git\n", stderr: "" };
     }
     if (executable === "git" && arguments_[0] === "fetch") return { stdout: "", stderr: "" };
+    if (executable === "git" && arguments_[0] === "merge-base") {
+      if (arguments_[2] === options.nonAncestor) throw new Error("not an ancestor");
+      return { stdout: "", stderr: "" };
+    }
     if (executable === "git" && arguments_[0] === "switch") {
       branch = changeBranch;
       head = localRoot;
       return { stdout: "", stderr: "" };
     }
     if (executable === "git" && arguments_[0] === "merge") {
-      head = finalHead;
-      localRoot = finalHead;
+      head = options.fetchedRoot ?? finalHead;
+      localRoot = options.fetchedRoot ?? finalHead;
       return { stdout: "", stderr: "" };
     }
     throw new Error(`Неожиданная команда: ${executable} ${joined}`);
@@ -196,6 +202,52 @@ test("merge completion восстанавливается после уже вы
   assert.equal(
     harness.calls.filter((call) => call[0] === "git" && call[1] === "switch").length,
     1,
+  );
+});
+
+test("merge completion принимает новый SHA после GitHub Rebase and merge", async () => {
+  const harness = gateCommand({
+    pullRequest: pullRequest("MERGED", false, rebasedRootHead),
+    remoteRoot: rebasedRootHead,
+    fetchedRoot: rebasedRootHead,
+  });
+  const session = {
+    changeId,
+    changeBranch,
+    implementationBranch,
+    rootBaselineCommit: root,
+    finalImplementationHead: finalHead,
+    pullRequestNumber: 51,
+  };
+
+  assert.equal(
+    await createImplementationPullRequestService({ command: harness.command })
+      .completeMerge("/workspace", run(), session),
+    rebasedRootHead,
+  );
+});
+
+test("merge completion требует результат merge PR в удалённой root-ветке", async () => {
+  const unrelatedMergeCommit = "e".repeat(40);
+  const harness = gateCommand({
+    pullRequest: pullRequest("MERGED", false, unrelatedMergeCommit),
+    remoteRoot: rebasedRootHead,
+    fetchedRoot: rebasedRootHead,
+    nonAncestor: unrelatedMergeCommit,
+  });
+  const session = {
+    changeId,
+    changeBranch,
+    implementationBranch,
+    rootBaselineCommit: root,
+    finalImplementationHead: finalHead,
+    pullRequestNumber: 51,
+  };
+
+  await assert.rejects(
+    createImplementationPullRequestService({ command: harness.command })
+      .completeMerge("/workspace", run(), session),
+    /не содержит результат merge implementation PR/u,
   );
 });
 

@@ -103,7 +103,7 @@ export async function listReviewPullRequests(
         "--limit",
         String(MAX_PULL_REQUESTS),
         "--json",
-        "number,url,state,isDraft,isCrossRepository,baseRefName,headRefName,headRefOid,title,body",
+        "number,url,state,isDraft,isCrossRepository,baseRefName,headRefName,headRefOid,mergeCommit,title,body",
       ],
       { cwd: workspaceDirectory, signal },
     );
@@ -133,7 +133,7 @@ export async function readReviewPullRequest(
         "--repo",
         repository,
         "--json",
-        "number,url,state,isDraft,isCrossRepository,baseRefName,headRefName,headRefOid,title,body",
+        "number,url,state,isDraft,isCrossRepository,baseRefName,headRefName,headRefOid,mergeCommit,title,body",
       ],
       { cwd: workspaceDirectory, signal },
     );

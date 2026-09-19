@@ -17,6 +17,7 @@ function commandFor(state) {
     baseRefName: "main",
     headRefName: changeBranch,
     headRefOid: head,
+    mergeCommit: state === "MERGED" ? { oid: head } : null,
     title: "Корневой PR",
     body: "Описание",
   };

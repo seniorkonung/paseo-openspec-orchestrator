@@ -123,6 +123,7 @@ test("MERGED planning PR переключает root и обновляет её 
   const fixture = await repository(context);
   await git(fixture.workspace, ["push", "origin", `${planningBranch}:${changeBranch}`]);
   fixture.pullRequest.state = "MERGED";
+  fixture.pullRequest.mergeCommit = { oid: fixture.planningHead };
   const service = createPlanningMergeService({ command: commandFor(fixture) });
   const inspected = await service.inspect(
     fixture.workspace,
@@ -142,6 +143,52 @@ test("MERGED planning PR переключает root и обновляет её 
   assert.equal(
     await service.complete(fixture.workspace, inspected.session),
     changeBranch,
+  );
+});
+
+test("MERGED planning PR принимает новый SHA после GitHub Rebase and merge", async (context) => {
+  const fixture = await repository(context);
+  await git(fixture.workspace, ["switch", changeBranch]);
+  await git(fixture.workspace, ["cherry-pick", fixture.planningHead]);
+  await git(fixture.workspace, ["commit", "--amend", "-m", "docs: rebased planning"]);
+  const rebasedRootHead = await git(fixture.workspace, ["rev-parse", "HEAD"]);
+  assert.notEqual(rebasedRootHead, fixture.planningHead);
+  await git(fixture.workspace, ["push", "origin", changeBranch]);
+  await git(fixture.workspace, ["switch", planningBranch]);
+  await git(fixture.workspace, ["branch", "-f", changeBranch, fixture.rootHead]);
+  fixture.pullRequest.state = "MERGED";
+  fixture.pullRequest.mergeCommit = { oid: rebasedRootHead };
+
+  const service = createPlanningMergeService({ command: commandFor(fixture) });
+  const inspected = await service.inspect(
+    fixture.workspace,
+    changeId,
+    changeBranch,
+    planningBranch,
+  );
+  assert.equal(inspected.kind, "merged");
+  assert.equal(
+    await service.complete(fixture.workspace, inspected.session),
+    changeBranch,
+  );
+  assert.equal(await git(fixture.workspace, ["rev-parse", "HEAD"]), rebasedRootHead);
+});
+
+test("merge-gate требует результат merge PR в удалённой root-ветке", async (context) => {
+  const fixture = await repository(context);
+  fixture.pullRequest.state = "MERGED";
+  fixture.pullRequest.mergeCommit = { oid: fixture.planningHead };
+  const service = createPlanningMergeService({ command: commandFor(fixture) });
+  const inspected = await service.inspect(
+    fixture.workspace,
+    changeId,
+    changeBranch,
+    planningBranch,
+  );
+  assert.equal(inspected.kind, "merged");
+  await assert.rejects(
+    service.complete(fixture.workspace, inspected.session),
+    /не содержит результат merge planning PR/u,
   );
 });
 
@@ -214,6 +261,7 @@ test("merge-gate не переписывает расходящуюся лока
   await git(fixture.workspace, ["switch", planningBranch]);
   await git(fixture.workspace, ["push", "origin", `${planningBranch}:${changeBranch}`]);
   fixture.pullRequest.state = "MERGED";
+  fixture.pullRequest.mergeCommit = { oid: fixture.planningHead };
   const service = createPlanningMergeService({ command: commandFor(fixture) });
   const inspected = await service.inspect(
     fixture.workspace,

@@ -148,7 +148,8 @@ The main boundaries are:
   current phase implementation branch.
 - implementation review, publication, feedback, and merge modules own the exact
   batch range, single Draft/Ready PR, bounded GraphQL feedback ingress, and
-  guarded return to the root branch.
+  guarded return to the root branch across GitHub merge, squash, and rebase
+  strategies.
 
 External JSON, Git refs, paths, repository identities, PR metadata, persisted
 state, RPC payloads, and MCP inputs are validated before entering trusted code.
@@ -212,7 +213,10 @@ When findings are exhausted, the merge gate behaves as follows:
 - `CLOSED`: fail because the PR was closed without merge;
 - `MERGED`: checkpoint the verified repository, refs, PR number, and planning
   head; require a clean tree; fetch the saved root branch; switch back to it;
-  and update it only with `git merge --ff-only` to the fetched origin head.
+  require the GitHub merge-result commit to be contained in the fetched root;
+  and update it only with `git merge --ff-only` to that origin head. This
+  supports merge commits, squash merges, and rebase merges without equating the
+  source planning SHA with the post-merge root SHA.
 
 The orchestrator revalidates the OpenSpec change after the switch and enters a
 shared phase inspector. It reads bounded, regular, in-root `plan.md`, requires
@@ -269,9 +273,12 @@ A clean Draft PR is atomically promoted to Ready and checked again for racing
 feedback. The Ready gate halts until Retry. Retry gives merge status priority,
 returns the PR to Draft when new feedback exists, halts again when it remains
 open and clean, and rejects a closed unmerged PR. After merge, the same PR and
-final implementation head are verified before `change/<id>` is fetched and
-updated with `git merge --ff-only FETCH_HEAD`. The run is then cleared and the
-shared phase inspector executes again instead of completing the workflow.
+final implementation head are verified. The GitHub-reported merge-result commit
+must be contained in the fetched `change/<id>` head, so merge commits, squash
+merges, and rebase merges are accepted without assuming that the source commit
+SHA survives. The local root is then updated with `git merge --ff-only
+FETCH_HEAD`. The run is cleared and the shared phase inspector executes again
+instead of completing the workflow.
 
 When every phase has tasks and all tasks are done, the exact non-fork root PR
 `change/<id> -> main` is promoted to Ready. The orchestrator repeats the root

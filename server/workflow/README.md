@@ -266,9 +266,12 @@ publication contract соответствующей ветки, после че�
 Завершение сессии повторно проверяет тот же merged PR и planning head, требует
 чистое дерево, выполняет `git fetch --no-tags origin
 refs/heads/change/<id>`, переключается на сохранённую root-ветку и вызывает
-только `git merge --ff-only <FETCH_HEAD>`. Recovery принимает как planning, так
-и уже переключённую root-ветку. После сверки root с origin OpenSpec change
-проверяется ещё раз, `activeBranch` становится `change/<id>`.
+только `git merge --ff-only <FETCH_HEAD>`. Commit результата merge из GitHub
+должен быть предком fetched root head; исходный planning SHA не обязан
+сохраняться, поэтому одинаково поддерживаются merge commit, squash и rebase.
+Recovery принимает как planning, так и уже переключённую root-ветку. После
+сверки root с origin OpenSpec change проверяется ещё раз, `activeBranch`
+становится `change/<id>`.
 
 ## Инспектор фаз и task planning
 
@@ -364,9 +367,11 @@ Ready gate использует `halt`/Retry. На Retry merge имеет при
 feedback возвращает PR в Draft через `gh pr ready --undo`, открытый чистый PR
 снова приводит к `halt`, а CLOSED без merge — к ошибке. После MERGED сохраняется
 pending merge session, повторно проверяются тот же PR и final implementation
-head, затем root обновляется только через fetch, switch и `git merge --ff-only
-FETCH_HEAD`. Текущий run очищается, после чего workflow возвращается в
-`inspect-phase-work`, а не завершается.
+head. GitHub merge-result commit обязан входить в fetched root head, поэтому
+новые SHA после squash или rebase не смешиваются с неизменяемым SHA исходной
+implementation-ветки. Затем root обновляется только через fetch, switch и `git
+merge --ff-only FETCH_HEAD`. Текущий run очищается, после чего workflow
+возвращается в `inspect-phase-work`, а не завершается.
 
 При `change-complete` точный non-fork root PR `change/<id> -> main`
 автоматически переводится в Ready. Инспектор повторяет phase/task и PR-head

@@ -14,6 +14,7 @@ import {
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import {
   assertCleanReviewWorktree,
+  assertReviewCommitDescendsFrom,
   listReviewPullRequests,
   readCurrentReviewBranch,
   readLocalReviewBranchCommit,
@@ -205,7 +206,7 @@ export function createPlanningMergeService(
     async complete(workspaceDirectory, sessionInput, signal) {
       const session = pendingPlanningMergeSessionSchema.parse(sessionInput);
       await assertCleanReviewWorktree(command, workspaceDirectory, signal);
-      await assertMergedPullRequest(
+      const mergedRootCommit = await assertMergedPullRequest(
         command,
         workspaceDirectory,
         session,
@@ -254,6 +255,14 @@ export function createPlanningMergeService(
           `FETCH_HEAD не соответствует origin/${session.changeBranch}`,
         );
       }
+      await assertMergedCommitInRoot(
+        command,
+        workspaceDirectory,
+        mergedRootCommit,
+        fetchedHead,
+        session.changeBranch,
+        signal,
+      );
 
       if (currentBranch === session.planningBranch) {
         await runGitEffect(
@@ -361,7 +370,7 @@ async function assertMergedPullRequest(
   workspaceDirectory: string,
   session: PendingPlanningMergeSession,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<string> {
   const repository = await resolveReviewRepository(
     command,
     workspaceDirectory,
@@ -414,6 +423,7 @@ async function assertMergedPullRequest(
       "Planning pull request больше не соответствует подтверждённому merge",
     );
   }
+  return pullRequest.mergeCommit.oid;
 }
 
 async function fetchRootBranch(
@@ -445,6 +455,31 @@ async function readFetchedHead(
   } catch (error) {
     if (signal?.aborted) throw error;
     throw new PlanningMergeError("Не удалось проверить FETCH_HEAD корневой ветки");
+  }
+}
+
+async function assertMergedCommitInRoot(
+  command: BoundedCommandRunner,
+  workspaceDirectory: string,
+  mergedRootCommit: string,
+  fetchedHead: string,
+  changeBranch: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const message =
+    `Origin/${changeBranch} не содержит результат merge planning PR`;
+  try {
+    await assertReviewCommitDescendsFrom(
+      command,
+      workspaceDirectory,
+      mergedRootCommit,
+      fetchedHead,
+      message,
+      signal,
+    );
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw new PlanningMergeError(message);
   }
 }
 

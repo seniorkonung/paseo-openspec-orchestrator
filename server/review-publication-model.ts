@@ -62,20 +62,38 @@ export const reviewRepositorySchema = z
   })
   .strict();
 
-export const reviewPullRequestSchema = z
-  .object({
-    number: pullRequestNumberSchema,
-    url: httpsUrlSchema,
-    state: z.enum(["OPEN", "CLOSED", "MERGED"]),
-    isDraft: z.boolean(),
-    isCrossRepository: z.boolean(),
-    baseRefName: reviewBranchSchema.or(z.literal(REVIEW_PARENT_BRANCH)),
-    headRefName: reviewBranchSchema,
-    headRefOid: commitHashSchema,
-    title: z.string().max(MAX_REVIEW_PR_TITLE_LENGTH),
-    body: z.string().max(MAX_REVIEW_PR_BODY_LENGTH),
-  })
+const reviewPullRequestFields = {
+  number: pullRequestNumberSchema,
+  url: httpsUrlSchema,
+  isDraft: z.boolean(),
+  isCrossRepository: z.boolean(),
+  baseRefName: reviewBranchSchema.or(z.literal(REVIEW_PARENT_BRANCH)),
+  headRefName: reviewBranchSchema,
+  headRefOid: commitHashSchema,
+  title: z.string().max(MAX_REVIEW_PR_TITLE_LENGTH),
+  body: z.string().max(MAX_REVIEW_PR_BODY_LENGTH),
+} as const;
+
+const pullRequestMergeCommitSchema = z
+  .object({ oid: commitHashSchema })
   .strict();
+
+export const reviewPullRequestSchema = z.discriminatedUnion("state", [
+  z
+    .object({
+      ...reviewPullRequestFields,
+      state: z.enum(["OPEN", "CLOSED"]),
+      mergeCommit: z.null().default(null),
+    })
+    .strict(),
+  z
+    .object({
+      ...reviewPullRequestFields,
+      state: z.literal("MERGED"),
+      mergeCommit: pullRequestMergeCommitSchema,
+    })
+    .strict(),
+]);
 
 export type ReviewPullRequest = z.output<typeof reviewPullRequestSchema>;
 

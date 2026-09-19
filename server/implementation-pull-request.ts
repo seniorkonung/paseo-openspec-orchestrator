@@ -20,6 +20,7 @@ import {
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import {
   assertCleanReviewWorktree,
+  assertReviewCommitDescendsFrom,
   readCurrentReviewBranch,
   readLocalReviewBranchCommit,
   readOptionalRemoteReviewBranchCommit,
@@ -93,6 +94,10 @@ export class ImplementationPullRequestError extends Error {
     this.name = "ImplementationPullRequestError";
   }
 }
+
+type RemoteRootExpectation =
+  | { readonly kind: "exact"; readonly commit: string }
+  | { readonly kind: "merged" };
 
 export function createImplementationPullRequestService(
   options: ImplementationPullRequestServiceOptions = {},
@@ -179,7 +184,7 @@ export function createImplementationPullRequestService(
         command,
         workspaceDirectory,
         run,
-        currentHead(run),
+        { kind: "merged" },
         signal,
         true,
       );
@@ -189,7 +194,7 @@ export function createImplementationPullRequestService(
       command,
       workspaceDirectory,
       run,
-      run.rootBaselineCommit,
+      { kind: "exact", commit: run.rootBaselineCommit },
       signal,
     );
     if (pullRequest.state !== "OPEN") {
@@ -283,7 +288,7 @@ export function createImplementationPullRequestService(
           command,
           workspaceDirectory,
           run,
-          currentHead(run),
+          { kind: "merged" },
           signal,
           true,
         );
@@ -293,7 +298,7 @@ export function createImplementationPullRequestService(
         command,
         workspaceDirectory,
         run,
-        run.rootBaselineCommit,
+        { kind: "exact", commit: run.rootBaselineCommit },
         signal,
       );
       if (pullRequest.state !== "OPEN") {
@@ -334,18 +339,29 @@ export function createImplementationPullRequestService(
       await assertCleanReviewWorktree(command, workspaceDirectory, signal);
       await assertRepositoryIdentity(command, workspaceDirectory, run, signal);
       const pullRequest = await read(workspaceDirectory, run, signal);
-      if (
-        pullRequest.state !== "MERGED" ||
-        pullRequest.number !== session.pullRequestNumber ||
-        pullRequest.baseRefName !== session.changeBranch ||
-        pullRequest.headRefName !== session.implementationBranch ||
-        pullRequest.headRefOid !== session.finalImplementationHead ||
-        pullRequest.title !== implementationPullRequestTitle(session.changeId)
-      ) {
-        throw new ImplementationPullRequestError(
-          "Implementation pull request больше не соответствует pending merge",
-        );
-      }
+      const mergedRootCommit = assertMergedPullRequest(pullRequest, run);
+      const fetchedHead = await fetchMergedRoot(
+        command,
+        workspaceDirectory,
+        session.changeBranch,
+        signal,
+      );
+      await assertCommitAncestor(
+        command,
+        workspaceDirectory,
+        session.rootBaselineCommit,
+        fetchedHead,
+        "Удалённая корневая ветка больше не происходит от baseline implementation-run",
+        signal,
+      );
+      await assertCommitAncestor(
+        command,
+        workspaceDirectory,
+        mergedRootCommit,
+        fetchedHead,
+        "Удалённая корневая ветка не содержит результат merge implementation PR",
+        signal,
+      );
       const [branch, head, localRoot, remoteImplementation] = await Promise.all([
         readCurrentReviewBranch(command, workspaceDirectory, signal),
         readReviewHeadCommit(command, workspaceDirectory, signal),
@@ -361,10 +377,30 @@ export function createImplementationPullRequestService(
         branch === session.implementationBranch &&
         head === session.finalImplementationHead &&
         localRoot === session.rootBaselineCommit;
-      const recoveringRoot =
+      let recoveringRoot = false;
+      if (
         branch === session.changeBranch &&
-        head === localRoot &&
-        (head === session.rootBaselineCommit || head === session.finalImplementationHead);
+        localRoot !== null &&
+        head === localRoot
+      ) {
+        await assertCommitAncestor(
+          command,
+          workspaceDirectory,
+          session.rootBaselineCommit,
+          localRoot,
+          "Локальная корневая ветка больше не происходит от baseline implementation-run",
+          signal,
+        );
+        await assertCommitAncestor(
+          command,
+          workspaceDirectory,
+          localRoot,
+          fetchedHead,
+          "Локальная корневая ветка расходится с origin после implementation merge",
+          signal,
+        );
+        recoveringRoot = true;
+      }
       if (
         (remoteImplementation !== null &&
           remoteImplementation !== session.finalImplementationHead) ||
@@ -375,21 +411,6 @@ export function createImplementationPullRequestService(
         );
       }
       try {
-        await command("git", ["fetch", "origin", session.changeBranch], {
-          cwd: workspaceDirectory,
-          signal,
-        });
-        const fetchedHead = commitHashSchema.parse((
-          await command("git", ["rev-parse", "FETCH_HEAD"], {
-            cwd: workspaceDirectory,
-            signal,
-          })
-        ).stdout.trim());
-        if (fetchedHead !== session.finalImplementationHead) {
-          throw new ImplementationPullRequestError(
-            "Origin root-ветка не совпадает с финальным implementation head",
-          );
-        }
         if (branch !== session.changeBranch) {
           await command("git", ["switch", session.changeBranch], {
             cwd: workspaceDirectory,
@@ -412,13 +433,13 @@ export function createImplementationPullRequestService(
       ]);
       if (
         completedBranch !== session.changeBranch ||
-        completedHead !== session.finalImplementationHead
+        completedHead !== fetchedHead
       ) {
         throw new ImplementationPullRequestError(
-          "Корневая ветка не совпадает с финальным implementation head",
+          `Корневая ветка не совпадает с origin/${session.changeBranch}`,
         );
       }
-      return completedHead;
+      return fetchedHead;
     },
   };
 }
@@ -462,7 +483,7 @@ function assertPullRequestShape(
 function assertMergedPullRequest(
   pullRequest: Awaited<ReturnType<typeof readReviewPullRequest>>,
   run: ImplementationRun,
-): void {
+): string {
   if (
     run.publication.kind === "unpublished" ||
     pullRequest.state !== "MERGED" ||
@@ -477,13 +498,14 @@ function assertMergedPullRequest(
       "Merged implementation pull request не соответствует implementation-run",
     );
   }
+  return pullRequest.mergeCommit.oid;
 }
 
 async function assertLocalState(
   command: BoundedCommandRunner,
   workspaceDirectory: string,
   run: ImplementationRun,
-  expectedRemoteRoot: string,
+  remoteRootExpectation: RemoteRootExpectation,
   signal?: AbortSignal,
   allowMissingRemoteImplementation = false,
 ): Promise<void> {
@@ -504,7 +526,8 @@ async function assertLocalState(
     branch !== run.implementationBranch ||
     head !== currentHead(run) ||
     localRoot !== run.rootBaselineCommit ||
-    remoteRoot !== expectedRemoteRoot
+    (remoteRootExpectation.kind === "exact" &&
+      remoteRoot !== remoteRootExpectation.commit)
   ) {
     throw new ImplementationPullRequestError(
       "Локальное состояние implementation-run изменилось",
@@ -525,6 +548,67 @@ async function assertLocalState(
     );
   }
   assertResolvedRepository(run, repository);
+}
+
+async function fetchMergedRoot(
+  command: BoundedCommandRunner,
+  workspaceDirectory: string,
+  changeBranch: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  try {
+    await command(
+      "git",
+      ["fetch", "--no-tags", "origin", `refs/heads/${changeBranch}`],
+      { cwd: workspaceDirectory, signal },
+    );
+    const fetchedHead = commitHashSchema.parse((
+      await command("git", ["rev-parse", "FETCH_HEAD"], {
+        cwd: workspaceDirectory,
+        signal,
+      })
+    ).stdout.trim());
+    const remoteHead = await readRemoteReviewBranchCommit(
+      command,
+      workspaceDirectory,
+      changeBranch,
+      signal,
+    );
+    if (fetchedHead !== remoteHead) {
+      throw new ImplementationPullRequestError(
+        `FETCH_HEAD не соответствует origin/${changeBranch}`,
+      );
+    }
+    return fetchedHead;
+  } catch (error) {
+    if (error instanceof ImplementationPullRequestError || signal?.aborted) throw error;
+    throw new ImplementationPullRequestError(
+      `Не удалось получить origin/${changeBranch} после merge PR`,
+    );
+  }
+}
+
+async function assertCommitAncestor(
+  command: BoundedCommandRunner,
+  workspaceDirectory: string,
+  ancestor: string,
+  descendant: string,
+  message: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  try {
+    await assertReviewCommitDescendsFrom(
+      command,
+      workspaceDirectory,
+      ancestor,
+      descendant,
+      message,
+      signal,
+    );
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw new ImplementationPullRequestError(message);
+  }
 }
 
 async function assertRepositoryIdentity(
