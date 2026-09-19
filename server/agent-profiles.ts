@@ -11,9 +11,6 @@ export const REQUIRED_AGENT_PROFILE_NAMES = Object.freeze([
   "High",
   "Medium",
   "Low",
-  "Ultra Sandbox",
-  "High Sandbox",
-  "Medium Sandbox",
   "Orchestrator",
 ] as const);
 

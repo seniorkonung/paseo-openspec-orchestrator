@@ -34,22 +34,22 @@ test("разрешает все обязательные профили без �
     `profile-${REQUIRED_AGENT_PROFILE_NAMES.length - 1}`,
   );
   assert.equal(
-    result.profiles["Ultra Sandbox"].name.trim().toLowerCase(),
-    "ultra sandbox",
+    result.profiles.High.name.trim().toLowerCase(),
+    "high",
   );
 });
 
 test("возвращает все отсутствующие профили и не нормализует внутренние пробелы", () => {
   const profiles = REQUIRED_AGENT_PROFILE_NAMES.filter(
-    (name) => name !== "Low" && name !== "Ultra Sandbox",
+    (name) => name !== "Low" && name !== "Medium",
   ).map((name) => profile(name));
-  profiles.push(profile("Ultra  Sandbox", "wrong-spacing"));
+  profiles.push(profile("Med ium", "wrong-spacing"));
 
   const result = resolveRequiredAgentProfiles(profiles);
 
   assert.deepEqual(result, {
     kind: "invalid",
-    missing: ["Low", "Ultra Sandbox"],
+    missing: ["Medium", "Low"],
     ambiguous: [],
     incomplete: [],
   });
@@ -108,11 +108,11 @@ test("нормализует обязательные настройки и не
   assert.equal(result.kind, "available");
   assert.deepEqual(
     {
-      provider: result.profiles["Medium Sandbox"].provider,
-      model: result.profiles["Medium Sandbox"].model,
-      modeId: result.profiles["Medium Sandbox"].modeId,
-      thinkingOptionId: result.profiles["Medium Sandbox"].thinkingOptionId,
-      featureValues: result.profiles["Medium Sandbox"].featureValues,
+      provider: result.profiles.Medium.provider,
+      model: result.profiles.Medium.model,
+      modeId: result.profiles.Medium.modeId,
+      thinkingOptionId: result.profiles.Medium.thinkingOptionId,
+      featureValues: result.profiles.Medium.featureValues,
     },
     {
       provider: "codex",
@@ -126,14 +126,14 @@ test("нормализует обязательные настройки и не
 
 test("разрешает только запрошенный профиль и игнорирует проблемы остальных", () => {
   const profiles = [
-    profile("Ultra Sandbox"),
-    { ...profile("Medium Sandbox"), model: " " },
-    profile("Medium Sandbox", "duplicate-medium"),
+    profile("Ultra"),
+    { ...profile("Medium"), model: " " },
+    profile("Medium", "duplicate-medium"),
   ];
 
-  const result = resolveRequiredAgentProfile(profiles, "Ultra Sandbox");
+  const result = resolveRequiredAgentProfile(profiles, "Ultra");
 
   assert.equal(result.kind, "available");
-  assert.equal(result.profile.name, "Ultra Sandbox");
+  assert.equal(result.profile.name, "Ultra");
   assert.equal(result.profile.provider, "codex");
 });

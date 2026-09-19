@@ -151,13 +151,13 @@ async function publishChangeStep(
       kind: "halt",
       summary: "Не удалось перечитать профили агентов",
       message:
-        "Не удалось перечитать профиль Medium Sandbox перед публикацией; проверьте Paseo и нажмите «Повторить»",
+        "Не удалось перечитать профиль Medium перед публикацией; проверьте Paseo и нажмите «Повторить»",
     };
   }
 
-  const resolution = resolveRequiredAgentProfile(profiles, "Medium Sandbox");
+  const resolution = resolveRequiredAgentProfile(profiles, "Medium");
   if (resolution.kind === "invalid") {
-    const summary = describeRequiredAgentProfileProblem("Medium Sandbox", resolution);
+    const summary = describeRequiredAgentProfileProblem("Medium", resolution);
     return {
       kind: "halt",
       summary,

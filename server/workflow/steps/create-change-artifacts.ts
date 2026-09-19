@@ -90,9 +90,9 @@ async function runCreateChangeArtifactsStep(
     };
   }
 
-  const resolution = resolveRequiredAgentProfile(profiles, "Ultra Sandbox");
+  const resolution = resolveRequiredAgentProfile(profiles, "Ultra");
   if (resolution.kind === "invalid") {
-    const summary = describeRequiredAgentProfileProblem("Ultra Sandbox", resolution);
+    const summary = describeRequiredAgentProfileProblem("Ultra", resolution);
     return {
       kind: "halt",
       summary,

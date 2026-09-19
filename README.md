@@ -129,7 +129,7 @@ The main boundaries are:
   branch from the durable root baseline.
 - `server/phase-work.ts` owns bounded phase-heading extraction from `plan.md`,
   task reconciliation, task fingerprints, and the typed phase decision.
-- `server/phase-task-planning.ts` owns the Ultra Sandbox
+- `server/phase-task-planning.ts` owns the Ultra
   `openspec-update-change` session and exact task-only commit verification.
 - `server/root-pull-request.ts` owns guarded root synchronization and the final
   Draft/Ready/merged gate.
@@ -191,7 +191,7 @@ historical PR with that head is a collision.
 
 Artifacts are created in OpenSpec dependency order, one approved commit per
 agent session. Completed planning is validated with `instructions apply
---json`. A Medium Sandbox publication agent then reads the artifacts, drafts the
+--json`. A Medium publication agent then reads the artifacts, drafts the
 title and body, and pushes `planning/<id>/initial`. Its MCP completion passes
 only that content; the orchestrator selects the saved root PR, updates it through
 the shared REST gateway, and reads it back before accepting publication. The
@@ -229,7 +229,7 @@ tasks route to implementation; only a fully planned and completed change reaches
 the root gate.
 
 For a phase without tasks, `planning/<id>/phase-N` is created from the current
-root baseline. An Ultra Sandbox agent is instructed directly to invoke
+root baseline. An Ultra agent is instructed directly to invoke
 `openspec-update-change` for only that phase. One commit may append incomplete
 `N.*` tasks while preserving the old task list as an exact prefix and leaving
 `plan.md` and code unchanged. Publication and a focused
@@ -252,7 +252,7 @@ Completion checks root immutability, repository identity, the exact task-state
 transition, changed paths, commit count and subject, ancestry, and remote head.
 
 When all current tasks are done, the collected non-empty batch is reviewed by
-a High Sandbox agent over its exact `base..head`. The report is the only file in
+a High agent over its exact `base..head`. The report is the only file in
 one review commit; the orchestrator does not validate its Markdown schema or
 repeat the agent's coverage assessment. The first successful review creates one
 Draft PR from the current implementation run to
@@ -271,7 +271,7 @@ bounded review.
 With no tasks or findings, the orchestrator reads all ordinary PR comments,
 non-empty submitted review summaries, and unresolved review-thread comments
 through paginated GitHub GraphQL. Bodies are bounded untrusted JSON data. A
-High Sandbox feedback agent has no GitHub responsibility and may add a finding
+High feedback agent has no GitHub responsibility and may add a finding
 only after independently proving it against the fixed cumulative implementation
 range.
 Processed fingerprints include GraphQL node ID and `updatedAt`, so edits are

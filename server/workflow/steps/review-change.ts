@@ -68,13 +68,13 @@ async function reviewChangeStep(
       kind: "halt",
       summary: "Не удалось перечитать профили агентов",
       message:
-        "Не удалось перечитать профиль Ultra Sandbox перед review; проверьте Paseo и нажмите «Повторить»",
+        "Не удалось перечитать профиль Ultra перед review; проверьте Paseo и нажмите «Повторить»",
     };
   }
 
-  const resolution = resolveRequiredAgentProfile(profiles, "Ultra Sandbox");
+  const resolution = resolveRequiredAgentProfile(profiles, "Ultra");
   if (resolution.kind === "invalid") {
-    const summary = describeRequiredAgentProfileProblem("Ultra Sandbox", resolution);
+    const summary = describeRequiredAgentProfileProblem("Ultra", resolution);
     return {
       kind: "halt",
       summary,

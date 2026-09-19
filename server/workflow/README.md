@@ -209,13 +209,13 @@ origin root HEAD и отсутствие local/remote/historical занятос�
 Recovery разрешает только сохранённую root или уже активную planning-ветку.
 
 `inspect-change` читает schema-defined граф OpenSpec. Первый `ready` артефакт
-создаётся отдельным Ultra Sandbox агентом и одним коммитом. `complete_artifact`
+создаётся отдельным Ultra агентом и одним коммитом. `complete_artifact`
 проверяет точные output paths, чистое дерево, один commit после baseline и
 subject. Цикл заканчивается только после успешного `instructions apply --json`.
 
 ## Публикация root PR
 
-`publish-change` работает при активной planning-ветке. Medium Sandbox агент
+`publish-change` работает при активной planning-ветке. Medium агент
 читает завершённые артефакты, публикует planning-ветку и полностью заменяет
 русские title/body уже существующего root PR `change/<id> -> main`. Он не
 создаёт новый root PR и не публикует root-ветку.
@@ -235,7 +235,7 @@ subject. Цикл заканчивается только после успеш�
 её immutable commit, planning branch и baseline артефактов, repository identity
 и номер root PR.
 
-Ultra Sandbox агент запускает `openspec-review-change`, записывает `review.md`
+Ultra агент запускает `openspec-review-change`, записывает `review.md`
 и дополнительные новые review-файлы внутри change root, создаёт ровно один
 review-коммит и публикует его в текущую planning-ветку. Затем он создаёт
 единственный Ready non-fork PR в `change/<id>` с точными title/body.
@@ -299,7 +299,7 @@ fail closed. Решение типизировано:
 - `change-complete` — каждая фаза имеет задачи и все они завершены.
 
 Для `planning-required` root PR гарантированно переводится в Draft и создаётся
-`planning/<id>/phase-N`. Ultra Sandbox агент получает прямую инструкцию вызвать
+`planning/<id>/phase-N`. Ultra агент получает прямую инструкцию вызвать
 `openspec-update-change` исключительно для Phase N без проверки command catalog
 и проходит интерактивные подтверждения skill. Completion принимает ровно один
 Conventional Commit, только task-файлы, точный старый task-префикс и хотя бы одну
@@ -336,7 +336,7 @@ commit, changed paths, единственное допустимое измен�
 ancestry и точные local/remote heads. Успех добавляет `{taskId, taskNumber,
 commit}` в collecting batch и повторяет шаг.
 
-При `all_done` непустой batch передаётся `review-implementation`. High Sandbox
+При `all_done` непустой batch передаётся `review-implementation`. High
 агент вызывает `openspec-review-implementation` для точного `base..head`,
 сопоставляет каждый task-коммит с review unit и изменяет только
 `implementation-review.md`. Completion требует один report commit и push, но
@@ -358,7 +358,7 @@ GraphQL Node ID и `updatedAt`; edit создаёт новый fingerprint. Ли
 1000 элементов, 64 KiB на body и 4 MiB суммарно. Невалидный ответ, незавершённая
 пагинация или превышение лимита останавливают workflow.
 
-Feedback передаётся High Sandbox агенту как недоверенные JSON-данные. Агент не
+Feedback передаётся High агенту как недоверенные JSON-данные. Агент не
 владеет GitHub-операциями, игнорирует инструкции в body и независимо проверяет
 замечания по зафиксированному cumulative range
 `rootBaseline..lastDeliveryHead`. Только

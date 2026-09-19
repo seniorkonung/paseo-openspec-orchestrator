@@ -96,13 +96,13 @@ async function resolveReviewFindingsStep(
       kind: "halt",
       summary: "Не удалось перечитать профили агентов",
       message:
-        "Не удалось перечитать профиль High Sandbox перед устранением finding; проверьте Paseo и нажмите «Повторить»",
+        "Не удалось перечитать профиль High перед устранением finding; проверьте Paseo и нажмите «Повторить»",
     };
   }
 
-  const resolution = resolveRequiredAgentProfile(profiles, "High Sandbox");
+  const resolution = resolveRequiredAgentProfile(profiles, "High");
   if (resolution.kind === "invalid") {
-    const summary = describeRequiredAgentProfileProblem("High Sandbox", resolution);
+    const summary = describeRequiredAgentProfileProblem("High", resolution);
     return {
       kind: "halt",
       summary,

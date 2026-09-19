@@ -22,13 +22,13 @@ const parentBranch = `change/${changeId}`;
 const reviewBranch = `planning/${changeId}/initial`;
 const repositoryUrl = "https://github.com/example/project";
 
-function ultraSandboxProfile() {
+function ultraProfile() {
   return {
-    id: "profile-ultra-sandbox",
-    name: "Ultra Sandbox",
+    id: "profile-ultra",
+    name: "Ultra",
     provider: "codex",
     model: "gpt-6-astra",
-    modeId: "sandbox",
+    modeId: "default",
     thinkingOptionId: "ultra",
     featureValues: { web: false },
   };
@@ -237,7 +237,7 @@ function createServiceHarness(command, options = {}) {
 async function startRun(harness, fixture, session, signal = new AbortController().signal) {
   const running = harness.service.run({
     workspaceDirectory: fixture.workspace,
-    profile: ultraSandboxProfile(),
+    profile: ultraProfile(),
     session,
     signal,
     onAgentCreated() {},
@@ -567,7 +567,7 @@ test("рестарт согласует опубликованный commit и �
   });
   await service.run({
     workspaceDirectory: fixture.workspace,
-    profile: ultraSandboxProfile(),
+    profile: ultraProfile(),
     session,
     signal: new AbortController().signal,
     onAgentCreated() {},
@@ -587,7 +587,7 @@ test("закрытый PR после рестарта не заменяется 
   await assert.rejects(
     service.run({
       workspaceDirectory: fixture.workspace,
-      profile: ultraSandboxProfile(),
+      profile: ultraProfile(),
       session,
       signal: new AbortController().signal,
       onAgentCreated() {},

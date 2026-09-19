@@ -49,9 +49,9 @@ async function planPhaseTasksStep(
       });
     }
     const profiles = await dependencies.readAgentProfiles();
-    const resolution = resolveRequiredAgentProfile(profiles, "Ultra Sandbox");
+    const resolution = resolveRequiredAgentProfile(profiles, "Ultra");
     if (resolution.kind === "invalid") {
-      const summary = describeRequiredAgentProfileProblem("Ultra Sandbox", resolution);
+      const summary = describeRequiredAgentProfileProblem("Ultra", resolution);
       return { kind: "halt", summary, message: `${summary}; исправьте профиль и нажмите «Повторить»` };
     }
     const completed = await dependencies.phaseTaskPlanning.run({

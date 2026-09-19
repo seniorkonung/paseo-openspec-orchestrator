@@ -28,13 +28,13 @@ const publishInput = {
   resolution: "Implementation и её проверка приведены к контракту.",
 };
 
-function highSandboxProfile() {
+function highProfile() {
   return {
-    id: "profile-high-sandbox",
-    name: "High Sandbox",
+    id: "profile-high",
+    name: "High",
     provider: "codex",
     model: "gpt-6-astra",
-    modeId: "sandbox",
+    modeId: "default",
     thinkingOptionId: "high",
     featureValues: { web: false },
   };
@@ -309,7 +309,7 @@ test("plan выбирает первую implementation finding, а отсутс
   });
 });
 
-test("High Sandbox завершает implementation finding только после commit и push", async (context) => {
+test("High завершает implementation finding только после commit и push", async (context) => {
   const fixture = await createRepository(context);
   const { command, calls } = createCommand(fixture);
   const labels = [];
@@ -332,7 +332,7 @@ test("High Sandbox завершает implementation finding только пос
     workspaceDirectory: fixture.workspace,
     changeId,
     branch,
-    profile: highSandboxProfile(),
+    profile: highProfile(),
     session: plan.session,
     signal: new AbortController().signal,
     onAgentCreated() {},
@@ -451,7 +451,7 @@ test("explicit accepted risk удаляет implementation finding из акти
     workspaceDirectory: fixture.workspace,
     changeId,
     branch,
-    profile: highSandboxProfile(),
+    profile: highProfile(),
     session: plan.session,
     signal: new AbortController().signal,
     onAgentCreated() {},
@@ -488,7 +488,7 @@ async function rejectedCommitResult(context, kind) {
     workspaceDirectory: fixture.workspace,
     changeId,
     branch,
-    profile: highSandboxProfile(),
+    profile: highProfile(),
     session: plan.session,
     signal: controller.signal,
     onAgentCreated() {},
@@ -574,7 +574,7 @@ test("ошибка checkpoint восстанавливает ntfy и recovery н
     workspaceDirectory: fixture.workspace,
     changeId,
     branch,
-    profile: highSandboxProfile(),
+    profile: highProfile(),
     session: plan.session,
     signal: new AbortController().signal,
     onAgentCreated() {},

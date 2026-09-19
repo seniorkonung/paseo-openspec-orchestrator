@@ -36,11 +36,11 @@ Change получает единый интеграционный pull request.
 
 function profile() {
   return {
-    id: "profile-medium-sandbox",
-    name: "Medium Sandbox",
+    id: "profile-medium",
+    name: "Medium",
     provider: "codex",
     model: "gpt-5.5",
-    modeId: "sandbox",
+    modeId: "default",
     thinkingOptionId: "medium",
     featureValues: { fast: true },
   };
@@ -234,7 +234,7 @@ function publicationCommand({
   };
 }
 
-test("Medium Sandbox актуализирует корневой Draft PR через scoped MCP", async () => {
+test("Medium актуализирует корневой Draft PR через scoped MCP", async () => {
   const created = [];
   const labels = [];
   const links = [];
@@ -293,7 +293,7 @@ test("Medium Sandbox актуализирует корневой Draft PR чер
   });
   assert.equal(created.length, 1);
   assert.equal(created[0].config.provider, "codex/gpt-5.5");
-  assert.equal(created[0].config.modeId, "sandbox");
+  assert.equal(created[0].config.modeId, "default");
   assert.equal(created[0].config.thinkingOptionId, "medium");
   assert.deepEqual(created[0].config.featureValues, { fast: true });
   assert.deepEqual(created[0].labels, { ntfy: "true" });

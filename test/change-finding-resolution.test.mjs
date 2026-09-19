@@ -27,13 +27,13 @@ const publishInput = {
   resolution: "Проверяемый контракт зафиксирован в артефактах change.",
 };
 
-function highSandboxProfile() {
+function highProfile() {
   return {
-    id: "profile-high-sandbox",
-    name: "High Sandbox",
+    id: "profile-high",
+    name: "High",
     provider: "codex",
     model: "gpt-6-astra",
-    modeId: "sandbox",
+    modeId: "default",
     thinkingOptionId: "high",
     featureValues: { web: false },
   };
@@ -258,7 +258,7 @@ test("plan выбирает первую finding в порядке review и з�
   assert.match(cleanPlan.headCommit, /^[0-9a-f]{40}$/u);
 });
 
-test("High Sandbox ждёт scoped MCP и завершает finding только после commit и push", async (context) => {
+test("High ждёт scoped MCP и завершает finding только после commit и push", async (context) => {
   const fixture = await createRepository(context);
   const { command, calls } = createCommand(fixture);
   const created = [];
@@ -291,7 +291,7 @@ test("High Sandbox ждёт scoped MCP и завершает finding тольк�
     workspaceDirectory: fixture.workspace,
     changeId,
     branch,
-    profile: highSandboxProfile(),
+    profile: highProfile(),
     session: plan.session,
     signal: new AbortController().signal,
     onAgentCreated() {},
@@ -406,7 +406,7 @@ test("accepted risk удаляет finding из активного списка"
     workspaceDirectory: fixture.workspace,
     changeId,
     branch,
-    profile: highSandboxProfile(),
+    profile: highProfile(),
     session: plan.session,
     signal: new AbortController().signal,
     onAgentCreated() {},
@@ -442,7 +442,7 @@ async function rejectedCommitResult(context, kind) {
     workspaceDirectory: fixture.workspace,
     changeId,
     branch,
-    profile: highSandboxProfile(),
+    profile: highProfile(),
     session: plan.session,
     signal: controller.signal,
     onAgentCreated() {},
@@ -516,7 +516,7 @@ test("ошибка checkpoint восстанавливает ntfy и повто�
     workspaceDirectory: fixture.workspace,
     changeId,
     branch,
-    profile: highSandboxProfile(),
+    profile: highProfile(),
     session: plan.session,
     signal: new AbortController().signal,
     onAgentCreated() {},
@@ -605,7 +605,7 @@ test("полный restart подтверждает уже проверенну�
     workspaceDirectory: fixture.workspace,
     changeId,
     branch,
-    profile: highSandboxProfile(),
+    profile: highProfile(),
     session: plan.session,
     signal: new AbortController().signal,
     onAgentCreated() {},

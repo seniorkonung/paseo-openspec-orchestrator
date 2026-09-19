@@ -22,13 +22,13 @@ function firstText(result) {
   return content.text;
 }
 
-function ultraSandboxProfile() {
+function ultraProfile() {
   return {
-    id: "profile-ultra-sandbox",
-    name: "Ultra Sandbox",
+    id: "profile-ultra",
+    name: "Ultra",
     provider: "codex",
     model: "gpt-6-astra",
-    modeId: "sandbox",
+    modeId: "default",
     thinkingOptionId: "ultra",
     featureValues: { web: false },
   };
@@ -336,7 +336,7 @@ test("проверка apply принимает ready и all_done, но откл
   );
 });
 
-test("Ultra Sandbox создаёт один артефакт и завершает его через scoped MCP", async (context) => {
+test("Ultra создаёт один артефакт и завершает его через scoped MCP", async (context) => {
   const fixture = await createRepository(context);
   const { command } = createCommand(fixture);
   const created = [];
@@ -419,7 +419,7 @@ test("Ultra Sandbox создаёт один артефакт и завершае
   const plan = await service.create({
     workspaceDirectory: fixture.workspace,
     changeId: "custom-change",
-    profile: ultraSandboxProfile(),
+    profile: ultraProfile(),
     session,
     signal: new AbortController().signal,
     onAgentCreated: () => undefined,
@@ -433,7 +433,7 @@ test("Ultra Sandbox создаёт один артефакт и завершае
   assert.deepEqual(plan, { kind: "complete", schemaName: "custom-assurance" });
   assert.equal(created.length, 1);
   assert.equal(created[0].config.provider, "codex/gpt-6-astra");
-  assert.equal(created[0].config.modeId, "sandbox");
+  assert.equal(created[0].config.modeId, "default");
   assert.equal(created[0].config.thinkingOptionId, "ultra");
   assert.deepEqual(created[0].config.featureValues, { web: false });
   assert.deepEqual(created[0].labels, { ntfy: "true" });
@@ -493,7 +493,7 @@ test("отсутствие continue skill останавливает сесси�
     service.create({
       workspaceDirectory: fixture.workspace,
       changeId: "custom-change",
-      profile: ultraSandboxProfile(),
+      profile: ultraProfile(),
       session,
       signal: new AbortController().signal,
       onAgentCreated() {},
@@ -561,7 +561,7 @@ test("после рестарта с готовым коммитом агент 
   await service.create({
     workspaceDirectory: fixture.workspace,
     changeId: "custom-change",
-    profile: ultraSandboxProfile(),
+    profile: ultraProfile(),
     session,
     signal: new AbortController().signal,
     onAgentCreated() {},
@@ -642,7 +642,7 @@ async function runRejectedCommitScenario(context, kind) {
     service.create({
       workspaceDirectory: fixture.workspace,
       changeId: "custom-change",
-      profile: ultraSandboxProfile(),
+      profile: ultraProfile(),
       session,
       signal: controller.signal,
       onAgentCreated() {},

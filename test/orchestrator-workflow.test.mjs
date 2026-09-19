@@ -51,8 +51,12 @@ async function temporaryHome(context, prefix = "openspec-workflow-") {
   return directory;
 }
 
-async function settleWorkflow() {
-  await new Promise((resolve) => setTimeout(resolve, 200));
+async function settleWorkflow(ledger) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const { status } = ledger.get("workspace").lifecycle;
+    if (status !== "starting" && status !== "running" && status !== "pausing") return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 function profiles() {
@@ -288,7 +292,7 @@ function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree
         };
       },
       async run(request) {
-        assert.equal(request.profile.name, "High Sandbox");
+        assert.equal(request.profile.name, "High");
         request.onAgentCreated("implementation-review-agent");
         const result = {
           changeId,
@@ -354,7 +358,7 @@ function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree
         };
       },
       async run(request) {
-        assert.equal(request.profile.name, "High Sandbox");
+        assert.equal(request.profile.name, "High");
         calls.push("feedback.run");
         request.onAgentCreated("feedback-agent");
         const result = {
@@ -436,7 +440,7 @@ test("workflow выполняет задачи, review и merge в одной im
   const harness = workflowHarness();
   const { engine, ledger } = await engineHarness(context, harness.workflow);
   engine.command("workspace", "start");
-  await settleWorkflow();
+  await settleWorkflow(ledger);
   const snapshot = ledger.get("workspace");
   assert.equal(snapshot.lifecycle.status, "completed");
   assert.ok(harness.calls.includes("implementation.prepare"));
@@ -452,7 +456,7 @@ test("PR feedback проходит отдельный audit и возвраща�
   const harness = workflowHarness({ feedbackOnce: true });
   const { engine, ledger } = await engineHarness(context, harness.workflow);
   engine.command("workspace", "start");
-  await settleWorkflow();
+  await settleWorkflow(ledger);
   const snapshot = ledger.get("workspace");
   assert.equal(snapshot.lifecycle.status, "completed");
   assert.equal(harness.calls.filter((call) => call === "feedback.run").length, 1);
@@ -468,14 +472,14 @@ test("открытый planning PR сохраняет checkpoint v5 и Retry п�
   const harness = workflowHarness({ mergeOpenOnce: true });
   const { engine, ledger } = await engineHarness(context, harness.workflow);
   engine.command("workspace", "start");
-  await settleWorkflow();
+  await settleWorkflow(ledger);
   let snapshot = ledger.get("workspace");
   assert.equal(snapshot.lifecycle.status, "failed");
   const checkpoint = ledger.getWorkflowCheckpoint("workspace");
   assert.equal(checkpoint.version, 5);
   assert.equal(checkpoint.nextStepId, "await-planning-merge");
   engine.command("workspace", "retry");
-  await settleWorkflow();
+  await settleWorkflow(ledger);
   snapshot = ledger.get("workspace");
   assert.equal(snapshot.lifecycle.status, "completed");
   assert.equal(harness.calls.filter((call) => call === "publication.publish").length, 1);
@@ -488,13 +492,13 @@ test("грязное дерево блокирует эффекты до Retry",
   });
   const { engine, ledger } = await engineHarness(context, harness.workflow);
   engine.command("workspace", "start");
-  await settleWorkflow();
+  await settleWorkflow(ledger);
   const blockedSnapshot = ledger.get("workspace");
   assert.equal(blockedSnapshot.lifecycle.status, "failed");
   assert.deepEqual(blockedSnapshot.change, { id: changeId });
   assert.equal(harness.calls.length, 0);
   engine.command("workspace", "retry");
-  await settleWorkflow();
+  await settleWorkflow(ledger);
   assert.equal(ledger.get("workspace").lifecycle.status, "completed");
 });
 
