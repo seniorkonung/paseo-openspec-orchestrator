@@ -93,6 +93,7 @@ test("движок передаёт типизированное состоян�
     activeBranch: planningBranch,
     change: { id: "engine-check" },
   }]);
+  assert.deepEqual(ledger.get("workspace-state").change, { id: "engine-check" });
 });
 
 test("движок следует циклическому графу до явного завершения", async (context) => {

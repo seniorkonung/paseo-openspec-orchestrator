@@ -164,7 +164,10 @@ inspect-phase-work
 `check-git-branch` допускает только точное `change/<kebab-case-id>`. `main`,
 detached HEAD, произвольная ветка, `planning/<id>` и дополнительный сегмент
 отклоняются. Change ID всегда извлекается из suffix; агента выбора и инструмента
-`set_change` нет.
+`set_change` нет. После успешной проверки ID сразу сохраняется в
+`WorkflowState.change` и публикуется в UI через reporter. Схема checkpoint
+проверяет соответствие `change.id` корневой ветке, а последующие шаги получают
+тот же типизированный change из состояния workflow.
 
 `check-git-worktree` требует пустой `git status --porcelain=v1
 --untracked-files=all`. `check-mise-toolchain` проверяет доступный и уже

@@ -105,7 +105,9 @@ function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree
       },
     },
     changeInitialization: {
-      async prepare() {
+      async prepare(_workspace, selectedChangeId, selectedChangeBranch) {
+        assert.equal(selectedChangeId, changeId);
+        assert.equal(selectedChangeBranch, changeBranch);
         calls.push("initialize.prepare");
         return {
           changeId,
@@ -126,7 +128,9 @@ function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree
       },
     },
     planningBranch: {
-      async prepare() {
+      async prepare(_workspace, selectedChangeId, selectedChangeBranch) {
+        assert.equal(selectedChangeId, changeId);
+        assert.equal(selectedChangeBranch, changeBranch);
         calls.push("planning.prepare");
         return { changeId, changeBranch, planningBranch, baselineCommit: hashes.a };
       },
@@ -485,7 +489,9 @@ test("грязное дерево блокирует эффекты до Retry",
   const { engine, ledger } = await engineHarness(context, harness.workflow);
   engine.command("workspace", "start");
   await settleWorkflow();
-  assert.equal(ledger.get("workspace").lifecycle.status, "failed");
+  const blockedSnapshot = ledger.get("workspace");
+  assert.equal(blockedSnapshot.lifecycle.status, "failed");
+  assert.deepEqual(blockedSnapshot.change, { id: changeId });
   assert.equal(harness.calls.length, 0);
   engine.command("workspace", "retry");
   await settleWorkflow();

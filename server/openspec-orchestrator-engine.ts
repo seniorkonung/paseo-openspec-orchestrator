@@ -233,8 +233,8 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
     } else {
       runtime.currentStepId = runtime.workflow.startStepId;
       runtime.state = createInitialWorkflowState();
-      reporter.setChange(null);
     }
+    this.#syncPublicChange(workspaceId, reporter, runtime.state.change);
     runtime.currentHandle = null;
     runtime.abortController?.abort();
     runtime.abortController = new AbortController();
@@ -363,6 +363,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
             if (!(await this.#saveCheckpoint(workspaceId, runtime, reporter, generation, null))) return;
             if (this.#disposed || runtime.generation !== generation) return;
             runtime.state = nextState;
+            this.#syncPublicChange(workspaceId, reporter, nextState.change);
             runtime.currentStepId = null;
             handle.succeed();
             runtime.currentHandle = null;
@@ -396,6 +397,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
             }
             if (this.#disposed || runtime.generation !== generation) return;
             runtime.state = nextState;
+            this.#syncPublicChange(workspaceId, reporter, nextState.change);
             runtime.currentStepId = result.next;
             handle.succeed();
             runtime.currentHandle = null;
@@ -551,9 +553,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       throw new Error("Workflow больше не принимает обновление состояния");
     }
 
-    const previousChange = this.#ledger.get(workspaceId).change;
     const nextState = workflowStateSchema.parse(requestedState);
-    const publicChangeChanged = previousChange?.id !== nextState.change?.id;
     const saved = await this.#writeCheckpoint(
       workspaceId,
       runtime,
@@ -564,7 +564,17 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       throw new Error("Workflow больше не принимает обновление состояния");
     }
     runtime.state = nextState;
-    if (publicChangeChanged) reporter.setChange(nextState.change);
+    this.#syncPublicChange(workspaceId, reporter, nextState.change);
+  }
+
+  #syncPublicChange(
+    workspaceId: string,
+    reporter: OrchestratorReporter,
+    change: WorkflowState["change"],
+  ): void {
+    const current = this.#ledger.get(workspaceId).change;
+    if (current?.id === change?.id && current?.title === change?.title) return;
+    reporter.setChange(change);
   }
 
   #trackRun(run: Promise<void>): void {

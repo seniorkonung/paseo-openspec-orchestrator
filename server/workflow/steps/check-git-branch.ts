@@ -1,5 +1,9 @@
 import type { GitBranchDecision, GitBranchProbe } from "../../git-branch.ts";
-import { ChangeBranchError, parseChangeBranch } from "../../change-branch.ts";
+import {
+  ChangeBranchError,
+  changeIdFromBranch,
+  parseChangeBranch,
+} from "../../change-branch.ts";
 import type {
   WorkflowStepDefinition,
   WorkflowStepContext,
@@ -67,10 +71,12 @@ async function checkGitBranchStep(
     case "non-main":
       try {
         const changeBranch = parseChangeBranch(decision.name);
+        const changeId = changeIdFromBranch(changeBranch);
         return {
           kind: "continue",
           next: "check-git-worktree",
           state: {
+            change: { id: changeId },
             changeBranch,
             activeBranch: changeBranch,
           },
