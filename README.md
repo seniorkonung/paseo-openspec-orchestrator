@@ -20,8 +20,8 @@ The plugin:
   `main`;
 - creates `planning/<change-id>/initial` for the initial artifacts and
   `planning/<change-id>/phase-N` for tasks of exactly one later phase;
-- updates the root PR description from completed planning artifacts while
-  preserving its existing Draft/Ready state;
+- updates the root PR description from completed planning artifacts through an
+  orchestrator-owned REST gateway while preserving its existing Draft/Ready state;
 - creates one Ready PR from each planning branch to `change/<change-id>` and
   waits for its manual merge;
 - parses the required phased `plan.md`, fingerprints phases and tasks, and
@@ -131,9 +131,12 @@ The main boundaries are:
   `openspec-update-change` session and exact task-only commit verification.
 - `server/root-pull-request.ts` owns guarded root synchronization and the final
   Draft/Ready/merged gate.
-- `server/change-publication.ts` reads planning artifacts through an agent,
-  pushes the planning branch, and replaces the title/body of the existing root
-  PR without changing its Draft/Ready state.
+- `server/change-publication.ts` reads planning artifacts through an agent and
+  pushes the planning branch; the orchestrator then replaces the title/body of
+  the existing root PR without changing its Draft/Ready state.
+- `server/github-pull-request-mutation.ts` is the single boundary for changing
+  PR fields. It validates the target and payload, uses the REST update endpoint,
+  and keeps agents and production paths away from `gh pr edit`.
 - `server/change-review.ts` and `server/change-review-publication.ts` create one
   review commit on the planning branch and reconcile its Ready PR into the root
   branch.
@@ -185,9 +188,11 @@ historical PR with that head is a collision.
 
 Artifacts are created in OpenSpec dependency order, one approved commit per
 agent session. Completed planning is validated with `instructions apply
---json`. A Medium Sandbox publication agent then reads the artifacts, pushes
-`planning/<id>/initial`, and replaces the title and body of the existing root PR. It
-does not push the root branch or create another root PR.
+--json`. A Medium Sandbox publication agent then reads the artifacts, drafts the
+title and body, and pushes `planning/<id>/initial`. Its MCP completion passes
+only that content; the orchestrator selects the saved root PR, updates it through
+the shared REST gateway, and reads it back before accepting publication. The
+agent does not invoke GitHub CLI, push the root branch, or create another root PR.
 
 ### Review, findings, and planning merge
 

@@ -31,6 +31,7 @@ import {
   readReviewPullRequest,
   resolveReviewRepository,
 } from "./review-publication-gateway.ts";
+import { updateGitHubPullRequest } from "./github-pull-request-mutation.ts";
 
 const MAX_PATH_LENGTH = 8_192;
 const FALLBACK_COMMIT_SUBJECT = "docs(openspec): add change scaffold";
@@ -669,18 +670,13 @@ async function ensureRootPullRequest(
   );
   if (pullRequest.baseRefName !== REVIEW_PARENT_BRANCH) {
     try {
-      await command(
-        "gh",
-        [
-          "pr",
-          "edit",
-          String(pullRequest.number),
-          "--repo",
-          repositoryArgument(repository),
-          "--base",
-          REVIEW_PARENT_BRANCH,
-        ],
-        { cwd: workspaceDirectory, signal },
+      await updateGitHubPullRequest(
+        command,
+        workspaceDirectory,
+        repository,
+        pullRequest.number,
+        { base: REVIEW_PARENT_BRANCH },
+        signal,
       );
       pullRequest = await readReviewPullRequest(
         command,

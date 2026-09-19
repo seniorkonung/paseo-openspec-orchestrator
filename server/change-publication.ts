@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { CompleteRequiredAgentProfile } from "./agent-profiles.ts";
 import {
   FIXED_BRANCH_RULE,
-  GITHUB_CLI_RULE,
+  NO_GITHUB_RULE,
   OPENSPEC_CLI_RULE,
   STAGE_SCOPE_RULE,
   UNTRUSTED_INPUT_RULE,
@@ -21,7 +21,7 @@ import {
 } from "./bounded-command.ts";
 import {
   inspectPublicationTarget,
-  verifyPublication,
+  publishPublication,
 } from "./change-publication-gateway.ts";
 import {
   ChangePublicationError,
@@ -161,17 +161,12 @@ export function createChangePublicationService(
       const scope = await agentSession.openScope(() => host.expose({
         complete_change_publication: defineMcpTool({
           description:
-            "Проверить публикацию текущей ветки и интеграционный pull request выбранного OpenSpec change",
+            "Опубликовать подготовленные название и описание в интеграционном pull request выбранного OpenSpec change",
           inputSchema: publicationCompletionInputSchema,
           outputSchema: publicationCompletionOutputSchema,
           execute: (input, toolContext) =>
             agentSession.runExclusive(async () => {
               if (published) {
-                if (published.number !== input.pullRequestNumber) {
-                  throw new McpToolError(
-                    `Публикация уже завершена с pull request #${published.number}`,
-                  );
-                }
                 return completionToolResult(published);
               }
 
@@ -181,7 +176,7 @@ export function createChangePublicationService(
                 const activeAgent = await agentSession.waitForAgent(signal);
                 let verified: PublishedPullRequest;
                 try {
-                  verified = await verifyPublication(command, {
+                  verified = await publishPublication(command, {
                     workspaceDirectory: request.workspaceDirectory,
                     changeId,
                     changeBranch,
@@ -287,7 +282,7 @@ export function changePublicationPrompt(input: {
     rules: [
       UNTRUSTED_INPUT_RULE,
       OPENSPEC_CLI_RULE,
-      GITHUB_CLI_RULE,
+      NO_GITHUB_RULE,
       FIXED_BRANCH_RULE,
       STAGE_SCOPE_RULE,
     ],
@@ -297,12 +292,11 @@ export function changePublicationPrompt(input: {
       "3. From those artifacts write a stable Russian title for the outcome of the whole change, using only letters, digits, spaces, and the punctuation `.,:«»—–/_-`. Leave out the change ID, branches, task numbers, artifact names, WIP/Draft markers, and anything else that changes while work continues.",
       `4. Write the Russian body with exactly these ordered sections: \`## Суть\`, \`## Ожидаемый результат\`, \`## Границы change\`, \`## OpenSpec change\`. Keep it high-level, omit task and commit progress, and put the exact change ID \`${input.changeId}\` in backticks in the final section.`,
       `5. Publish the planning commits with \`git push --set-upstream origin ${input.activeBranch}\`. Never push the root branch, create a commit, or modify a repository file.`,
-      `6. Fully replace the title and body of root pull request #${pullRequestNumber} (\`${input.changeBranch}\` into \`${PUBLICATION_BASE_BRANCH}\`) in \`${input.target.repository}\` without changing its Draft/Ready state. Never create another integration pull request, retarget its head, reopen a closed one, or edit the pull request of \`${input.activeBranch}\`. Pass the body with \`--body-file\` from a temporary file outside the repository and delete it afterwards.`,
-      "7. Re-read the resulting pull request to learn the title and body now stored on GitHub.",
+      `6. Do not modify root pull request #${pullRequestNumber} or any other GitHub resource. The orchestrator owns pull-request mutation and will publish the title and body after validating them.`,
     ],
     completion: completionInstruction({
       tool: "complete_change_publication",
-      argument: "its number and that exact stored title and body",
+      argument: "that exact drafted title and body",
       retryScope: "the publication state",
     }),
   });

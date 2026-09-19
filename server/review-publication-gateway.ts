@@ -1,6 +1,3 @@
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, sep } from "node:path";
 import { z } from "zod";
 import type { BoundedCommandRunner } from "./bounded-command.ts";
 import { commitHashSchema } from "./change-artifact-model.ts";
@@ -19,6 +16,7 @@ import {
   type ResolvedReviewRepository,
   type ReviewPullRequest,
 } from "./review-publication-model.ts";
+import { updateGitHubPullRequest } from "./github-pull-request-mutation.ts";
 
 const MAX_PULL_REQUESTS = 100;
 const pullRequestListSchema = z.array(reviewPullRequestSchema).max(MAX_PULL_REQUESTS);
@@ -156,64 +154,20 @@ export async function updateReviewPullRequestBody(
   body: string,
   signal?: AbortSignal,
 ): Promise<void> {
-  let temporaryDirectory: string | null = null;
   try {
-    const [workspaceRealPath, temporaryRootRealPath] = await Promise.all([
-      realpath(workspaceDirectory),
-      realpath(tmpdir()),
-    ]);
-    const temporaryRootFromWorkspace = relative(
-      workspaceRealPath,
-      temporaryRootRealPath,
-    );
-    if (
-      temporaryRootFromWorkspace === "" ||
-      (temporaryRootFromWorkspace !== ".." &&
-        !temporaryRootFromWorkspace.startsWith(`..${sep}`) &&
-        !isAbsolute(temporaryRootFromWorkspace))
-    ) {
-      throw new ChangeReviewPublicationError(
-        "Системный каталог временных файлов находится внутри Git workspace",
-      );
-    }
-    temporaryDirectory = await mkdtemp(
-      join(temporaryRootRealPath, "paseo-openspec-pr-body-"),
-    );
-    const bodyPath = join(temporaryDirectory, "body.md");
-    await writeFile(bodyPath, body, {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-    });
-    await command(
-      "gh",
-      [
-        "pr",
-        "edit",
-        String(pullRequestNumber),
-        "--repo",
-        repositoryArgument(repository),
-        "--body-file",
-        bodyPath,
-      ],
-      { cwd: workspaceDirectory, signal },
+    await updateGitHubPullRequest(
+      command,
+      workspaceDirectory,
+      repository,
+      pullRequestNumber,
+      { body },
+      signal,
     );
   } catch (error) {
     if (signal?.aborted) throw error;
     throw new ChangeReviewPublicationError(
       `Не удалось обновить описание review pull request #${pullRequestNumber}`,
     );
-  } finally {
-    if (temporaryDirectory) {
-      try {
-        await rm(temporaryDirectory, { recursive: true, force: true });
-      } catch (error) {
-        if (signal?.aborted) throw error;
-        throw new ChangeReviewPublicationError(
-          "Не удалось очистить временный файл описания review pull request",
-        );
-      }
-    }
   }
 }
 

@@ -57,8 +57,9 @@ function githubFixture(overrides = {}) {
     pullRequest: pullRequest(),
     remoteHead: expectedHead,
     pullRequests: undefined,
-    editError: null,
-    editCount: 0,
+    updateError: null,
+    updateCount: 0,
+    updateArguments: [],
     bodyFiles: [],
     ...overrides,
   };
@@ -97,12 +98,14 @@ function createCommand(fixture) {
     if (arguments_[0] === "pr" && arguments_[1] === "view") {
       return { stdout: JSON.stringify(fixture.pullRequest), stderr: "" };
     }
-    if (arguments_[0] === "pr" && arguments_[1] === "edit") {
-      fixture.editCount += 1;
-      const bodyPath = arguments_[arguments_.indexOf("--body-file") + 1];
+    if (arguments_[0] === "api") {
+      fixture.updateCount += 1;
+      fixture.updateArguments.push([...arguments_]);
+      const bodyPath = arguments_[arguments_.indexOf("--input") + 1];
       fixture.bodyFiles.push(bodyPath);
-      if (fixture.editError) throw fixture.editError;
-      fixture.pullRequest.body = await readFile(bodyPath, "utf8");
+      if (fixture.updateError) throw fixture.updateError;
+      const payload = JSON.parse(await readFile(bodyPath, "utf8"));
+      fixture.pullRequest.body = payload.body;
       return { stdout: fixture.pullRequest.url, stderr: "" };
     }
     throw new Error(`Неожиданный вызов gh: ${arguments_.join(" ")}`);
@@ -198,21 +201,37 @@ test("публикация сохраняет body, хронологически
   assert.ok(implementationF1 > reviewF1);
   assert.ok(reviewF2 > implementationF1);
   assert.equal(body.match(/paseo-openspec-orchestrator:findings:start/gu)?.length, 1);
-  assert.equal(fixture.editCount, 3);
+  assert.equal(fixture.updateCount, 3);
 
   await publishReviewFindingOutcome(publicationRequest(), command);
   await publishReviewFindingOutcome(
     publicationRequest({ input: { mode: "acknowledge-existing" } }),
     command,
   );
-  assert.equal(fixture.editCount, 3);
+  assert.equal(fixture.updateCount, 3);
+  for (const arguments_ of fixture.updateArguments) {
+    const bodyPath = arguments_[arguments_.indexOf("--input") + 1];
+    assert.deepEqual(arguments_, [
+      "api",
+      "--method",
+      "PATCH",
+      "--hostname",
+      "github.com",
+      "-H",
+      "Accept: application/vnd.github+json",
+      "repos/example/project/pulls/43",
+      "--input",
+      bodyPath,
+      "--silent",
+    ]);
+  }
   for (const bodyPath of fixture.bodyFiles) {
     await assert.rejects(access(bodyPath));
   }
 });
 
-test("публикация очищает временный body-файл после ошибки gh", async () => {
-  const fixture = githubFixture({ editError: new Error("gh edit failed") });
+test("публикация очищает временный JSON-файл после ошибки GitHub API", async () => {
+  const fixture = githubFixture({ updateError: new Error("GitHub API failed") });
   await assert.rejects(
     publishReviewFindingOutcome(publicationRequest(), createCommand(fixture)),
     /Не удалось обновить описание review pull request #43/,

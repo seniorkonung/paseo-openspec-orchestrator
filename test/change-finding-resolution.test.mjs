@@ -197,9 +197,10 @@ function createCommand(fixture) {
       if (arguments_[0] === "pr" && arguments_[1] === "view") {
         return { stdout: JSON.stringify(fixture.pullRequest), stderr: "" };
       }
-      if (arguments_[0] === "pr" && arguments_[1] === "edit") {
-        const bodyFile = arguments_[arguments_.indexOf("--body-file") + 1];
-        fixture.pullRequest.body = await readFile(bodyFile, "utf8");
+      if (arguments_[0] === "api") {
+        const bodyFile = arguments_[arguments_.indexOf("--input") + 1];
+        const payload = JSON.parse(await readFile(bodyFile, "utf8"));
+        fixture.pullRequest.body = payload.body;
         fixture.lastBodyFile = bodyFile;
         return { stdout: fixture.pullRequest.url, stderr: "" };
       }

@@ -1,6 +1,9 @@
 import { z } from "zod";
 import { commitHashSchema } from "./change-artifact-model.ts";
-import { repositoryNameWithOwnerSchema } from "./github-repository-identity.ts";
+import {
+  repositoryNameWithOwnerSchema,
+  type GitHubRemoteIdentity,
+} from "./github-repository-identity.ts";
 
 export const PUBLICATION_REMOTE = "origin";
 export const PUBLICATION_BASE_BRANCH = "main";
@@ -96,7 +99,6 @@ export const openPullRequestListSchema = z
 
 export const publicationCompletionInputSchema = z
   .object({
-    pullRequestNumber: pullRequestNumberSchema,
     title: pullRequestTitleSchema,
     body: pullRequestBodySchema,
   })
@@ -118,6 +120,7 @@ export interface PublishedPullRequest {
 
 export interface PublicationTarget {
   readonly repository: string;
+  readonly repositoryIdentity: GitHubRemoteIdentity;
   readonly repositoryUrl: string;
   readonly expectedHead: string;
   readonly expectedChangeHead: string;

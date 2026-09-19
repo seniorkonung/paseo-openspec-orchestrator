@@ -29,13 +29,13 @@ export const OPENSPEC_CLI_RULE =
 export const FIXED_BRANCH_RULE =
   "The workflow branch is already active: never create, switch, reset, rebase, merge, or force-push a branch, and never push tags.";
 
-/** Стадии без GitHub-ответственности не трогают GitHub вообще. */
+/** Стадии без PR-ответственности не вызывают GitHub API. */
 export const NO_GITHUB_RULE =
-  "Never invoke `gh` or contact GitHub: pull requests belong to the orchestrator.";
+  "Never invoke `gh` or call GitHub APIs: pull requests belong to the orchestrator.";
 
 /** Стадии с GitHub-ответственностью работают неинтерактивно и не трогают учётные данные. */
 export const GITHUB_CLI_RULE =
-  "Use `gh` only non-interactively with `--repo`; never run `gh auth login`, `gh auth refresh`, or anything that prints a token.";
+  "Use `gh` only non-interactively with `--repo`; never use `gh pr edit`, because pull-request field mutations belong to the orchestrator; never run `gh auth login`, `gh auth refresh`, or anything that prints a token.";
 
 /** Границы одной стадии: агент не расширяет workflow. */
 export const STAGE_SCOPE_RULE =

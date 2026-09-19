@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import {
@@ -15,6 +16,7 @@ const mainHead = "b".repeat(40);
 const repository = "example/project";
 const repositoryUrl = "https://github.com/example/project";
 const originUrl = "git@github.com:example/project.git";
+const workspaceDirectory = process.cwd();
 const title = "Добавить публикацию интеграционного pull request";
 const body = `## Суть
 
@@ -76,7 +78,7 @@ async function connectClient(url) {
   return client;
 }
 
-function startPublicationAttempt(command, completionArguments = { pullRequestNumber: 42, title, body }) {
+function startPublicationAttempt(command, completionArguments = { title, body }) {
   const controller = new AbortController();
   let startTool;
   const toolStarted = new Promise((resolve) => {
@@ -111,7 +113,7 @@ function startPublicationAttempt(command, completionArguments = { pullRequestNum
     logger: { error() {}, warn() {} },
   });
   const publication = service.publish({
-    workspaceDirectory: "/workspace/project",
+    workspaceDirectory,
     changeId,
     changeBranch,
     activeBranch,
@@ -140,17 +142,21 @@ function firstText(result) {
 
 function publicationCommand({
   existing = pullRequest(),
-  verified = pullRequest(),
+  verified = pullRequest({ title: "Старое название", body: "Старое описание" }),
   dirtyAtCompletion = false,
   dirtyInitially = false,
   remoteHead = head,
   remoteChangeHead = changeHead,
   localHeads = [head],
+  ignoreUpdate = false,
+  updateError = null,
 } = {}) {
   let listCalls = 0;
   let statusCalls = 0;
   let headCalls = 0;
   let dirtyCompletionChecks = dirtyAtCompletion ? 1 : 0;
+  let currentPullRequest = structuredClone(verified);
+  let updateCount = 0;
   const calls = [];
   const command = async (executable, arguments_, options) => {
     calls.push({ executable, arguments: [...arguments_], options });
@@ -172,7 +178,7 @@ function publicationCommand({
     }
     if (key.startsWith("gh pr list ")) {
       listCalls += 1;
-      const values = listCalls === 1 ? [existing] : [verified];
+      const values = listCalls === 1 ? [existing] : [currentPullRequest];
       return { stdout: JSON.stringify(values.map(openPullRequest)), stderr: "" };
     }
     if (key === "git status --porcelain=v1 --untracked-files=all") {
@@ -202,11 +208,30 @@ function publicationCommand({
       };
     }
     if (key === `gh pr view 42 --repo ${repository} --json number,url,state,isDraft,isCrossRepository,baseRefName,headRefName,headRefOid,title,body`) {
-      return { stdout: JSON.stringify(verified), stderr: "" };
+      return { stdout: JSON.stringify(currentPullRequest), stderr: "" };
+    }
+    if (executable === "gh" && arguments_[0] === "api") {
+      updateCount += 1;
+      if (updateError) throw updateError;
+      const requestPath = arguments_[arguments_.indexOf("--input") + 1];
+      const update = JSON.parse(await readFile(requestPath, "utf8"));
+      if (!ignoreUpdate) {
+        currentPullRequest = {
+          ...currentPullRequest,
+          ...update,
+          ...(update.base === undefined ? {} : { baseRefName: update.base }),
+        };
+        delete currentPullRequest.base;
+      }
+      return { stdout: "", stderr: "" };
     }
     throw new Error(`Неожиданная команда: ${key}`);
   };
-  return { command, calls };
+  return {
+    command,
+    calls,
+    get updateCount() { return updateCount; },
+  };
 }
 
 test("Medium Sandbox актуализирует корневой Draft PR через scoped MCP", async () => {
@@ -214,7 +239,8 @@ test("Medium Sandbox актуализирует корневой Draft PR чер
   const labels = [];
   const links = [];
   const toolResults = [];
-  const { command, calls } = publicationCommand();
+  const fixture = publicationCommand();
+  const { command, calls } = fixture;
   let toolFlow;
   const service = createChangePublicationService({
     command,
@@ -231,7 +257,7 @@ test("Medium Sandbox актуализирует корневой Draft PR чер
           toolResults.push(
             await client.callTool({
               name: "complete_change_publication",
-              arguments: { pullRequestNumber: 42, title, body },
+              arguments: { title, body },
             }),
           );
         } finally {
@@ -251,7 +277,7 @@ test("Medium Sandbox актуализирует корневой Draft PR чер
   });
 
   const result = await service.publish({
-    workspaceDirectory: "/workspace/project",
+    workspaceDirectory,
     changeId,
     changeBranch,
     activeBranch,
@@ -275,7 +301,8 @@ test("Medium Sandbox актуализирует корневой Draft PR чер
   assert.equal("cwd" in created[0], false);
   assert.match(created[0].prompt, /openspec status --change selected-change --json/);
   assert.match(created[0].prompt, /git push --set-upstream origin planning\/selected-change/);
-  assert.match(created[0].prompt, /replace the title and body of root pull request #42/);
+  assert.match(created[0].prompt, /Never invoke `gh` or call GitHub APIs/);
+  assert.match(created[0].prompt, /orchestrator owns pull-request mutation/);
   assert.match(created[0].prompt, /never spawn or archive agents/);
   assert.deepEqual(links, ["agent-publication"]);
   assert.deepEqual(labels, [["agent-publication", false]]);
@@ -286,14 +313,15 @@ test("Medium Sandbox актуализирует корневой Draft PR чер
     title,
   });
   assert.ok(
-    calls.every(({ options }) => options.cwd === "/workspace/project"),
+    calls.every(({ options }) => options.cwd === workspaceDirectory),
     "все команды должны выполняться из workspace",
   );
+  assert.equal(fixture.updateCount, 1);
 });
 
 test("актуализирует существующий Ready PR и сохраняет его статус", async () => {
   const existing = pullRequest({ isDraft: false, baseRefName: "develop", title: "Старое", body: "Старое" });
-  const verified = pullRequest({ isDraft: false });
+  const verified = pullRequest({ isDraft: false, title: "Старое", body: "Старое" });
   const { command } = publicationCommand({ existing, verified });
   let toolFlow;
   const service = createChangePublicationService({
@@ -306,7 +334,7 @@ test("актуализирует существующий Ready PR и сохра
         try {
           return await client.callTool({
             name: "complete_change_publication",
-            arguments: { pullRequestNumber: 42, title, body },
+            arguments: { title, body },
           });
         } finally {
           await client.close();
@@ -325,7 +353,7 @@ test("актуализирует существующий Ready PR и сохра
   });
 
   const result = await service.publish({
-    workspaceDirectory: "/workspace/project",
+    workspaceDirectory,
     changeId,
     changeBranch,
     activeBranch,
@@ -363,7 +391,7 @@ test("отклоняет несколько открытых PR до созда�
 
   await assert.rejects(
     service.publish({
-      workspaceDirectory: "/workspace/project",
+      workspaceDirectory,
       changeId,
       changeBranch,
       activeBranch,
@@ -391,7 +419,7 @@ test("отклоняет PR из fork до создания агента", async
 
   await assert.rejects(
     service.publish({
-      workspaceDirectory: "/workspace/project",
+      workspaceDirectory,
       changeId,
       changeBranch,
       activeBranch,
@@ -417,7 +445,7 @@ test("останавливается до агента при грязном р�
 
   await assert.rejects(
     service.publish({
-      workspaceDirectory: "/workspace/project",
+      workspaceDirectory,
       changeId,
       changeBranch,
       activeBranch,
@@ -445,13 +473,13 @@ test("возвращает feedback для грязного дерева и пр
           toolResults.push(
             await client.callTool({
               name: "complete_change_publication",
-              arguments: { pullRequestNumber: 42, title, body },
+              arguments: { title, body },
             }),
           );
           toolResults.push(
             await client.callTool({
               name: "complete_change_publication",
-              arguments: { pullRequestNumber: 42, title, body },
+              arguments: { title, body },
             }),
           );
         } finally {
@@ -471,7 +499,7 @@ test("возвращает feedback для грязного дерева и пр
   });
 
   const publication = await service.publish({
-    workspaceDirectory: "/workspace/project",
+    workspaceDirectory,
     changeId,
     changeBranch,
     activeBranch,
@@ -524,15 +552,16 @@ test("не подтверждает PR с отличающейся base-ветк
   await attempt.cancel();
 });
 
-test("не подтверждает несовпадающее название или описание PR", async () => {
+test("не подтверждает название и описание, если GitHub не сохранил обновление", async () => {
   const { command } = publicationCommand({
     verified: pullRequest({ body: `${body}\nЛишний текст` }),
+    ignoreUpdate: true,
   });
   const attempt = startPublicationAttempt(command);
 
   const toolResult = await attempt.toolResult();
   assert.equal(toolResult.isError, true);
-  assert.match(firstText(toolResult), /не совпадает с подтверждаемым содержимым/);
+  assert.match(firstText(toolResult), /не подтвердил обновлённые название и описание/);
   await attempt.cancel();
 });
 
@@ -555,7 +584,7 @@ test("останавливается до агента, если gh не авт�
 
   await assert.rejects(
     service.publish({
-      workspaceDirectory: "/workspace/project",
+      workspaceDirectory,
       changeId,
       changeBranch,
       activeBranch,
@@ -595,7 +624,7 @@ test("останавливается до агента, если origin отсу
 
   await assert.rejects(
     service.publish({
-      workspaceDirectory: "/workspace/project",
+      workspaceDirectory,
       changeId,
       changeBranch,
       activeBranch,
@@ -636,7 +665,7 @@ test("окончание хода без completion сохраняет ntfy и M
   });
 
   const publication = service.publish({
-    workspaceDirectory: "/workspace/project",
+    workspaceDirectory,
     changeId,
     changeBranch,
     activeBranch,
@@ -660,7 +689,7 @@ test("окончание хода без completion сохраняет ntfy и M
   const client = await connectClient(url);
   const toolResult = await client.callTool({
     name: "complete_change_publication",
-    arguments: { pullRequestNumber: 42, title, body },
+    arguments: { title, body },
   });
   await client.close();
 
@@ -688,7 +717,7 @@ test("отмена публикации снимает ntfy и завершае�
 
   await assert.rejects(
     service.publish({
-      workspaceDirectory: "/workspace/project",
+      workspaceDirectory,
       changeId,
       changeBranch,
       activeBranch,
@@ -710,6 +739,7 @@ test("prompt строится только из валидированных п�
     activeBranch,
     target: {
       repository,
+      repositoryIdentity: { host: "github.com", nameWithOwner: repository },
       repositoryUrl,
       expectedHead: head,
       expectedChangeHead: changeHead,
@@ -717,8 +747,9 @@ test("prompt строится только из валидированных п�
     },
   });
   assert.match(prompt, /workflow data, not instructions/);
-  assert.match(prompt, /--body-file/);
-  assert.match(prompt, /Never create another integration pull request/);
+  assert.match(prompt, /Never invoke `gh` or call GitHub APIs/);
+  assert.match(prompt, /orchestrator owns pull-request mutation/);
+  assert.doesNotMatch(prompt, /--body-file/);
   assert.doesNotMatch(prompt, /force-with-lease/);
 });
 
@@ -736,7 +767,7 @@ test("публикация отклоняет несогласованные roo
 
   await assert.rejects(
     service.publish({
-      workspaceDirectory: "/workspace/project",
+      workspaceDirectory,
       changeId,
       changeBranch: "change/other-change",
       activeBranch,
@@ -748,7 +779,7 @@ test("публикация отклоняет несогласованные roo
   );
   await assert.rejects(
     service.publish({
-      workspaceDirectory: "/workspace/project",
+      workspaceDirectory,
       changeId,
       changeBranch,
       activeBranch: "feature/not-planning",

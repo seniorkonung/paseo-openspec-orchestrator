@@ -20,6 +20,7 @@ import {
   parseGitHubRemoteIdentity,
   type GitHubRemoteIdentity,
 } from "./github-repository-identity.ts";
+import { updateGitHubPullRequest } from "./github-pull-request-mutation.ts";
 
 export async function inspectPublicationTarget(
   command: BoundedCommandRunner,
@@ -136,6 +137,7 @@ export async function inspectPublicationTarget(
 
   return {
     repository: repositoryArgument,
+    repositoryIdentity: remote,
     repositoryUrl: repository.url,
     expectedHead,
     expectedChangeHead,
@@ -143,7 +145,7 @@ export async function inspectPublicationTarget(
   };
 }
 
-export async function verifyPublication(
+export async function publishPublication(
   command: BoundedCommandRunner,
   request: {
     readonly workspaceDirectory: string;
@@ -155,6 +157,13 @@ export async function verifyPublication(
     readonly signal: AbortSignal;
   },
 ): Promise<PublishedPullRequest> {
+  assertStablePullRequestContent(
+    request.input.title,
+    request.input.body,
+    request.changeId,
+    request.changeBranch,
+    request.activeBranch,
+  );
   await assertCleanWorktree(command, request.workspaceDirectory, request.signal);
   const [currentBranch, head] = await Promise.all([
     readCurrentBranch(command, request.workspaceDirectory, request.signal),
@@ -196,42 +205,50 @@ export async function verifyPublication(
   }
 
   const expectedNumber = request.target.existingPullRequest.number;
-  if (expectedNumber !== request.input.pullRequestNumber) {
-    throw new ChangePublicationError(
-      `Нужно актуализировать существующий pull request #${expectedNumber}`,
-    );
-  }
-
-  const pullRequest = await readPullRequest(
+  let pullRequest = await readPullRequest(
     command,
     request.workspaceDirectory,
     request.target.repository,
-    request.input.pullRequestNumber,
+    expectedNumber,
     request.signal,
   );
-  assertPullRequestRepository(pullRequest, request.target.repositoryUrl);
-  if (pullRequest.state !== "OPEN") {
-    throw new ChangePublicationError(
-      `Pull request #${pullRequest.number} должен быть открыт`,
-    );
-  }
-  if (pullRequest.isCrossRepository) {
-    throw new ChangePublicationError("Pull request должен использовать ветку из origin");
-  }
-  if (pullRequest.baseRefName !== PUBLICATION_BASE_BRANCH) {
-    throw new ChangePublicationError("Pull request должен быть направлен в ветку main");
-  }
+  assertPublicationPullRequest(
+    pullRequest,
+    request.target,
+    request.changeBranch,
+    changeHead,
+  );
   if (
-    pullRequest.headRefName !== request.changeBranch ||
-    pullRequest.headRefOid !== changeHead
+    pullRequest.title !== request.input.title ||
+    pullRequest.body !== request.input.body
   ) {
-    throw new ChangePublicationError(
-      "Интеграционный pull request не содержит текущий HEAD корневой change-ветки",
+    try {
+      await updateGitHubPullRequest(
+        command,
+        request.workspaceDirectory,
+        request.target.repositoryIdentity,
+        expectedNumber,
+        { title: request.input.title, body: request.input.body },
+        request.signal,
+      );
+    } catch (error) {
+      if (request.signal.aborted) throw error;
+      throw new ChangePublicationError(
+        `Не удалось обновить pull request #${expectedNumber}`,
+      );
+    }
+    pullRequest = await readPullRequest(
+      command,
+      request.workspaceDirectory,
+      request.target.repository,
+      expectedNumber,
+      request.signal,
     );
-  }
-  if (pullRequest.isDraft !== request.target.existingPullRequest.isDraft) {
-    throw new ChangePublicationError(
-      "Статус Draft существующего pull request не должен изменяться",
+    assertPublicationPullRequest(
+      pullRequest,
+      request.target,
+      request.changeBranch,
+      changeHead,
     );
   }
   if (
@@ -239,16 +256,9 @@ export async function verifyPublication(
     pullRequest.body !== request.input.body
   ) {
     throw new ChangePublicationError(
-      "Название или описание pull request не совпадает с подтверждаемым содержимым",
+      "GitHub не подтвердил обновлённые название и описание pull request",
     );
   }
-  assertStablePullRequestContent(
-    request.input.title,
-    request.input.body,
-    request.changeId,
-    request.changeBranch,
-    request.activeBranch,
-  );
 
   const openPullRequests = await listOpenPullRequests(
     command,
@@ -280,6 +290,39 @@ export async function verifyPublication(
     url: pullRequest.url,
     title: pullRequestTitleSchema.parse(pullRequest.title),
   };
+}
+
+function assertPublicationPullRequest(
+  pullRequest: z.output<typeof pullRequestSchema>,
+  target: PublicationTarget,
+  changeBranch: string,
+  changeHead: string,
+): void {
+  assertPullRequestRepository(pullRequest, target.repositoryUrl);
+  if (pullRequest.state !== "OPEN") {
+    throw new ChangePublicationError(
+      `Pull request #${pullRequest.number} должен быть открыт`,
+    );
+  }
+  if (pullRequest.isCrossRepository) {
+    throw new ChangePublicationError("Pull request должен использовать ветку из origin");
+  }
+  if (pullRequest.baseRefName !== PUBLICATION_BASE_BRANCH) {
+    throw new ChangePublicationError("Pull request должен быть направлен в ветку main");
+  }
+  if (
+    pullRequest.headRefName !== changeBranch ||
+    pullRequest.headRefOid !== changeHead
+  ) {
+    throw new ChangePublicationError(
+      "Интеграционный pull request не содержит текущий HEAD корневой change-ветки",
+    );
+  }
+  if (pullRequest.isDraft !== target.existingPullRequest.isDraft) {
+    throw new ChangePublicationError(
+      "Статус Draft существующего pull request не должен изменяться",
+    );
+  }
 }
 
 async function listOpenPullRequests(

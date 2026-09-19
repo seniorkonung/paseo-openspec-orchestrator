@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -63,7 +63,7 @@ async function repository(context, { existing = false } = {}) {
     invalidStatusJson: false,
     createdPathOverride: null,
     rootOutputPath: workspace,
-    editCalls: 0,
+    updateCalls: 0,
   };
 }
 
@@ -181,13 +181,16 @@ function commandFor(fixture) {
       if (!pullRequest) throw new Error("PR not found");
       return { stdout: JSON.stringify(pullRequest), stderr: "" };
     }
-    if (executable === "gh" && args[0] === "pr" && args[1] === "edit") {
-      fixture.editCalls += 1;
+    if (executable === "gh" && args[0] === "api") {
+      fixture.updateCalls += 1;
+      const requestPath = args[args.indexOf("--input") + 1];
+      const update = JSON.parse(await readFile(requestPath, "utf8"));
+      const number = Number(args.find((argument) => argument.startsWith("repos/"))?.split("/").at(-1));
       const pullRequest = fixture.pullRequests.find(
-        ({ number }) => number === Number(args[2]),
+        (candidate) => candidate.number === number,
       );
-      pullRequest.baseRefName = args[args.indexOf("--base") + 1];
-      return { stdout: pullRequest.url, stderr: "" };
+      pullRequest.baseRefName = update.base;
+      return { stdout: "", stderr: "" };
     }
     const result = await execFileAsync(executable, [...args], {
       cwd: options.cwd,
@@ -248,6 +251,7 @@ test("существующий change не пересоздаётся, а Ready 
   assert.equal(fixture.newCalls, 0);
   assert.equal(fixture.pullRequests[0].baseRefName, "main");
   assert.equal(fixture.pullRequests[0].isDraft, false);
+  assert.equal(fixture.updateCalls, 1);
   assert.equal(await git(fixture.workspace, ["rev-parse", "HEAD"]), fixture.baselineCommit);
 });
 
@@ -337,7 +341,7 @@ test("root PR fail-closed проверяет дубли и fork", async (context
       service.prepare(fixture.workspace, changeId, changeBranch),
       /не соответствует change-ветке/,
     );
-    assert.equal(fixture.editCalls, 0);
+    assert.equal(fixture.updateCalls, 0);
   });
 
 });

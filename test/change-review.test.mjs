@@ -335,6 +335,7 @@ test("completion принимает один review-коммит и Ready PR chi
   const { running, client, agentOptions } = await startRun(harness, fixture, session);
   assert.match(agentOptions.prompt, /openspec-review-change/);
   assert.match(agentOptions.prompt, /gh pr create --repo/);
+  assert.match(agentOptions.prompt, /never use `gh pr edit`/);
 
   let result = await client.callTool({ name: "complete_change_review", arguments: {} });
   assert.equal(result.isError, true);
