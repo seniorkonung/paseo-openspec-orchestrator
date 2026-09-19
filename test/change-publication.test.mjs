@@ -8,7 +8,7 @@ import {
 
 const changeId = "selected-change";
 const changeBranch = `change/${changeId}`;
-const activeBranch = `planning/${changeId}`;
+const activeBranch = `planning/${changeId}/initial`;
 const head = "a".repeat(40);
 const changeHead = "c".repeat(40);
 const mainHead = "b".repeat(40);

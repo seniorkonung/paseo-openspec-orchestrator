@@ -9,9 +9,10 @@ import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import {
   changeBranchFor,
   changeBranchSchema,
-  implementationBranchFor,
+  assertImplementationBranchFor,
   implementationBranchSchema,
   type ImplementationBranch,
+  parseImplementationBranch,
 } from "./change-branch.ts";
 
 export const TASK_REMOTE = "origin";
@@ -111,6 +112,7 @@ export const pendingTaskExecutionSessionSchema = z
     taskId: taskIdSchema,
     taskNumber: taskNumberSchema,
     taskDescription: taskDescriptionSchema,
+    phaseNumber: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(1),
     changeBranch: changeBranchSchema,
     implementationBranch: implementationBranchSchema,
     rootBaselineCommit: commitHashSchema,
@@ -132,7 +134,15 @@ export const pendingTaskExecutionSessionSchema = z
         message: "Корневая ветка task-сессии не соответствует change",
       });
     }
-    if (session.implementationBranch !== implementationBranchFor(session.changeId)) {
+    try {
+      assertImplementationBranchFor(session.implementationBranch, session.changeId);
+      if (
+        parseImplementationBranch(session.implementationBranch).phaseNumber !==
+          session.phaseNumber
+      ) {
+        throw new Error("Неверная фаза");
+      }
+    } catch {
       context.addIssue({
         code: "custom",
         path: ["implementationBranch"],
@@ -159,6 +169,7 @@ export type ChangeTaskExecutionPlan =
   | {
       readonly kind: "complete";
       readonly schemaName: string;
+      readonly reason?: "change-complete" | "phase-complete";
     }
   | {
       readonly kind: "next-task";

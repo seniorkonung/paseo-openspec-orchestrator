@@ -13,8 +13,13 @@ async function runStep(
   dependencies: PrepareImplementationBranchDependencies,
   context: WorkflowStepContext,
 ): Promise<WorkflowStepResult> {
-  const { change, changeBranch, activeBranch } = context.state;
-  if (!change || !changeBranch || !activeBranch) {
+  const { change, changeBranch, activeBranch, phaseTarget } = context.state;
+  if (
+    !change ||
+    !changeBranch ||
+    activeBranch !== changeBranch ||
+    phaseTarget?.kind !== "implementation"
+  ) {
     return { kind: "halt", summary: "Недостаточно данных для implementation-ветки", message: "Change или его корневая ветка не сохранены" };
   }
   let session = context.state.pendingImplementationBranchSession;
@@ -24,6 +29,8 @@ async function runStep(
         dependencies.workspaceDirectory,
         change.id,
         changeBranch,
+        phaseTarget.phaseNumber,
+        phaseTarget.runNumber,
         context.signal,
       );
       await context.checkpointState({
@@ -42,9 +49,10 @@ async function runStep(
       state: {
         activeBranch: run.implementationBranch,
         implementationRun: run,
+        phaseTarget: null,
         pendingImplementationBranchSession: null,
       },
-      summary: `Подготовлена единая implementation-ветка ${run.implementationBranch}`,
+      summary: `Подготовлена implementation-ветка Phase ${run.phaseNumber}, run ${run.runNumber}: ${run.implementationBranch}`,
     };
   } catch (error) {
     if (context.signal.aborted) throw error;

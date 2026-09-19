@@ -56,7 +56,7 @@ export function createChangeFindingResolutionService(
     sessionSchema: pendingFindingResolutionSessionSchema,
     report: {
       fileName: REVIEW_FILE_NAME,
-      missingMeansNoFindings: false,
+      missingMeansNoFindings: true,
       read: async (location) => {
         try {
           return await readChangeReviewReport(location);

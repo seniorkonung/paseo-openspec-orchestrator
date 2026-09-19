@@ -73,7 +73,9 @@ export interface InspectedOpenSpecStatus {
   readonly changeName: string;
   readonly schemaName: string;
   readonly gitRoot: string;
+  readonly changeRoot: string;
   readonly isPlanningComplete: boolean;
+  readonly applyRequires: readonly string[];
   readonly artifacts: ReadonlyMap<string, z.output<typeof artifactStatusSchema>>;
   readonly artifactOrder: readonly string[];
   readonly artifactPaths: ReadonlyMap<string, InspectedArtifactPath>;
@@ -217,7 +219,9 @@ export function createChangeArtifactStatusGateway(
       changeName: normalizedChangeId,
       schemaName: status.schemaName,
       gitRoot,
+      changeRoot,
       isPlanningComplete: status.isPlanningComplete,
+      applyRequires: Object.freeze([...status.applyRequires]),
       artifacts: new Map(status.artifacts.map((artifact) => [artifact.id, artifact])),
       artifactOrder: Object.freeze(status.artifacts.map(({ id }) => id)),
       artifactPaths,

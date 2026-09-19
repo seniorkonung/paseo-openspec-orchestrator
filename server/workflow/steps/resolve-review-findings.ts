@@ -67,7 +67,7 @@ async function resolveReviewFindingsStep(
       if (plan.kind === "no-findings") {
         return {
           kind: "continue",
-          next: context.state.implementationRun
+          next: context.state.implementationRun || context.state.planningRun
             ? "resolve-implementation-review-findings"
             : "await-planning-merge",
           state: { pendingFindingResolutionSession: null },
@@ -145,7 +145,7 @@ async function resolveReviewFindingsStep(
     if (completed.remainingFindingIds.length === 0) {
       return {
         kind: "continue",
-        next: context.state.implementationRun
+        next: context.state.implementationRun || context.state.planningRun
           ? "resolve-implementation-review-findings"
           : "await-planning-merge",
         state: { pendingFindingResolutionSession: null },

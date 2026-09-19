@@ -13,7 +13,7 @@ import {
 const workspaceDirectory = process.cwd();
 const changeId = "publication-contract";
 const parentBranch = `change/${changeId}`;
-const branch = `planning/${changeId}`;
+const branch = `planning/${changeId}/initial`;
 const baselineCommit = "a".repeat(40);
 const expectedHead = "b".repeat(40);
 

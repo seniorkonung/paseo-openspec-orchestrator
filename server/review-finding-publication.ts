@@ -8,9 +8,9 @@ import { reviewFindingIdSchema } from "./change-review-report.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import {
   changeBranchFor,
-  implementationBranchFor,
   implementationBranchSchema,
-  planningBranchFor,
+  parseImplementationBranch,
+  parsePlanningBranch,
   planningBranchSchema,
 } from "./change-branch.ts";
 import { implementationPullRequestTitle } from "./implementation-publication.ts";
@@ -342,9 +342,15 @@ async function inspectActiveReviewPullRequest(
     request.signal,
   );
   assertPullRequestRepository(pullRequest, repository.url);
-  const planningTarget = request.branch === planningBranchFor(request.changeId);
-  const implementationTarget =
-    request.branch === implementationBranchFor(request.changeId);
+  let planningTarget = false;
+  let implementationTarget = false;
+  try {
+    planningTarget = parsePlanningBranch(request.branch).changeId === request.changeId;
+  } catch { /* Не planning-ветка. */ }
+  try {
+    implementationTarget =
+      parseImplementationBranch(request.branch).changeId === request.changeId;
+  } catch { /* Не implementation-ветка. */ }
   const expectedTitle = planningTarget
     ? reviewPullRequestTitle(request.changeId)
     : implementationPullRequestTitle(request.changeId);

@@ -24,7 +24,7 @@ import {
   reviewPullRequestBody,
   reviewPullRequestTitle,
 } from "./change-review-publication.ts";
-import { planningBranchSchema } from "./change-branch.ts";
+import { parsePlanningBranch, planningBranchSchema } from "./change-branch.ts";
 import {
   createChangeReviewVerification,
   type ChangeReviewVerificationOptions,
@@ -297,6 +297,8 @@ export function changeReviewPrompt(input: {
   readonly reviewRepositoryPath: string;
   readonly alreadyCommitted: boolean;
 }): string {
+  const parsedBranch = parsePlanningBranch(input.reviewBranch);
+  const phaseNumber = parsedBranch.kind === "phase" ? parsedBranch.phaseNumber : null;
   const subject = reviewCommitSubject(input.changeId);
   const pullRequestTitle = reviewPullRequestTitle(input.changeId);
   const pullRequestBody = reviewPullRequestBody(input.changeId);
@@ -316,7 +318,9 @@ export function changeReviewPrompt(input: {
   });
   const reviewInstruction = input.alreadyCommitted
     ? "This session is recovering an interrupted workflow. The completed review is already committed. Do not invoke the review skill again and do not create or amend a commit. Continue with publication and PR reconciliation."
-    : `Invoke the \`openspec-review-change\` skill for the complete change name \`${input.changeId}\`. Let the skill perform the review and create a finished \`review.md\` in the reported change root.`;
+    : phaseNumber === null
+      ? `Invoke the \`openspec-review-change\` skill for the complete change name \`${input.changeId}\`. Let the skill perform the review and create a finished \`review.md\` in the reported change root.`
+      : `Invoke the \`openspec-review-change\` skill for change \`${input.changeId}\` in task-planning review mode focused exclusively on Phase ${phaseNumber}. Check that the newly planned ${phaseNumber}.* tasks completely and consistently implement Phase ${phaseNumber} from plan.md without contradicting the other planning artifacts or previously preserved tasks. Record all findings, or their absence, in a finished \`review.md\`.`;
 
   return `You are responsible only for completing the review stage of one OpenSpec change.
 

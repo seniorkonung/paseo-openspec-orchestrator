@@ -17,7 +17,7 @@ const commit = "b".repeat(40);
 const run = {
   changeId,
   changeBranch: `change/${changeId}`,
-  implementationBranch: `implementation/${changeId}`,
+  implementationBranch: `implementation/${changeId}/phase-1/run-1`,
   rootBaselineCommit: base,
   repository: {
     host: "github.com",
@@ -40,7 +40,7 @@ test("run-state собирает task-коммиты в один ordered batch",
 });
 
 test("run-state отклоняет ветки другого change и повторный commit", () => {
-  assert.throws(() => implementationRunSchema.parse({ ...run, implementationBranch: "implementation/other" }));
+  assert.throws(() => implementationRunSchema.parse({ ...run, implementationBranch: "implementation/other/phase-1/run-1" }));
   const first = collectImplementationTask(run, { taskId: "a", taskNumber: "1.1", commit });
   assert.throws(
     () => collectImplementationTask(first, { taskId: "b", taskNumber: "1.2", commit }),

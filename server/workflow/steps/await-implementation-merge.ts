@@ -62,10 +62,12 @@ async function runStep(
     );
     await dependencies.verifyChange(dependencies.workspaceDirectory, run.changeId, context.signal);
     return {
-      kind: "complete",
+      kind: "continue",
+      next: "inspect-phase-work",
       state: {
         activeBranch: run.changeBranch,
         implementationRun: null,
+        phaseTarget: null,
         pendingImplementationMergeSession: null,
       },
       summary: `Implementation PR слит; ${run.changeBranch} обновлена fast-forward`,

@@ -74,7 +74,9 @@ async function executeChangeTasksStep(
           kind: "continue",
           next: "inspect-implementation-feedback",
           state: { pendingTaskExecutionSession: null },
-          summary: `Все OpenSpec-задачи change ${change.id} выполнены; проверяю PR feedback`,
+          summary: plan.reason === "phase-complete"
+            ? `Все задачи Phase ${implementationRun.phaseNumber} выполнены; проверяю PR feedback`
+            : `Все OpenSpec-задачи change ${change.id} выполнены; проверяю PR feedback`,
         };
       }
       session = plan.session;

@@ -3,7 +3,7 @@ import { commitHashSchema } from "./change-artifact-model.ts";
 import {
   changeBranchFor,
   changeBranchSchema,
-  implementationBranchFor,
+  implementationBranchForRun,
   implementationBranchSchema,
 } from "./change-branch.ts";
 import {
@@ -103,6 +103,8 @@ export const implementationRunSchema = z
     changeId: openSpecChangeIdSchema,
     changeBranch: changeBranchSchema,
     implementationBranch: implementationBranchSchema,
+    phaseNumber: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(1),
+    runNumber: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(1),
     rootBaselineCommit: commitHashSchema,
     repository: implementationRepositorySchema,
     publication: implementationPublicationSchema,
@@ -125,7 +127,10 @@ export const implementationRunSchema = z
         message: "Корневая ветка implementation-run не соответствует change",
       });
     }
-    if (run.implementationBranch !== implementationBranchFor(run.changeId)) {
+    if (
+      run.implementationBranch !==
+        implementationBranchForRun(run.changeId, run.phaseNumber, run.runNumber)
+    ) {
       context.addIssue({
         code: "custom",
         path: ["implementationBranch"],

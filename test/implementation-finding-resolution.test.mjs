@@ -19,7 +19,7 @@ import {
 const execFileAsync = promisify(execFile);
 const changeId = "resolve-implementation-findings";
 const parentBranch = `change/${changeId}`;
-const branch = `implementation/${changeId}`;
+const branch = `implementation/${changeId}/phase-1/run-1`;
 const reviewedBase = "a".repeat(40);
 const reviewedHead = "b".repeat(40);
 const publishInput = {

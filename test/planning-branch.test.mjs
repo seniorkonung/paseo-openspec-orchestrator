@@ -13,7 +13,7 @@ import {
 const execFileAsync = promisify(execFile);
 const changeId = "planning-contract";
 const changeBranch = `change/${changeId}`;
-const planningBranch = `planning/${changeId}`;
+const planningBranch = `planning/${changeId}/initial`;
 
 async function git(cwd, args) {
   const result = await execFileAsync("git", args, { cwd, encoding: "utf8" });
@@ -71,7 +71,7 @@ function commandFor(fixture) {
   };
 }
 
-test("создаёт planning/<id> строго от сохранённого root baseline и восстанавливается", async (context) => {
+test("создаёт planning/<id>/initial строго от сохранённого root baseline и восстанавливается", async (context) => {
   const fixture = await repository(context);
   const service = createPlanningBranchService({ command: commandFor(fixture) });
   const session = await service.prepare(

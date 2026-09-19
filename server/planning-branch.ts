@@ -3,7 +3,8 @@ import {
   assertPlanningBranchFor,
   changeBranchFor,
   changeBranchSchema,
-  planningBranchFor,
+  initialPlanningBranchFor,
+  phasePlanningBranchFor,
   planningBranchSchema,
   type PlanningBranch,
 } from "./change-branch.ts";
@@ -41,7 +42,9 @@ export const pendingPlanningBranchSessionSchema = z
         message: "Корневая ветка не соответствует change",
       });
     }
-    if (session.planningBranch !== planningBranchFor(session.changeId)) {
+    try {
+      assertPlanningBranchFor(session.planningBranch, session.changeId);
+    } catch {
       context.addIssue({
         code: "custom",
         path: ["planningBranch"],
@@ -61,12 +64,23 @@ export interface PlanningBranchService {
     changeBranch: string,
     signal?: AbortSignal,
   ): Promise<PendingPlanningBranchSession>;
+  prepare(
+    workspaceDirectory: string,
+    changeId: string,
+    changeBranch: string,
+    target: PlanningBranchTarget,
+    signal?: AbortSignal,
+  ): Promise<PendingPlanningBranchSession>;
   activate(
     workspaceDirectory: string,
     session: PendingPlanningBranchSession,
     signal?: AbortSignal,
   ): Promise<PlanningBranch>;
 }
+
+export type PlanningBranchTarget =
+  | { readonly kind: "initial" }
+  | { readonly kind: "phase"; readonly phaseNumber: number };
 
 export interface PlanningBranchServiceOptions {
   readonly command?: BoundedCommandRunner;
@@ -85,7 +99,17 @@ export function createPlanningBranchService(
   const command = options.command ?? runBoundedCommand;
 
   return {
-    async prepare(workspaceDirectory, changeIdInput, changeBranchInput, signal) {
+    async prepare(
+      workspaceDirectory,
+      changeIdInput,
+      changeBranchInput,
+      targetOrSignal?: PlanningBranchTarget | AbortSignal,
+      maybeSignal?: AbortSignal,
+    ) {
+      const target = isAbortSignal(targetOrSignal) || targetOrSignal === undefined
+        ? { kind: "initial" } as const
+        : targetOrSignal;
+      const signal = isAbortSignal(targetOrSignal) ? targetOrSignal : maybeSignal;
       const changeId = openSpecChangeIdSchema.parse(changeIdInput);
       const changeBranch = changeBranchSchema.parse(changeBranchInput);
       if (changeBranch !== changeBranchFor(changeId)) {
@@ -117,7 +141,9 @@ export function createPlanningBranchService(
         );
       }
 
-      const planningBranch = planningBranchFor(changeId);
+      const planningBranch = target.kind === "initial"
+        ? initialPlanningBranchFor(changeId)
+        : phasePlanningBranchFor(changeId, target.phaseNumber);
       const [localPlanning, remotePlanning, previousPullRequests] = await Promise.all([
         readLocalReviewBranchCommit(command, workspaceDirectory, planningBranch, signal),
         readOptionalRemoteReviewBranchCommit(
@@ -257,4 +283,10 @@ export function createPlanningBranchService(
       return session.planningBranch;
     },
   };
+}
+
+function isAbortSignal(
+  value: PlanningBranchTarget | AbortSignal | undefined,
+): value is AbortSignal {
+  return value instanceof AbortSignal;
 }

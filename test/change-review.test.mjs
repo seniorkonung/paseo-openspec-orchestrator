@@ -19,7 +19,7 @@ import {
 const execFileAsync = promisify(execFile);
 const changeId = "complete-review-workflow";
 const parentBranch = `change/${changeId}`;
-const reviewBranch = `planning/${changeId}`;
+const reviewBranch = `planning/${changeId}/initial`;
 const repositoryUrl = "https://github.com/example/project";
 
 function ultraSandboxProfile() {

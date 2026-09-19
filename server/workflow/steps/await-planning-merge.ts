@@ -65,9 +65,10 @@ async function awaitPlanningMergeStep(
     );
     return {
       kind: "continue",
-      next: "prepare-implementation-branch",
+      next: "inspect-phase-work",
       state: {
         activeBranch: rootBranch,
+        planningRun: null,
         pendingPlanningMergeSession: null,
       },
       summary: `Planning PR слит; workflow продолжен из ${rootBranch}`,

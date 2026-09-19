@@ -5,6 +5,7 @@ import {
   changeBranchFor,
   changeBranchSchema,
   implementationBranchFor,
+  implementationBranchForRun,
   implementationBranchSchema,
 } from "./change-branch.ts";
 import {
@@ -30,6 +31,8 @@ export const pendingImplementationBranchSessionSchema = z
     changeId: openSpecChangeIdSchema,
     changeBranch: changeBranchSchema,
     implementationBranch: implementationBranchSchema,
+    phaseNumber: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(1),
+    runNumber: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(1),
     rootBaselineCommit: commitHashSchema,
     repository: implementationRepositorySchema,
   })
@@ -42,7 +45,13 @@ export const pendingImplementationBranchSessionSchema = z
         message: "Корневая ветка не соответствует change",
       });
     }
-    if (session.implementationBranch !== implementationBranchFor(session.changeId)) {
+    if (
+      session.implementationBranch !== implementationBranchForRun(
+        session.changeId,
+        session.phaseNumber,
+        session.runNumber,
+      )
+    ) {
       context.addIssue({
         code: "custom",
         path: ["implementationBranch"],
@@ -56,6 +65,14 @@ export type PendingImplementationBranchSession = z.infer<
 >;
 
 export interface ImplementationBranchService {
+  prepare(
+    workspaceDirectory: string,
+    changeId: string,
+    changeBranch: string,
+    phaseNumber: number,
+    runNumber: number,
+    signal?: AbortSignal,
+  ): Promise<PendingImplementationBranchSession>;
   prepare(
     workspaceDirectory: string,
     changeId: string,
@@ -86,7 +103,18 @@ export function createImplementationBranchService(
   const command = options.command ?? runBoundedCommand;
 
   return {
-    async prepare(workspaceDirectory, changeIdInput, changeBranchInput, signal) {
+    async prepare(
+      workspaceDirectory,
+      changeIdInput,
+      changeBranchInput,
+      phaseOrSignal?: number | AbortSignal,
+      runNumberInput?: number,
+      maybeSignal?: AbortSignal,
+    ) {
+      const legacy = typeof phaseOrSignal !== "number";
+      const phaseNumber = legacy ? 1 : phaseOrSignal;
+      const runNumber = legacy ? 1 : z.number().int().positive().parse(runNumberInput);
+      const signal = phaseOrSignal instanceof AbortSignal ? phaseOrSignal : maybeSignal;
       const changeId = openSpecChangeIdSchema.parse(changeIdInput);
       const changeBranch = changeBranchSchema.parse(changeBranchInput);
       if (changeBranch !== changeBranchFor(changeId)) {
@@ -113,7 +141,9 @@ export function createImplementationBranchService(
         );
       }
 
-      const implementationBranch = implementationBranchFor(changeId);
+      const implementationBranch = legacy
+        ? implementationBranchFor(changeId)
+        : implementationBranchForRun(changeId, phaseNumber, runNumber);
       const [localImplementation, remoteImplementation, previousPullRequests] =
         await Promise.all([
           readLocalReviewBranchCommit(
@@ -152,6 +182,8 @@ export function createImplementationBranchService(
         changeId,
         changeBranch,
         implementationBranch,
+        phaseNumber,
+        runNumber,
         rootBaselineCommit,
         repository,
       });
@@ -266,6 +298,8 @@ export function createImplementationBranchService(
         changeId: session.changeId,
         changeBranch: session.changeBranch,
         implementationBranch: session.implementationBranch,
+        phaseNumber: session.phaseNumber,
+        runNumber: session.runNumber,
         rootBaselineCommit: session.rootBaselineCommit,
         repository: session.repository,
         publication: { kind: "unpublished" },

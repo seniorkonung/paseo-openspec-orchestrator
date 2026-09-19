@@ -26,7 +26,7 @@ import {
 import {
   changeBranchFor,
   changeBranchSchema,
-  planningBranchFor,
+  assertPlanningBranchFor,
   planningBranchSchema,
 } from "./change-branch.ts";
 import { createManagedAgentSession } from "./managed-agent-session.ts";
@@ -101,14 +101,21 @@ export function createChangePublicationService(
       }
       const parsedChangeBranch = changeBranchSchema.safeParse(request.changeBranch);
       const parsedActiveBranch = planningBranchSchema.safeParse(request.activeBranch);
+      let validPlanningBranch = false;
+      if (parsedActiveBranch.success) {
+        try {
+          assertPlanningBranchFor(parsedActiveBranch.data, parsedChangeId.data);
+          validPlanningBranch = true;
+        } catch { /* Ошибка нормализуется ниже. */ }
+      }
       if (
         !parsedChangeBranch.success ||
         !parsedActiveBranch.success ||
         parsedChangeBranch.data !== changeBranchFor(parsedChangeId.data) ||
-        parsedActiveBranch.data !== planningBranchFor(parsedChangeId.data)
+        !validPlanningBranch
       ) {
         throw new ChangePublicationError(
-          "Для публикации требуются согласованные change/<id> и planning/<id> ветки",
+          "Для публикации требуются согласованные change/<id> и planning/<id>/{initial|phase-N} ветки",
         );
       }
       const changeId = parsedChangeId.data;

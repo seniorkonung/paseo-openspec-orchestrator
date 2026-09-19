@@ -16,6 +16,7 @@ import {
   workflowCheckpointSchema,
   workflowStateSchema,
 } from "../server/workflow/types.ts";
+import { phaseTaskFingerprint } from "../server/phase-work.ts";
 
 async function temporaryHome(context) {
   const directory = await mkdtemp(join(tmpdir(), "openspec-ledger-"));
@@ -27,7 +28,7 @@ function pendingReviewSession(changeId, parentBranch) {
   return {
     changeId,
     parentBranch,
-    reviewBranch: `planning/${changeId}`,
+    reviewBranch: `planning/${changeId}/initial`,
     parentBaselineCommit: "a".repeat(40),
     baselineCommit: "b".repeat(40),
     repositoryHost: "github.com",
@@ -40,7 +41,7 @@ function pendingReviewSession(changeId, parentBranch) {
 function workflowBranches(changeId) {
   return {
     changeBranch: `change/${changeId}`,
-    activeBranch: `planning/${changeId}`,
+    activeBranch: `planning/${changeId}/initial`,
   };
 }
 
@@ -48,7 +49,7 @@ function implementationRun(changeId) {
   return {
     changeId,
     changeBranch: `change/${changeId}`,
-    implementationBranch: `implementation/${changeId}`,
+    implementationBranch: `implementation/${changeId}/phase-1/run-1`,
     rootBaselineCommit: "a".repeat(40),
     repository: {
       host: "github.com",
@@ -67,7 +68,7 @@ function implementationRun(changeId) {
   };
 }
 
-test("checkpoint версий 1–3 не мигрируется, а версия 4 заполняет default", () => {
+test("checkpoint версий 1–4 не мигрируется, а версия 5 заполняет default", () => {
   assert.throws(
     () =>
       workflowCheckpointSchema.parse({
@@ -90,12 +91,19 @@ test("checkpoint версий 1–3 не мигрируется, а версия
       state: { ...workflowBranches("legacy-change"), change: { id: "legacy-change" } },
     }),
   );
+  assert.throws(() =>
+    workflowCheckpointSchema.parse({
+      version: 4,
+      nextStepId: "initialize-change",
+      state: { ...workflowBranches("legacy-change"), change: { id: "legacy-change" } },
+    }),
+  );
   const parsed = workflowCheckpointSchema.parse({
-    version: 4,
+    version: 5,
     nextStepId: "initialize-change",
     state: { ...workflowBranches("legacy-change"), change: { id: "legacy-change" } },
   });
-  assert.equal(parsed.version, 4);
+  assert.equal(parsed.version, 5);
   assert.equal(parsed.state.pendingChangeInitializationSession, null);
   assert.equal(parsed.state.pendingPlanningBranchSession, null);
   assert.equal(parsed.state.pendingPlanningMergeSession, null);
@@ -106,7 +114,7 @@ test("workflow не принимает несколько незавершённ
     () =>
       workflowStateSchema.parse({
         ...workflowBranches("conflicting-sessions"),
-        activeBranch: "implementation/conflicting-sessions",
+        activeBranch: "implementation/conflicting-sessions/phase-1/run-1",
         change: { id: "conflicting-sessions" },
         pendingArtifactSession: {
           artifactId: "proposal",
@@ -129,13 +137,13 @@ test("workflow не принимает несколько незавершённ
         pendingReviewSession: null,
         pendingFindingResolutionSession: {
           changeId: "conflicting-sessions",
-          branch: "implementation/conflicting-sessions",
+          branch: "implementation/conflicting-sessions/phase-1/run-1",
           findingId: "F1",
           baselineCommit: "c".repeat(40),
         },
         pendingImplementationFindingResolutionSession: {
           changeId: "conflicting-sessions",
-          branch: "implementation/conflicting-sessions",
+          branch: "implementation/conflicting-sessions/phase-1/run-1",
           findingId: "F2",
           baselineCommit: "d".repeat(40),
         },
@@ -154,7 +162,7 @@ test("workflow не принимает несколько незавершённ
         ),
         pendingFindingResolutionSession: {
           changeId: "conflicting-sessions",
-          branch: "planning/conflicting-sessions",
+          branch: "planning/conflicting-sessions/initial",
           findingId: "F1",
           baselineCommit: "c".repeat(40),
         },
@@ -190,7 +198,7 @@ test("workflow отклоняет checkpoint-сессии другого change 
         pendingPlanningBranchSession: {
           changeId: "other-change",
           changeBranch: "change/other-change",
-          planningBranch: "planning/other-change",
+          planningBranch: "planning/other-change/initial",
           baselineCommit: "b".repeat(40),
         },
       }),
@@ -205,7 +213,7 @@ test("workflow отклоняет checkpoint-сессии другого change 
         pendingPlanningMergeSession: {
           changeId: "expected-change",
           changeBranch: "change/expected-change",
-          planningBranch: "planning/expected-change",
+          planningBranch: "planning/expected-change/initial",
           planningPullRequestNumber: 43,
           mergedPlanningHead: "c".repeat(40),
           repositoryHost: "github.com",
@@ -225,6 +233,21 @@ test("workflow связывает durable implementation-сессии с точ�
     activeBranch: run.implementationBranch,
     change: { id: changeId },
     implementationRun: run,
+    phaseProgress: {
+      phases: [{ number: 1, fingerprint: "1".repeat(64) }],
+      tasks: [{
+        id: "task-a",
+        number: "1.1",
+        description: "1.1 Реализовать поведение",
+        done: false,
+        fingerprint: phaseTaskFingerprint(
+          "task-a",
+          "1.1",
+          "1.1 Реализовать поведение",
+        ),
+      }],
+      nextImplementationRun: 2,
+    },
     pendingPrFeedbackReviewSession: {
       changeId,
       changeBranch: run.changeBranch,
@@ -358,7 +381,7 @@ test("ledger сохраняет checkpoint workflow и полностью очи
     change: { id: "change-a" },
   }));
   const checkpoint = workflowCheckpointSchema.parse({
-    version: 4,
+    version: 5,
     nextStepId: "review-change",
     state: {
       ...workflowBranches("checkpoint"),
@@ -455,21 +478,21 @@ test("семантически несовместимый ledger переход�
   assert.equal(await readFile(path, "utf8"), source);
 });
 
-test("ledger с checkpoint v3 остаётся read-only degraded до Clear", async (context) => {
+test("ledger с checkpoint v4 остаётся read-only degraded до Clear", async (context) => {
   context.mock.method(console, "error", () => undefined);
   const paseoHome = await temporaryHome(context);
-  const path = getLedgerPath("workspace-v3", paseoHome);
+  const path = getLedgerPath("workspace-v4", paseoHome);
   await mkdir(dirname(path), { recursive: true });
   const source = JSON.stringify({
     version: 1,
-    workspaceId: "workspace-v3",
+    workspaceId: "workspace-v4",
     revision: 3,
     change: { id: "legacy-change" },
     lifecycle: { status: "failed", availableCommand: "retry" },
     currentAction: null,
     history: [],
     checkpoint: {
-      version: 3,
+      version: 4,
       nextStepId: "execute-change-tasks",
       state: {
         changeBranch: "change/legacy-change",
@@ -481,9 +504,9 @@ test("ledger с checkpoint v3 остаётся read-only degraded до Clear", a
   await writeFile(path, source, "utf8");
 
   const ledger = new OrchestratorLedger({ paseoHome });
-  const snapshot = await ledger.open("workspace-v3");
+  const snapshot = await ledger.open("workspace-v4");
   assert.equal(snapshot.persistence.status, "degraded");
-  assert.equal(ledger.getWorkflowCheckpoint("workspace-v3"), null);
+  assert.equal(ledger.getWorkflowCheckpoint("workspace-v4"), null);
   await ledger.close();
   assert.equal(await readFile(path, "utf8"), source);
 });

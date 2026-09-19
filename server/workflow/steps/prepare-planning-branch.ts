@@ -32,6 +32,7 @@ async function preparePlanningBranchStep(
         dependencies.workspaceDirectory,
         change.id,
         changeBranch,
+        { kind: "initial" },
         context.signal,
       );
       await context.checkpointState({

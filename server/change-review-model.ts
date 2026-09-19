@@ -7,7 +7,7 @@ import {
 import type { RepoLocalChangePaths } from "./repo-local-change.ts";
 import {
   changeBranchFor,
-  planningBranchFor,
+  assertPlanningBranchFor,
   type PlanningBranch,
 } from "./change-branch.ts";
 
@@ -23,7 +23,9 @@ export const pendingReviewSessionSchema = reviewPublicationTargetSchema
         message: "Корневая ветка review не соответствует change",
       });
     }
-    if (session.reviewBranch !== planningBranchFor(session.changeId)) {
+    try {
+      assertPlanningBranchFor(session.reviewBranch, session.changeId);
+    } catch {
       context.addIssue({
         code: "custom",
         path: ["reviewBranch"],

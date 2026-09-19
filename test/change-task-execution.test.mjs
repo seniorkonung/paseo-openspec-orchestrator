@@ -14,7 +14,7 @@ import {
 const execFileAsync = promisify(execFile);
 const changeId = "selected-change";
 const changeBranch = `change/${changeId}`;
-const implementationBranch = `implementation/${changeId}`;
+const implementationBranch = `implementation/${changeId}/phase-1/run-1`;
 
 async function exec(executable, arguments_, options) {
   const result = await execFileAsync(executable, arguments_, {
@@ -135,6 +135,36 @@ test("plan выбирает первую задачу и сохраняет об
   assert.equal(plan.session.rootBaselineCommit, value.baseline);
   assert.equal("taskBranch" in plan.session, false);
   assert.equal("parentPullRequestNumber" in plan.session, false);
+});
+
+test("plan завершает пакет на границе фазы при незавершённых задачах будущей фазы", async (context) => {
+  const value = await fixture(context);
+  const command = async (executable, arguments_, options) => {
+    if (executable === "mise") {
+      return {
+        stdout: JSON.stringify({
+          changeName: changeId,
+          schemaName: "spec-driven",
+          progress: { total: 2, complete: 1, remaining: 1 },
+          tasks: [
+            { id: "internal-a", description: "1.1 Первая задача", done: true },
+            { id: "internal-c", description: "2.1 Будущая задача", done: false },
+          ],
+          state: "ready",
+          instruction: "Выполнить задачи",
+        }),
+        stderr: "",
+      };
+    }
+    return value.command(executable, arguments_, options);
+  };
+  const service = createChangeTaskExecutionService({ command, async createAgent() {} });
+  const result = await service.plan(value.workspace, value.run);
+  assert.deepEqual(result, {
+    kind: "complete",
+    schemaName: "spec-driven",
+    reason: "phase-complete",
+  });
 });
 
 test("High-агент создаёт один task-коммит без task PR", async (context) => {

@@ -57,6 +57,7 @@ export async function planChangeTaskExecution(
       `OpenSpec apply для change «${run.changeId}» заблокирован: ${instructions.instruction}`,
     );
   }
+  assertTaskProgressConsistent(instructions);
   const gitRoot = await readTaskGitRoot(command, workspaceDirectory, signal);
   await assertCleanWorktree(command, gitRoot, signal);
   const [currentBranch, baselineCommit] = await Promise.all([
@@ -79,16 +80,24 @@ export async function planChangeTaskExecution(
     );
   }
   await assertImplementationRunState(command, gitRoot, run, baselineCommit, signal);
+  const numberedTasks = numberTasks(instructions.tasks);
   if (instructions.state === "all_done") {
-    return { kind: "complete", schemaName: instructions.schemaName };
+    return {
+      kind: "complete",
+      schemaName: instructions.schemaName,
+      reason: "change-complete",
+    };
   }
 
-  const numberedTasks = numberPendingTasks(instructions.tasks);
-  const selected = numberedTasks.find(({ task }) => !task.done);
+  const selected = numberedTasks.find(
+    ({ task, phaseNumber }) => phaseNumber === run.phaseNumber && !task.done,
+  );
   if (!selected) {
-    throw new ChangeTaskExecutionError(
-      "OpenSpec сообщает о незавершённой реализации, но не возвращает адресуемую задачу",
-    );
+    return {
+      kind: "complete",
+      schemaName: instructions.schemaName,
+      reason: "phase-complete",
+    };
   }
 
   const expectedTasks = instructions.tasks.map((task) =>
@@ -102,6 +111,7 @@ export async function planChangeTaskExecution(
       taskId: selected.task.id,
       taskNumber: selected.number,
       taskDescription: selected.task.description,
+      phaseNumber: run.phaseNumber,
       changeBranch: run.changeBranch,
       implementationBranch: run.implementationBranch,
       rootBaselineCommit: run.rootBaselineCommit,
@@ -252,17 +262,34 @@ async function readApplyInstructions(
   return instructions;
 }
 
-function numberPendingTasks(
+function numberTasks(
   tasks: readonly ApplyTask[],
-): readonly { readonly task: ApplyTask; readonly number: string }[] {
-  const numbered = tasks.filter(({ done }) => !done).map((task) => {
+): readonly {
+  readonly task: ApplyTask;
+  readonly number: string;
+  readonly phaseNumber: number;
+}[] {
+  const ids = new Set<string>();
+  const numbered = tasks.map((task) => {
     const match = TASK_NUMBER_PREFIX.exec(task.description);
     if (!match?.[1]) {
       throw new ChangeTaskExecutionError(
-        `Незавершённая OpenSpec-задача «${task.description}» не начинается с номера вида 1.1`,
+        `OpenSpec-задача «${task.description}» не начинается с номера вида 1.1`,
       );
     }
-    return { task, number: taskNumberSchema.parse(match[1]) };
+    const number = taskNumberSchema.parse(match[1]);
+    const phaseSegment = number.split(".")[0]!;
+    const phaseNumber = Number(phaseSegment);
+    if (!Number.isSafeInteger(phaseNumber) || String(phaseNumber) !== phaseSegment) {
+      throw new ChangeTaskExecutionError(
+        `OpenSpec-задача ${number} содержит некорректный номер фазы`,
+      );
+    }
+    if (ids.has(task.id)) {
+      throw new ChangeTaskExecutionError(`Повторяется внутренний ID задачи «${task.id}»`);
+    }
+    ids.add(task.id);
+    return { task, number, phaseNumber };
   });
   const normalized = numbered.map(({ number }) => number.toLowerCase());
   if (new Set(normalized).size !== normalized.length) {
@@ -271,6 +298,19 @@ function numberPendingTasks(
     );
   }
   return numbered;
+}
+
+function assertTaskProgressConsistent(instructions: ApplyInstructions): void {
+  const completed = instructions.tasks.filter(({ done }) => done).length;
+  if (
+    instructions.progress.total !== instructions.tasks.length ||
+    instructions.progress.complete !== completed ||
+    instructions.progress.remaining !== instructions.tasks.length - completed ||
+    (instructions.state === "all_done" && instructions.progress.remaining !== 0) ||
+    (instructions.state === "ready" && instructions.progress.remaining === 0)
+  ) {
+    throw new ChangeTaskExecutionError("OpenSpec вернул противоречивый progress задач");
+  }
 }
 
 function taskListDigest(tasks: readonly ApplyTask[]): string {

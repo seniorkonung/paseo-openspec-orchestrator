@@ -8,7 +8,7 @@ const root = "a".repeat(40);
 const delivery = "b".repeat(40);
 const finalHead = "c".repeat(40);
 const changeBranch = `change/${changeId}`;
-const implementationBranch = `implementation/${changeId}`;
+const implementationBranch = `implementation/${changeId}/phase-1/run-1`;
 const repository = {
   host: "github.com",
   nameWithOwner: "example/project",

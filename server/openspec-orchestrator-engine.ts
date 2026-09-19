@@ -68,7 +68,7 @@ function cloneCheckpoint(checkpoint: WorkflowCheckpoint | null): WorkflowCheckpo
 
 function checkpointFor(stepId: WorkflowStepId, state: WorkflowState): WorkflowCheckpoint {
   return workflowCheckpointSchema.parse({
-    version: 4,
+    version: 5,
     nextStepId: stepId,
     state,
   });

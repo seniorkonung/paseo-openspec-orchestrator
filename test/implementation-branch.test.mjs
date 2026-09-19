@@ -11,7 +11,7 @@ import { createImplementationRunVerifier } from "../server/implementation-run-ve
 const execFileAsync = promisify(execFile);
 const changeId = "implementation-cycle";
 const changeBranch = `change/${changeId}`;
-const implementationBranch = `implementation/${changeId}`;
+const implementationBranch = `implementation/${changeId}/phase-1/run-1`;
 
 async function fixture(context) {
   const root = await mkdtemp(join(tmpdir(), "implementation-branch-"));
@@ -51,7 +51,7 @@ async function fixture(context) {
   return { workspace, baseline, command, setHistorical: (value) => { historical = value; } };
 }
 
-test("создаёт implementation/<id> строго от неизменного root baseline", async (context) => {
+test("создаёт implementation/<id>/phase-N/run-M строго от root baseline", async (context) => {
   const value = await fixture(context);
   const service = createImplementationBranchService({ command: value.command });
   const session = await service.prepare(value.workspace, changeId, changeBranch);

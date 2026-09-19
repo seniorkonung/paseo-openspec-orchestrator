@@ -3,7 +3,6 @@ import {
   assertPlanningBranchFor,
   changeBranchFor,
   changeBranchSchema,
-  planningBranchFor,
   planningBranchSchema,
 } from "./change-branch.ts";
 import { commitHashSchema } from "./change-artifact-model.ts";
@@ -332,7 +331,9 @@ function assertTargetBranches(
       "Сохранённая корневая ветка не соответствует OpenSpec change",
     );
   }
-  if (target.reviewBranch !== planningBranchFor(changeId)) {
+  try {
+    assertPlanningBranchFor(target.reviewBranch, changeId);
+  } catch {
     throw new ChangeReviewPublicationError(
       "Сохранённая planning-ветка не соответствует OpenSpec change",
     );

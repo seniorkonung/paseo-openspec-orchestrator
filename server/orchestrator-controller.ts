@@ -20,6 +20,9 @@ import { createImplementationBranchService } from "./implementation-branch.ts";
 import { createImplementationReviewService } from "./implementation-review.ts";
 import { createImplementationPullRequestService } from "./implementation-pull-request.ts";
 import { createPrFeedbackReviewService } from "./pr-feedback-review.ts";
+import { createPhaseWorkService } from "./phase-work.ts";
+import { createPhaseTaskPlanningService } from "./phase-task-planning.ts";
+import { createRootPullRequestService } from "./root-pull-request.ts";
 import type { OrchestratorEngine } from "./orchestrator-engine.ts";
 import { OrchestratorLedger, type WaitResult } from "./orchestrator-ledger.ts";
 import {
@@ -153,6 +156,7 @@ export class OrchestratorController {
     // Источник: https://paseo.sh/docs/sdk/workspaces#start-an-agent-in-a-workspace
     const createAgent = (options: Parameters<typeof workspace.agents.create>[0]) =>
       workspace.agents.create(options);
+    const phaseWork = createPhaseWorkService();
     const workflow = createOpenSpecWorkflow({
       workspaceDirectory,
       readAgentProfiles,
@@ -176,6 +180,9 @@ export class OrchestratorController {
         createAgent,
       }),
       changeTaskExecution: createChangeTaskExecutionService({ createAgent }),
+      phaseWork,
+      phaseTaskPlanning: createPhaseTaskPlanningService({ createAgent, phaseWork }),
+      rootPullRequest: createRootPullRequestService(),
     });
     this.#engine.initialize(workspaceId, {
       workspaceDisplay,

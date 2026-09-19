@@ -12,17 +12,37 @@ import { OpenSpecOrchestratorEngine } from "../server/openspec-orchestrator-engi
 import { OrchestratorLedger } from "../server/orchestrator-ledger.ts";
 import { createOpenSpecWorkflow } from "../server/workflow/steps/index.ts";
 import { workflowCheckpointSchema } from "../server/workflow/types.ts";
+import { phaseTaskFingerprint } from "../server/phase-work.ts";
 
 const execFileAsync = promisify(execFile);
 const changeId = "selected-change";
 const changeBranch = `change/${changeId}`;
-const planningBranch = `planning/${changeId}`;
-const implementationBranch = `implementation/${changeId}`;
+const planningBranch = `planning/${changeId}/initial`;
+const implementationBranch = `implementation/${changeId}/phase-1/run-1`;
 const hashes = Object.fromEntries("abcdefgh".split("").map((key) => [key, key.repeat(40)]));
 const repository = {
   host: "github.com",
   nameWithOwner: "example/project",
   url: "https://github.com/example/project",
+};
+const rootPullRequestIdentity = {
+  number: 41,
+  url: "https://github.com/example/project/pull/41",
+  repositoryHost: repository.host,
+  repositoryNameWithOwner: repository.nameWithOwner,
+  repositoryUrl: repository.url,
+  changeBranch,
+};
+const phaseProgress = {
+  phases: [{ number: 1, fingerprint: "1".repeat(64) }],
+  tasks: [{
+    id: "task-a",
+    number: "1.1",
+    description: "1.1 Реализовать поведение",
+    done: false,
+    fingerprint: phaseTaskFingerprint("task-a", "1.1", "1.1 Реализовать поведение"),
+  }],
+  nextImplementationRun: 1,
 };
 
 async function temporaryHome(context, prefix = "openspec-workflow-") {
@@ -52,6 +72,7 @@ function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree
   let planningInspections = 0;
   let taskPlans = 0;
   let feedbackInspections = 0;
+  let phaseInspections = 0;
   const feedbackItem = {
     source: "comment",
     nodeId: "IC_kwDOExample",
@@ -343,6 +364,43 @@ function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree
         return result;
       },
     },
+    phaseWork: {
+      async inspect() {
+        phaseInspections += 1;
+        const progress = phaseInspections === 1
+          ? phaseProgress
+          : {
+              ...phaseProgress,
+              tasks: [{ ...phaseProgress.tasks[0], done: true }],
+              nextImplementationRun: 2,
+            };
+        return phaseInspections === 1
+          ? {
+              kind: "implementation-required",
+              phaseNumber: 1,
+              runNumber: 1,
+              progress,
+              snapshot: {},
+            }
+          : { kind: "change-complete", progress, snapshot: {} };
+      },
+    },
+    phaseTaskPlanning: {
+      async prepare() { throw new Error("phase planning не требуется"); },
+      async run() { throw new Error("phase planning не требуется"); },
+    },
+    rootPullRequest: {
+      async synchronize() { return hashes.g; },
+      async inspect() {
+        return phaseInspections === 0
+          ? { kind: "open", isDraft: true, head: hashes.d, identity: rootPullRequestIdentity }
+          : phaseInspections === 1
+            ? { kind: "open", isDraft: true, head: hashes.d, identity: rootPullRequestIdentity }
+            : { kind: "merged", head: hashes.g, identity: rootPullRequestIdentity };
+      },
+      async makeDraft(_workspace, inspection) { return inspection; },
+      async makeReady(_workspace, inspection) { return { ...inspection, isDraft: false }; },
+    },
   });
   return { workflow, calls };
 }
@@ -402,7 +460,7 @@ test("PR feedback проходит отдельный audit и возвраща�
   );
 });
 
-test("открытый planning PR сохраняет checkpoint v4 и Retry продолжает цикл", async (context) => {
+test("открытый planning PR сохраняет checkpoint v5 и Retry продолжает цикл", async (context) => {
   const harness = workflowHarness({ mergeOpenOnce: true });
   const { engine, ledger } = await engineHarness(context, harness.workflow);
   engine.command("workspace", "start");
@@ -410,7 +468,7 @@ test("открытый planning PR сохраняет checkpoint v4 и Retry п�
   let snapshot = ledger.get("workspace");
   assert.equal(snapshot.lifecycle.status, "failed");
   const checkpoint = ledger.getWorkflowCheckpoint("workspace");
-  assert.equal(checkpoint.version, 4);
+  assert.equal(checkpoint.version, 5);
   assert.equal(checkpoint.nextStepId, "await-planning-merge");
   engine.command("workspace", "retry");
   await settleWorkflow();
@@ -434,9 +492,9 @@ test("грязное дерево блокирует эффекты до Retry",
   assert.equal(ledger.get("workspace").lifecycle.status, "completed");
 });
 
-test("checkpoint v3 несовместим с v4", () => {
+test("checkpoint v4 несовместим с v5", () => {
   assert.throws(() => workflowCheckpointSchema.parse({
-    version: 3,
+    version: 4,
     nextStepId: "execute-change-tasks",
     state: {
       changeBranch,

@@ -7,7 +7,7 @@ import { OpenSpecOrchestratorEngine } from "../server/openspec-orchestrator-engi
 import { OrchestratorLedger } from "../server/orchestrator-ledger.ts";
 
 const changeBranch = "change/engine-check";
-const planningBranch = "planning/engine-check";
+const planningBranch = "planning/engine-check/initial";
 
 async function temporaryHome(context) {
   const directory = await mkdtemp(join(tmpdir(), "openspec-engine-"));

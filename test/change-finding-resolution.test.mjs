@@ -20,7 +20,7 @@ import { publishReviewFindingOutcome } from "../server/review-finding-publicatio
 const execFileAsync = promisify(execFile);
 const changeId = "resolve-review-findings";
 const parentBranch = `change/${changeId}`;
-const branch = `planning/${changeId}`;
+const branch = `planning/${changeId}/initial`;
 const publishInput = {
   mode: "publish",
   problem: "Артефакты не фиксировали обязательное поведение.",

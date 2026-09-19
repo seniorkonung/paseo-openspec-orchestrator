@@ -1,8 +1,8 @@
 import { z } from "zod";
 import {
+  assertPlanningBranchFor,
   changeBranchFor,
   changeBranchSchema,
-  planningBranchFor,
   planningBranchSchema,
   type ChangeBranch,
 } from "./change-branch.ts";
@@ -54,7 +54,9 @@ export const pendingPlanningMergeSessionSchema = z
         message: "Корневая ветка не соответствует change",
       });
     }
-    if (session.planningBranch !== planningBranchFor(session.changeId)) {
+    try {
+      assertPlanningBranchFor(session.planningBranch, session.changeId);
+    } catch {
       context.addIssue({
         code: "custom",
         path: ["planningBranch"],
@@ -293,10 +295,13 @@ function assertBranchPair(
   changeBranch: string,
   planningBranch: string,
 ): void {
-  if (
-    changeBranch !== changeBranchFor(changeId) ||
-    planningBranch !== planningBranchFor(changeId)
-  ) {
+  let planningMatches = true;
+  try {
+    assertPlanningBranchFor(planningBranch, changeId);
+  } catch {
+    planningMatches = false;
+  }
+  if (changeBranch !== changeBranchFor(changeId) || !planningMatches) {
     throw new PlanningMergeError(
       "Git-ветки merge-gate не соответствуют OpenSpec change",
     );

@@ -29,7 +29,7 @@ Workflow — граф независимых шагов. `OpenSpecOrchestratorEn
 `checkpointState(nextState)`, а при повторе сверяет уже созданные файлы,
 коммиты, refs, push и PR.
 
-## Durable state версии 4
+## Durable state версии 5
 
 Состояние хранит две разные ветки:
 
@@ -38,7 +38,11 @@ interface WorkflowState {
   changeBranch: string | null; // неизменяемая change/<id>
   activeBranch: string | null; // change/planning/implementation текущего шага
   change: OrchestratorChange | null;
+  planningRun: PlanningRun | null;
   implementationRun: ImplementationRun | null;
+  phaseProgress: PhaseProgress | null;
+  rootPullRequest: RootPullRequestIdentity | null;
+  phaseTarget: PlanningTarget | ImplementationTarget | null;
   // не более одной pending-сессии внешнего эффекта
 }
 ```
@@ -46,14 +50,20 @@ interface WorkflowState {
 `changeBranch` и `activeBranch` устанавливаются вместе. Если `change` известен,
 корневая ветка обязана быть точной `change/<change.id>`. Pending-сессии
 инициализации, planning- и implementation-веток, артефакта, review, findings,
-обоих merge-gate, задачи и PR feedback взаимоисключающие.
+обоих merge-gate, phase planning, задачи и PR feedback взаимоисключающие.
+
+`PhaseProgress` хранит fingerprints известных фаз и ordered task-префикса, а
+также следующий монотонный номер implementation run. Ранее известные фазы,
+task ID, номера и описания неизменяемы; завершённую задачу нельзя открыть снова.
+`PlanningRun` и `ImplementationRun` взаимоисключающие и всегда относятся к
+одной целевой фазе.
 
 `ImplementationRun` сохраняет immutable root baseline и repository identity,
 publication union `unpublished | draft-pr | ready-pr`, batch union
 `empty | collecting | reviewed`, последний проверенный delivery head и
 ограниченный набор обработанных feedback fingerprints.
 
-Checkpoint имеет версию 4. Предыдущие версии не мигрируются: такой ledger
+Checkpoint имеет версию 5. Версии 1–4 не мигрируются: такой ledger
 открывается в read-only degraded-состоянии, исходный файл сохраняется;
 пользователь может только явно очистить состояние и начать заново из
 `change/<id>`.
@@ -65,22 +75,31 @@ main
   ^  root PR (новый всегда Draft)
 change/<id>
   ^  Ready planning PR, ручной merge
-planning/<id>
+planning/<id>/initial
   |  planning artifacts, review.md, finding fixes
 
-После merge planning PR:
+Пофазный цикл:
+
+planning/<id>/phase-N
+  |  при необходимости Ready planning PR одной фазы
+  v
+change/<id>              activeBranch после guarded fetch + ff-only
+  ^
+  |  один implementation PR фазы: Draft во время циклов, затем Ready
+implementation/<id>/phase-N/run-M
+
+change/<id> -- root PR --> main
+
+После выполнения всех фаз:
 
 main
-  ^  root PR
-change/<id>              activeBranch после fetch + ff-only
-  ^
-  |  один implementation PR: Draft во время циклов, затем Ready
-implementation/<id>      все task/review/remediation commits
+  ^  точный root PR: Ready, ручной merge, Retry
+change/<id>
 ```
 
-Task-ветки и task PR не создаются. После merge implementation PR корневая ветка
-обновляется fast-forward; планирование следующей порции задач в этот workflow не
-входит.
+Task-ветки и task PR не создаются. После каждого planning/implementation merge
+корневая ветка обновляется fast-forward и снова проходит единый инспектор фаз.
+Только merge корневого PR после полного change завершает workflow.
 
 ## Последовательность шагов
 
@@ -99,9 +118,22 @@ check-agent-profiles
   -> review-change
   -> resolve-review-findings -------+
   -> await-planning-merge
-  -> prepare-implementation-branch
+  -> inspect-phase-work -------------------------------+
+       | planning-required                             |
+       v                                               |
+     prepare-phase-planning-branch                     |
+       -> plan-phase-tasks (openspec-update-change)    |
+       -> publish-change                               |
+       -> review-change (задачи Phase N)               |
+       -> resolve-review-findings                      |
+       -> resolve-implementation-review-findings       |
+       -> validate-phase-planning                      |
+       -> await-planning-merge ------------------------+
+       | implementation-required
+       v
+  -> prepare-implementation-branch (phase-N/run-M)
   -> execute-change-tasks ----------+
-       | all_done + collecting batch
+       | phase complete + collecting batch
        v
   -> review-implementation
   -> resolve-review-findings
@@ -115,7 +147,13 @@ check-agent-profiles
   -> await-implementation-merge
        | feedback -> Draft -> review-pr-feedback -> цикл
        | open clean -> halt / Retry
-       + merged -> ff-only root -> complete
+       + merged -> ff-only root -> inspect-phase-work
+
+inspect-phase-work
+  | work remains -> root Draft -> planning/implementation
+  | complete + root OPEN -> root Ready -> halt / Retry
+  | complete + root MERGED exact head -> complete
+  + root CLOSED или MERGED с работой -> fail closed
 ```
 
 Циклы создают один артефакт, устраняют одну finding или выполняют одну задачу за
@@ -163,7 +201,7 @@ commit, remote head и PR, а не дублирует их.
 
 `prepare-planning-branch` сохраняет root baseline, проверяет одинаковые local и
 origin root HEAD и отсутствие local/remote/historical занятости
-`planning/<id>`. Ветка создаётся через `git switch -c planning/<id> <baseline>`.
+`planning/<id>/initial`. Ветка создаётся через `git switch -c ... <baseline>`.
 Recovery разрешает только сохранённую root или уже активную planning-ветку.
 
 `inspect-change` читает schema-defined граф OpenSpec. Первый `ready` артефакт
@@ -173,7 +211,7 @@ subject. Цикл заканчивается только после успеш�
 
 ## Публикация root PR
 
-`publish-change` работает при активной `planning/<id>`. Medium Sandbox агент
+`publish-change` работает при активной planning-ветке. Medium Sandbox агент
 читает завершённые артефакты, публикует planning-ветку и полностью заменяет
 русские title/body уже существующего root PR `change/<id> -> main`. Он не
 создаёт новый root PR и не публикует root-ветку.
@@ -195,16 +233,16 @@ subject. Цикл заканчивается только после успеш�
 
 Ultra Sandbox агент запускает `openspec-review-change`, записывает `review.md`
 и дополнительные новые review-файлы внутри change root, создаёт ровно один
-review-коммит и публикует его в `planning/<id>`. Затем он создаёт единственный
-Ready non-fork PR `planning/<id> -> change/<id>` с точными title/body.
+review-коммит и публикует его в текущую planning-ветку. Затем он создаёт
+единственный Ready non-fork PR в `change/<id>` с точными title/body.
 
 Completion проверяет неизменность root local/remote HEAD и root PR, ancestry
 planning baseline, ровно один review-коммит, отсутствие изменений существующих
 planning-артефактов, точный remote HEAD и Ready planning PR.
 
-До planning merge на `planning/<id>` устраняются только findings из `review.md`.
-После implementation review оба finding-контура работают на
-`implementation/<id>` и одном Draft implementation PR: сначала `review.md`,
+До initial planning merge устраняются findings из `review.md`.
+После implementation review оба finding-контура работают на текущем
+`implementation/<id>/phase-N/run-M` и одном Draft implementation PR: сначала `review.md`,
 затем `implementation-review.md`. Каждая итерация выбирает первый активный
 `F<n>`, требует отдельное разрешение на исправление/принятие риска и отдельное
 разрешение на commit+push. MCP повторно валидирует отчёт, commit, remote head и
@@ -214,7 +252,8 @@ publication contract соответствующей ветки, после че�
 ## Merge-gate planning PR
 
 После последней finding `await-planning-merge` читает ровно один PR с head
-`planning/<id>` и проверяет repository, Ready, non-fork и base `change/<id>`:
+текущей planning-веткой и проверяет repository, Ready, non-fork и base
+`change/<id>`:
 
 - `OPEN` — recoverable `halt` с URL и просьбой выполнить merge и нажать
   «Повторить»;
@@ -228,17 +267,57 @@ refs/heads/change/<id>`, переключается на сохранённую 
 и уже переключённую root-ветку. После сверки root с origin OpenSpec change
 проверяется ещё раз, `activeBranch` становится `change/<id>`.
 
+## Инспектор фаз и task planning
+
+После initial planning merge, каждого implementation merge и каждого Retry
+`inspect-phase-work` сначала выполняет guarded fetch и fast-forward root. Dirty
+worktree, divergence или несовпадающий root PR head останавливают workflow.
+
+Инспектор безопасно читает обязательный `<changeRoot>/plan.md`: файл должен
+быть обычным, не symlink, не больше 256 KiB, иметь корректный UTF-8 и находиться
+внутри change root и Git root. Fenced code blocks игнорируются. Остальные
+заголовки обязаны быть последовательными `## Phase N: ...` без дублей и
+пропусков, а каждая фаза — содержать заполненные `Objective`, `Outcome`,
+`Boundaries` и `Ready to advance`.
+
+Task-артефакты определяются по `applyRequires` и concrete paths из OpenSpec
+status JSON. Номер задачи берётся из начала description; первый сегмент `N.*`
+строго связывает задачу с `Phase N`. Дубли ID/номеров, неизвестные фазы,
+противоречивый progress, `blocked` и задачи после первой нераспланированной фазы
+fail closed. Решение типизировано:
+
+- `implementation-required` — минимальная фаза с незавершённой задачей;
+- `planning-required` — первая фаза без задач;
+- `change-complete` — каждая фаза имеет задачи и все они завершены.
+
+Для `planning-required` root PR гарантированно переводится в Draft и создаётся
+`planning/<id>/phase-N`. Ultra Sandbox агент получает прямую инструкцию вызвать
+`openspec-update-change` исключительно для Phase N без проверки command catalog
+и проходит интерактивные подтверждения skill. Completion принимает ровно один
+Conventional Commit, только task-файлы, точный старый task-префикс и хотя бы одну
+новую незавершённую задачу `N.*`; `plan.md` и код неизменяемы. Recovery
+распознаёт готовый commit и не вызывает skill повторно.
+
+Затем planning-ветка публикуется, а `openspec-review-change` проверяет именно
+полноту и непротиворечивость задач Phase N. После записи `review.md` всегда
+последовательно проходят `resolve-review-findings` и
+`resolve-implementation-review-findings`; отсутствие отчёта или findings —
+успешный no-op. `validate-phase-planning` повторно сверяет fingerprints и
+ограничение Phase N, а также допускает изменения только task-файлов,
+`review.md` и `implementation-review.md` перед ручным merge planning PR.
+
 ## Implementation-ветка, задачи и batch review
 
 `prepare-implementation-branch` сохраняет root baseline и repository identity,
 проверяет чистое дерево, одинаковые local/origin root refs и отсутствие local,
-remote и historical PR collision для `implementation/<id>`. После durable
+remote и historical PR collision для `implementation/<id>/phase-N/run-M`.
+Номер `M` резервируется в checkpoint и монотонно увеличивается. После durable
 checkpoint ветка создаётся строго от baseline. Recovery допускает только root
 или уже активную implementation-ветку и повторно сверяет все инварианты.
 
 `execute-change-tasks` читает `instructions apply --change <id> --json` и
-выбирает первую незавершённую задачу. Все задачи от начала до конца выполняются
-в `implementation/<id>`.
+выбирает первую незавершённую задачу целевой Phase N. Run заканчивает task-пакет
+на границе фазы, даже если будущие фазы уже распланированы.
 
 Одна итерация сохраняет полный task checkpoint, запускает High агента, выполняет
 только выбранную задачу и создаёт один Conventional Commit. Агент не создаёт
@@ -253,7 +332,7 @@ commit}` в collecting batch и повторяет шаг.
 сопоставляет каждый task-коммит с review unit и изменяет только
 `implementation-review.md`. Completion требует полное покрытие, точный ordered
 список коммитов, один report commit и push. Первый review создаёт Draft PR
-`implementation/<id> -> change/<id>`, повторные reviews используют тот же PR.
+текущего `phase-N/run-M -> change/<id>`, повторные reviews используют тот же PR.
 Управляемый блок сводки обновляется без потери пользовательского текста и секции
 результатов findings; повреждённые markers останавливают публикацию.
 
@@ -283,7 +362,18 @@ feedback возвращает PR в Draft через `gh pr ready --undo`, от�
 снова приводит к `halt`, а CLOSED без merge — к ошибке. После MERGED сохраняется
 pending merge session, повторно проверяются тот же PR и final implementation
 head, затем root обновляется только через fetch, switch и `git merge --ff-only
-FETCH_HEAD`.
+FETCH_HEAD`. Текущий run очищается, после чего workflow возвращается в
+`inspect-phase-work`, а не завершается.
+
+При `change-complete` точный non-fork root PR `change/<id> -> main`
+автоматически переводится в Ready. Инспектор повторяет phase/task и PR-head
+проверки после Ready, чтобы закрыть гонку, и останавливается с Retry. Каждый
+Retry снова синхронизирует root и перечитывает plan/tasks: новая задача ведёт в
+новый implementation run, новая фаза без задач — в task planning, а root PR
+возвращается в Draft. `OPEN` без работы продолжает ждать, `CLOSED` без merge —
+ошибка, `MERGED` с точным final head и без работы — единственное успешное
+завершение. Merge root PR при оставшейся работе является невосстановимой
+несогласованностью.
 
 ## Профили, MCP и уведомления
 
@@ -295,6 +385,7 @@ FETCH_HEAD`.
 
 - `complete_artifact`;
 - `complete_change_publication`;
+- `complete_phase_task_planning`;
 - `complete_change_review`;
 - `complete_review_finding`;
 - `complete_implementation_review_finding`;

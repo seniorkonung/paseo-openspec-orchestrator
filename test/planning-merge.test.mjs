@@ -13,7 +13,7 @@ import {
 const execFileAsync = promisify(execFile);
 const changeId = "merge-planning";
 const changeBranch = `change/${changeId}`;
-const planningBranch = `planning/${changeId}`;
+const planningBranch = `planning/${changeId}/initial`;
 const repositoryUrl = "https://github.com/example/project";
 
 async function git(cwd, args) {
@@ -166,7 +166,7 @@ test("merge-gate отклоняет CLOSED, неверные refs и dirty workt
   });
   await context.test("wrong head", async (child) => {
     const fixture = await repository(child);
-    fixture.pullRequest.headRefName = "planning/other-change";
+    fixture.pullRequest.headRefName = "planning/other-change/initial";
     const service = createPlanningMergeService({ command: commandFor(fixture) });
     await assert.rejects(
       service.inspect(fixture.workspace, changeId, changeBranch, planningBranch),

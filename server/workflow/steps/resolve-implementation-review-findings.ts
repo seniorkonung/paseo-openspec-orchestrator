@@ -34,7 +34,8 @@ async function resolveImplementationReviewFindingsStep(
 ): Promise<WorkflowStepResult> {
   const { activeBranch, change } = context.state;
   const implementationRun = context.state.implementationRun;
-  if (!activeBranch || !change || !implementationRun) {
+  const planningRun = context.state.planningRun;
+  if (!activeBranch || !change || (!implementationRun && !planningRun)) {
     return {
       kind: "halt",
       summary: "Недостаточно данных для устранения implementation findings",
@@ -56,11 +57,13 @@ async function resolveImplementationReviewFindingsStep(
   let session = context.state.pendingImplementationFindingResolutionSession;
   if (!session) {
     try {
-      await dependencies.implementationRunVerification.assertCurrent(
-        dependencies.workspaceDirectory,
-        implementationRun,
-        context.signal,
-      );
+      if (implementationRun) {
+        await dependencies.implementationRunVerification.assertCurrent(
+          dependencies.workspaceDirectory,
+          implementationRun,
+          context.signal,
+        );
+      }
       const plan = await dependencies.findingResolution.plan(
         dependencies.workspaceDirectory,
         change.id,
@@ -70,14 +73,11 @@ async function resolveImplementationReviewFindingsStep(
       if (plan.kind === "no-findings") {
         return {
           kind: "continue",
-          next: "execute-change-tasks",
-          state: {
-            implementationRun: clearImplementationBatch(
-              implementationRun,
-              plan.headCommit,
-            ),
+          next: implementationRun ? "execute-change-tasks" : "validate-phase-planning",
+          state: implementationRun ? {
+            implementationRun: clearImplementationBatch(implementationRun, plan.headCommit),
             pendingImplementationFindingResolutionSession: null,
-          },
+          } : { pendingImplementationFindingResolutionSession: null },
           summary: `В implementation review нет нерешённых findings: ${plan.reviewPath}`,
         };
       }
@@ -140,11 +140,13 @@ async function resolveImplementationReviewFindingsStep(
         ]);
       },
       onFindingResolved: async () => {
-        await dependencies.implementationRunVerification.assertCurrent(
-          dependencies.workspaceDirectory,
-          implementationRun,
-          context.signal,
-        );
+        if (implementationRun) {
+          await dependencies.implementationRunVerification.assertCurrent(
+            dependencies.workspaceDirectory,
+            implementationRun,
+            context.signal,
+          );
+        }
         await context.checkpointState({
           ...context.state,
           pendingImplementationFindingResolutionSession: null,
@@ -155,14 +157,11 @@ async function resolveImplementationReviewFindingsStep(
     if (completed.remainingFindingIds.length === 0) {
       return {
         kind: "continue",
-        next: "execute-change-tasks",
-        state: {
-          implementationRun: clearImplementationBatch(
-            implementationRun,
-            completed.commit,
-          ),
+        next: implementationRun ? "execute-change-tasks" : "validate-phase-planning",
+        state: implementationRun ? {
+          implementationRun: clearImplementationBatch(implementationRun, completed.commit),
           pendingImplementationFindingResolutionSession: null,
-        },
+        } : { pendingImplementationFindingResolutionSession: null },
         summary: `Обработана последняя implementation finding ${completed.findingId}; обновлён PR #${completed.pullRequest.number}`,
       };
     }
