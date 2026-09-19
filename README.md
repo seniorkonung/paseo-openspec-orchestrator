@@ -108,6 +108,10 @@ The main boundaries are:
   receives a smaller consumer-owned dependency contract.
 - `server/openspec-orchestrator-engine.ts` handles lifecycle commands, explicit
   transitions, retry, pause, checkpoint recovery, and completion reporting.
+- `server/agent-prompt.ts` composes every agent prompt from one role sentence,
+  the stage parameters as explicitly untrusted JSON, the shared safety and scope
+  rules, the stage contract, and one completion contract. A stage prompt states
+  only what the invoked skill cannot know.
 - `server/workflow/types.ts` defines durable state. Checkpoint version 5 stores
   phase/task fingerprints, planning and implementation runs, the monotonic run
   counter, root PR identity, and at most one pending external-effect session.

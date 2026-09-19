@@ -443,7 +443,7 @@ test("Ultra Sandbox создаёт один артефакт и завершае
   assert.match(prompts[0], /openspec-continue-change.*exactly once/);
   assert.match(prompts[0], /expected artifact is `risk-map`/);
   assert.match(prompts[0], /explicitly approve/);
-  assert.match(prompts[0], /Do not archive agents or workspaces/);
+  assert.match(prompts[0], /never spawn or archive agents/);
   assert.match(prompts[0], /complete_artifact/);
   assert.equal(toolResults[0].isError, true);
   assert.match(firstText(toolResults[0]), /ещё не создан/);
@@ -568,7 +568,7 @@ test("после рестарта с готовым коммитом агент 
     async onArtifactCompleted() {},
   });
 
-  assert.match(prompt, /recovering an interrupted workflow/);
+  assert.match(prompt, /This is a recovery session/);
   assert.match(prompt, /Do not invoke the continue skill again/);
 });
 

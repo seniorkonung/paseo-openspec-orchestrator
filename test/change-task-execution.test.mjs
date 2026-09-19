@@ -213,7 +213,7 @@ test("High-агент создаёт один task-коммит без task PR",
   assert.match(completed.commit, /^[0-9a-f]{40}$/u);
   assert.equal(completedCheckpoints.length, 1);
   assert.match(prompt, /complete_change_task.*empty object/su);
-  assert.match(prompt, /Do not invoke `gh`/u);
+  assert.match(prompt, /Never invoke `gh`/u);
   assert.doesNotMatch(prompt, /change-summary/u);
   assert.doesNotMatch(prompt, /gh pr create/iu);
 });
@@ -283,6 +283,6 @@ test("recovery prompt не повторяет apply и запрещает GitHub
     alreadyCommitted: true,
   });
   assert.doesNotMatch(prompt, /\$openspec-apply-change/u);
-  assert.match(prompt, /Do not invoke `gh`/u);
+  assert.match(prompt, /Never invoke `gh`/u);
   assert.match(prompt, new RegExp(implementationBranch, "u"));
 });

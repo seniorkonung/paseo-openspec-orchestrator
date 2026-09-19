@@ -515,7 +515,7 @@ test("рестарт принимает planning baseline и готовый revi
         controller.signal,
       );
       if (effect === "review-commit") {
-        assert.match(agentOptions.prompt, /recovering an interrupted workflow/);
+        assert.match(agentOptions.prompt, /This is a recovery session/);
       } else {
         assert.match(agentOptions.prompt, /openspec-review-change/);
       }
@@ -568,7 +568,7 @@ test("рестарт согласует опубликованный commit и �
     signal: new AbortController().signal,
     onAgentCreated() {},
   });
-  assert.match(prompt, /recovering an interrupted workflow/);
+  assert.match(prompt, /This is a recovery session/);
   assert.match(prompt, /Do not invoke the review skill again/);
   assert.equal((await toolFlow).isError, undefined);
 });

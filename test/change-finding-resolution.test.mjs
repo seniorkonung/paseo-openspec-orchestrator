@@ -411,7 +411,7 @@ test("accepted risk удаляет finding из активного списка"
     onAgentCreated() {},
     async onFindingResolved() {},
   });
-  assert.match(createdOptions.prompt, /risk acceptance/);
+  assert.match(createdOptions.prompt, /accepting residual risk/);
   assert.equal((await runTool).isError, undefined);
   assert.deepEqual(result.remainingFindingIds, []);
   assert.equal(result.outcome, "accepted-risk");
@@ -525,7 +525,7 @@ test("ошибка checkpoint восстанавливает ntfy и повто�
     },
   });
   await created;
-  assert.match(options.prompt, /recovering an interrupted workflow/);
+  assert.match(options.prompt, /This is a recovery session/);
   assert.match(options.prompt, /do not request the two approvals again/);
   const [{ url }] = Object.values(options.config.mcpServers);
   const client = await connectClient(url);

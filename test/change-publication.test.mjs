@@ -275,8 +275,8 @@ test("Medium Sandbox актуализирует корневой Draft PR чер
   assert.equal("cwd" in created[0], false);
   assert.match(created[0].prompt, /openspec status --change selected-change --json/);
   assert.match(created[0].prompt, /git push --set-upstream origin planning\/selected-change/);
-  assert.match(created[0].prompt, /Update exactly root pull request #42/);
-  assert.match(created[0].prompt, /Do not archive agents or workspaces/);
+  assert.match(created[0].prompt, /replace the title and body of root pull request #42/);
+  assert.match(created[0].prompt, /never spawn or archive agents/);
   assert.deepEqual(links, ["agent-publication"]);
   assert.deepEqual(labels, [["agent-publication", false]]);
   assert.equal(toolResults[0].isError, undefined);

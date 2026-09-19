@@ -1,6 +1,14 @@
 import type { lstat, realpath } from "node:fs/promises";
 import { z } from "zod";
 import {
+  FIXED_BRANCH_RULE,
+  NO_GITHUB_RULE,
+  OPENSPEC_CLI_RULE,
+  STAGE_SCOPE_RULE,
+  UNTRUSTED_INPUT_RULE,
+  buildAgentPrompt,
+} from "./agent-prompt.ts";
+import {
   type CompletedFindingPullRequest,
   type ReviewFindingOutcome,
   type ReviewFindingPublicationKind,
@@ -97,6 +105,73 @@ export interface ReviewFindingPromptInput {
   readonly reviewRepositoryPath: string;
   readonly alreadyCommitted: boolean;
   readonly publicationAlreadyCompleted: boolean;
+}
+
+/** Чем устранение finding одного вида ревью отличается от другого. */
+export interface ReviewFindingPromptVariant {
+  /** Ревью, из которого взят finding, в родительном падеже английской фразы. */
+  readonly reviewName: string;
+  /** Skill, который владеет самим устранением и повторным аудитом. */
+  readonly skill: string;
+  /** MCP-инструмент завершения стадии. */
+  readonly toolName: string;
+  readonly commitSubject: (findingId: ReviewFindingId) => string;
+}
+
+/**
+ * Один промпт для обоих видов устранения finding.
+ *
+ * Скилл владеет самим исправлением, повторным аудитом и валидацией отчёта.
+ * Промпт добавляет только то, чего скилл не знает: выбранный finding, два
+ * явных разрешения пользователя, ровно один commit и контракт завершения.
+ */
+export function buildFindingResolutionPrompt(
+  variant: ReviewFindingPromptVariant,
+  input: ReviewFindingPromptInput,
+): string {
+  const subject = variant.commitSubject(input.findingId);
+  const resolved = input.alreadyCommitted || input.publicationAlreadyCompleted;
+  const resolutionInstruction = input.publicationAlreadyCompleted
+    ? `This is a recovery session: finding \`${input.findingId}\` already has a valid committed resolution and a verified entry in the review pull request. Change nothing: do not invoke the skill, request approvals, commit, or push.`
+    : input.alreadyCommitted
+      ? `This is a recovery session: finding \`${input.findingId}\` is already absent from a valid committed resolution, but its review pull-request entry is missing. Do not invoke the skill, do not request the two approvals again, and do not create or amend a commit; publish the existing commit if needed and derive the Russian summaries from the finding and the committed diff.`
+      : `Invoke the \`${variant.skill}\` skill for change \`${input.changeId}\` and ask it to address only finding \`${input.findingId}\`. Do not inspect the agent command catalog first.`;
+  const interactionContract = resolved
+    ? ""
+    : `When nothing is committed yet, follow this contract:
+
+1. Explain the finding in Russian to someone who has never seen it: what is wrong, how it affects the product, and what you recommend. Where the resolution depends on a product, contract, architecture, data, security, privacy, or cost choice, give the real options and trade-offs; for an obvious technical correction, explain why product behavior stays the same.
+2. Get the user's first explicit permission before changing any artifact or accepting residual risk. A recommendation is not permission, and acceptance is never inferred: on acceptance let the skill record it through its own procedure instead of claiming a fix.
+3. Let the skill resolve only this finding and keep later findings intact unless current evidence changes them. The resolution holds only when the agreed outcome is durably owned by the OpenSpec artifacts, any remaining implementation is tracked work, the finding is gone from Findings, and the report still validates.
+4. Show the resulting artifact changes, report state, and validation, then get a separate second explicit permission to commit. If anything changes after that permission, show it and ask again. Then stage only files inside the change root and create exactly one commit with subject \`${subject}\`; never amend or add a second commit.`;
+  const completion = input.publicationAlreadyCompleted
+    ? `Finish by calling the orchestrator MCP tool \`${variant.toolName}\` with \`{"mode":"acknowledge-existing"}\`. If it reports an error, follow its feedback and retry the same tool.`
+    : `Publish the branch with \`git push --set-upstream origin ${input.branch}\`, then call the orchestrator MCP tool \`${variant.toolName}\` with \`{"mode":"publish","problem":"<краткая проблема>","resolution":"<краткий итог>"}\` without asking a third permission. Both summaries are truthful single-line Russian text of at most 500 characters; for an accepted risk describe the acceptance and its rationale in \`resolution\`. If it reports an error, follow its feedback and retry the same tool.`;
+
+  return buildAgentPrompt({
+    role: `You own the resolution of one finding from ${variant.reviewName}.`,
+    communication: "interactive",
+    workflowData: {
+      changeId: input.changeId,
+      findingId: input.findingId,
+      branch: input.branch,
+      remote: "origin",
+      reviewPath: input.reviewRepositoryPath,
+      commitSubject: subject,
+      alreadyCommitted: input.alreadyCommitted,
+      publicationAlreadyCompleted: input.publicationAlreadyCompleted,
+    },
+    rules: [
+      UNTRUSTED_INPUT_RULE,
+      OPENSPEC_CLI_RULE,
+      NO_GITHUB_RULE,
+      FIXED_BRANCH_RULE,
+      STAGE_SCOPE_RULE,
+      "Change only planning artifacts inside the selected change root: never edit implementation code or tests and never invoke Apply.",
+    ],
+    body: [resolutionInstruction, interactionContract],
+    completion,
+  });
 }
 
 export interface ReviewFindingResolutionBehavior<

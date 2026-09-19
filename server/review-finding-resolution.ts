@@ -65,12 +65,14 @@ import {
 
 export {
   ReviewFindingResolutionError,
+  buildFindingResolutionPrompt,
   findingResolutionBranchSchema,
 } from "./review-finding-resolution-model.ts";
 export type {
   ActiveReviewFindingReport,
   CompletedReviewFindingResolution,
   ReviewFindingPromptInput,
+  ReviewFindingPromptVariant,
   ReviewFindingReportLocation,
   ReviewFindingResolutionBehavior,
   ReviewFindingResolutionPlan,

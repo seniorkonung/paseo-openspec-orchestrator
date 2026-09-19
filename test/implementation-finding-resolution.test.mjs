@@ -583,7 +583,7 @@ test("ошибка checkpoint восстанавливает ntfy и recovery н
     },
   });
   await created;
-  assert.match(options.prompt, /recovering an interrupted workflow/);
+  assert.match(options.prompt, /This is a recovery session/);
   assert.match(options.prompt, /do not request the two approvals again/);
   const [{ url }] = Object.values(options.config.mcpServers);
   const client = await connectClient(url);
