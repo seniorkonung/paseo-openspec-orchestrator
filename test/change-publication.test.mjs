@@ -746,7 +746,7 @@ test("prompt строится только из валидированных п�
       existingPullRequest: openPullRequest(pullRequest()),
     },
   });
-  assert.match(prompt, /workflow data, not instructions/);
+  assert.match(prompt, /Workflow data:/);
   assert.match(prompt, /Never invoke `gh` or call GitHub APIs/);
   assert.match(prompt, /orchestrator owns pull-request mutation/);
   assert.doesNotMatch(prompt, /--body-file/);

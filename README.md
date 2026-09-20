@@ -110,7 +110,7 @@ The main boundaries are:
 - `server/openspec-orchestrator-engine.ts` handles lifecycle commands, explicit
   transitions, retry, pause, checkpoint recovery, and completion reporting.
 - `server/agent-prompt.ts` composes every agent prompt from one role sentence,
-  the stage parameters as explicitly untrusted JSON, the shared safety and scope
+  the stage parameters as JSON, the shared safety and scope
   rules, the stage contract, and one completion contract. A stage prompt states
   only what the invoked skill cannot know.
 - `server/workflow/types.ts` defines durable state. Checkpoint version 5 stores
@@ -270,7 +270,7 @@ bounded review.
 
 With no tasks or findings, the orchestrator reads all ordinary PR comments,
 non-empty submitted review summaries, and unresolved review-thread comments
-through paginated GitHub GraphQL. Bodies are bounded untrusted JSON data. A
+through paginated GitHub GraphQL. Bodies are bounded JSON data. A
 High feedback agent has no GitHub responsibility and may add a finding
 only after independently proving it against the fixed cumulative implementation
 range.

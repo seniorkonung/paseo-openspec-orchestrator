@@ -6,7 +6,6 @@ import {
   NO_GITHUB_RULE,
   OPENSPEC_CLI_RULE,
   STAGE_SCOPE_RULE,
-  UNTRUSTED_INPUT_RULE,
   buildAgentPrompt,
   completionInstruction,
 } from "./agent-prompt.ts";
@@ -318,7 +317,6 @@ Stop the apply loop right after task ${session.taskNumber}: implement its full s
       alreadyCommitted: input.alreadyCommitted,
     },
     rules: [
-      UNTRUSTED_INPUT_RULE,
       OPENSPEC_CLI_RULE,
       NO_GITHUB_RULE,
       FIXED_BRANCH_RULE,

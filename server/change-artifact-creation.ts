@@ -34,7 +34,6 @@ import {
 import {
   OPENSPEC_CLI_RULE,
   STAGE_SCOPE_RULE,
-  UNTRUSTED_INPUT_RULE,
   buildAgentPrompt,
   completionInstruction,
 } from "./agent-prompt.ts";
@@ -381,7 +380,7 @@ function artifactCreationPrompt(input: {
       commitSubject,
       alreadyCreated: input.alreadyCreated,
     },
-    rules: [UNTRUSTED_INPUT_RULE, OPENSPEC_CLI_RULE, STAGE_SCOPE_RULE],
+    rules: [OPENSPEC_CLI_RULE, STAGE_SCOPE_RULE],
     body: [
       creationInstruction,
       "Show the artifact to the user and ask whether they explicitly approve finishing this stage. While they ask for changes, revise only this artifact and ask again.",

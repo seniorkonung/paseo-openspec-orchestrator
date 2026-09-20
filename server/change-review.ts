@@ -6,7 +6,6 @@ import {
   GITHUB_CLI_RULE,
   OPENSPEC_CLI_RULE,
   STAGE_SCOPE_RULE,
-  UNTRUSTED_INPUT_RULE,
   buildAgentPrompt,
   completionInstruction,
 } from "./agent-prompt.ts";
@@ -335,7 +334,6 @@ export function changeReviewPrompt(input: {
       alreadyCommitted: input.alreadyCommitted,
     },
     rules: [
-      UNTRUSTED_INPUT_RULE,
       OPENSPEC_CLI_RULE,
       GITHUB_CLI_RULE,
       FIXED_BRANCH_RULE,

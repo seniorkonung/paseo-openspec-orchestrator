@@ -5,7 +5,6 @@ import {
   NO_GITHUB_RULE,
   OPENSPEC_CLI_RULE,
   STAGE_SCOPE_RULE,
-  UNTRUSTED_INPUT_RULE,
   buildAgentPrompt,
 } from "./agent-prompt.ts";
 import {
@@ -161,7 +160,6 @@ export function buildFindingResolutionPrompt(
       publicationAlreadyCompleted: input.publicationAlreadyCompleted,
     },
     rules: [
-      UNTRUSTED_INPUT_RULE,
       OPENSPEC_CLI_RULE,
       NO_GITHUB_RULE,
       FIXED_BRANCH_RULE,

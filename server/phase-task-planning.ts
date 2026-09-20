@@ -6,7 +6,6 @@ import {
   FIXED_BRANCH_RULE,
   OPENSPEC_CLI_RULE,
   STAGE_SCOPE_RULE,
-  UNTRUSTED_INPUT_RULE,
   buildAgentPrompt,
   completionInstruction,
 } from "./agent-prompt.ts";
@@ -313,7 +312,6 @@ export function phaseTaskPlanningPrompt(
       alreadyCommitted,
     },
     rules: [
-      UNTRUSTED_INPUT_RULE,
       OPENSPEC_CLI_RULE,
       FIXED_BRANCH_RULE,
       "This stage never pushes: the orchestrator publishes the branch.",

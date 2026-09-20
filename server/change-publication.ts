@@ -6,7 +6,6 @@ import {
   NO_GITHUB_RULE,
   OPENSPEC_CLI_RULE,
   STAGE_SCOPE_RULE,
-  UNTRUSTED_INPUT_RULE,
   buildAgentPrompt,
   completionInstruction,
 } from "./agent-prompt.ts";
@@ -280,7 +279,6 @@ export function changePublicationPrompt(input: {
       existingOpenPullRequest: pullRequestNumber,
     },
     rules: [
-      UNTRUSTED_INPUT_RULE,
       OPENSPEC_CLI_RULE,
       NO_GITHUB_RULE,
       FIXED_BRANCH_RULE,
