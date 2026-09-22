@@ -308,9 +308,9 @@ test("High ждёт scoped MCP и завершает finding только пос
   assert.deepEqual(createdOptions.labels, { ntfy: "true" });
   assert.equal("cwd" in createdOptions, false);
   assert.match(createdOptions.prompt, /openspec-review-change/);
-  assert.match(createdOptions.prompt, /first explicit permission/);
-  assert.match(createdOptions.prompt, /separate second explicit permission/);
-  assert.match(createdOptions.prompt, /without asking a third permission/);
+  assert.match(createdOptions.prompt, /one explicit decision/);
+  assert.match(createdOptions.prompt, /without asking for another approval/);
+  assert.match(createdOptions.prompt, /never reopen a completed task/);
   assert.equal(
     calls.some(({ executable, arguments: arguments_ }) =>
       executable === "paseo" || arguments_.includes("commands")),
@@ -527,7 +527,7 @@ test("ошибка checkpoint восстанавливает ntfy и повто�
   });
   await created;
   assert.match(options.prompt, /This is a recovery session/);
-  assert.match(options.prompt, /do not request the two approvals again/);
+  assert.match(options.prompt, /do not request the user's decision again/);
   const [{ url }] = Object.values(options.config.mcpServers);
   const client = await connectClient(url);
   const first = await client.callTool({
@@ -623,7 +623,7 @@ test("полный restart подтверждает уже проверенну�
   );
 });
 
-test("prompt содержит точный ID, два разрешения и commit+push", () => {
+test("prompt требует одно решение, сохраняет задачи и завершает commit+push без новой паузы", () => {
   const prompt = changeFindingResolutionPrompt({
     changeId,
     findingId: "F42",
@@ -633,8 +633,11 @@ test("prompt содержит точный ID, два разрешения и co
     publicationAlreadyCompleted: false,
   });
   assert.match(prompt, /F42/);
-  assert.match(prompt, /first explicit permission/);
-  assert.match(prompt, /separate second explicit permission/);
+  assert.match(prompt, /one explicit decision/);
+  assert.match(prompt, /without asking for another approval/);
+  assert.match(prompt, /never reopen a completed task/);
+  assert.match(prompt, /append new unfinished tasks/);
+  assert.doesNotMatch(prompt, /second explicit permission|third permission/);
   assert.match(prompt, /git push --set-upstream origin planning\/resolve-review-findings/);
   assert.match(prompt, /complete_review_finding/);
   assert.match(prompt, /"mode":"publish"/);
@@ -649,6 +652,7 @@ test("prompt содержит точный ID, два разрешения и co
     publicationAlreadyCompleted: true,
   });
   assert.match(recoveredPrompt, /"mode":"acknowledge-existing"/);
+  assert.match(recoveredPrompt, /do not invoke the skill, request the user's decision, commit, or push/);
   assert.doesNotMatch(recoveredPrompt, /git push --set-upstream/);
   assert.doesNotMatch(recoveredPrompt, /Invoke the `openspec-review-change` skill/);
 });

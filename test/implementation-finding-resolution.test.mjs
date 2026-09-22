@@ -344,8 +344,9 @@ test("High завершает implementation finding только после com
   assert.deepEqual(createdOptions.labels, { ntfy: "true" });
   assert.equal("cwd" in createdOptions, false);
   assert.match(createdOptions.prompt, /openspec-review-implementation/);
-  assert.match(createdOptions.prompt, /first explicit permission/);
-  assert.match(createdOptions.prompt, /separate second explicit permission/);
+  assert.match(createdOptions.prompt, /one explicit decision/);
+  assert.match(createdOptions.prompt, /without asking for another approval/);
+  assert.match(createdOptions.prompt, /never reopen a completed task/);
   assert.equal(
     calls.some(({ executable, arguments: arguments_ }) =>
       executable === "paseo" || arguments_.includes("commands")),
@@ -585,7 +586,7 @@ test("ошибка checkpoint восстанавливает ntfy и recovery н
   });
   await created;
   assert.match(options.prompt, /This is a recovery session/);
-  assert.match(options.prompt, /do not request the two approvals again/);
+  assert.match(options.prompt, /do not request the user's decision again/);
   const [{ url }] = Object.values(options.config.mcpServers);
   const client = await connectClient(url);
   const first = await client.callTool({
@@ -607,7 +608,7 @@ test("ошибка checkpoint восстанавливает ntfy и recovery н
   ]);
 });
 
-test("prompt содержит точный skill, два разрешения, commit+push и fallback subject", () => {
+test("prompt требует одно решение, сохраняет задачи и завершает commit+push без новой паузы", () => {
   const prompt = implementationFindingResolutionPrompt({
     changeId,
     findingId: "F42",
@@ -618,8 +619,11 @@ test("prompt содержит точный skill, два разрешения, c
   });
   assert.match(prompt, /openspec-review-implementation/);
   assert.match(prompt, /F42/);
-  assert.match(prompt, /first explicit permission/);
-  assert.match(prompt, /separate second explicit permission/);
+  assert.match(prompt, /one explicit decision/);
+  assert.match(prompt, /without asking for another approval/);
+  assert.match(prompt, /never reopen a completed task/);
+  assert.match(prompt, /append new unfinished tasks/);
+  assert.doesNotMatch(prompt, /second explicit permission|third permission/);
   assert.match(
     prompt,
     /git push --set-upstream origin implementation\/resolve-implementation-findings/,
@@ -641,6 +645,7 @@ test("prompt содержит точный skill, два разрешения, c
     publicationAlreadyCompleted: true,
   });
   assert.match(recoveredPrompt, /"mode":"acknowledge-existing"/);
+  assert.match(recoveredPrompt, /do not invoke the skill, request the user's decision, commit, or push/);
   assert.doesNotMatch(recoveredPrompt, /git push --set-upstream/);
   assert.doesNotMatch(
     recoveredPrompt,
