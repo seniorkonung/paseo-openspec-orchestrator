@@ -183,6 +183,7 @@ export function createOpenSpecWorkflow(
         readAgentProfiles: dependencies.readAgentProfiles,
         findingResolution: dependencies.implementationFindingResolution,
         implementationRunVerification: dependencies.implementationRunVerification,
+        phaseWork: dependencies.phaseWork,
       }),
       createInspectImplementationFeedbackStep({
         workspaceDirectory: dependencies.workspaceDirectory,

@@ -12,11 +12,18 @@ import type {
   WorkflowStepDefinition,
   WorkflowStepResult,
 } from "../types.ts";
-import { clearImplementationBatch } from "../../implementation-run-model.ts";
+import {
+  clearImplementationBatch,
+  type ImplementationRun,
+} from "../../implementation-run-model.ts";
 import {
   ImplementationRunVerificationError,
   type ImplementationRunVerifier,
 } from "../../implementation-run-verification.ts";
+import {
+  PhaseWorkError,
+  type PhaseWorkService,
+} from "../../phase-work.ts";
 
 export interface ResolveImplementationReviewFindingsDependencies {
   readonly workspaceDirectory: string;
@@ -26,6 +33,7 @@ export interface ResolveImplementationReviewFindingsDependencies {
     "plan" | "run"
   >;
   readonly implementationRunVerification: Pick<ImplementationRunVerifier, "assertCurrent">;
+  readonly phaseWork: Pick<PhaseWorkService, "inspect">;
 }
 
 async function resolveImplementationReviewFindingsStep(
@@ -71,13 +79,19 @@ async function resolveImplementationReviewFindingsStep(
         context.signal,
       );
       if (plan.kind === "no-findings") {
+        if (implementationRun) {
+          return continueImplementationAfterFindings(
+            dependencies,
+            context,
+            implementationRun,
+            plan.headCommit,
+            `В implementation review нет нерешённых findings: ${plan.reviewPath}`,
+          );
+        }
         return {
           kind: "continue",
-          next: implementationRun ? "execute-change-tasks" : "validate-phase-planning",
-          state: implementationRun ? {
-            implementationRun: clearImplementationBatch(implementationRun, plan.headCommit),
-            pendingImplementationFindingResolutionSession: null,
-          } : { pendingImplementationFindingResolutionSession: null },
+          next: "validate-phase-planning",
+          state: { pendingImplementationFindingResolutionSession: null },
           summary: `В implementation review нет нерешённых findings: ${plan.reviewPath}`,
         };
       }
@@ -155,13 +169,19 @@ async function resolveImplementationReviewFindingsStep(
     });
 
     if (completed.remainingFindingIds.length === 0) {
+      if (implementationRun) {
+        return continueImplementationAfterFindings(
+          dependencies,
+          context,
+          implementationRun,
+          completed.commit,
+          `Обработана последняя implementation finding ${completed.findingId}; обновлён PR #${completed.pullRequest.number}`,
+        );
+      }
       return {
         kind: "continue",
-        next: implementationRun ? "execute-change-tasks" : "validate-phase-planning",
-        state: implementationRun ? {
-          implementationRun: clearImplementationBatch(implementationRun, completed.commit),
-          pendingImplementationFindingResolutionSession: null,
-        } : { pendingImplementationFindingResolutionSession: null },
+        next: "validate-phase-planning",
+        state: { pendingImplementationFindingResolutionSession: null },
         summary: `Обработана последняя implementation finding ${completed.findingId}; обновлён PR #${completed.pullRequest.number}`,
       };
     }
@@ -192,13 +212,45 @@ function findingFailure(
   });
   const summary =
     error instanceof ImplementationFindingResolutionError ||
-      error instanceof ImplementationRunVerificationError
+      error instanceof ImplementationRunVerificationError ||
+      error instanceof PhaseWorkError
       ? error.message
       : fallback;
   return {
     kind: "halt",
     summary,
     message: `${summary}; исправьте состояние и нажмите «Повторить»`,
+  };
+}
+
+async function continueImplementationAfterFindings(
+  dependencies: ResolveImplementationReviewFindingsDependencies,
+  context: WorkflowStepContext,
+  implementationRun: ImplementationRun,
+  headCommit: string,
+  summary: string,
+): Promise<WorkflowStepResult> {
+  const previous = context.state.phaseProgress;
+  if (!previous) {
+    throw new PhaseWorkError("Не сохранён baseline задач implementation-run");
+  }
+  // Finding может добавить remediation-задачи. Сохраняем их, пока они ещё
+  // незавершены, чтобы post-merge защита отличала их от внешней подмены задач.
+  const decision = await dependencies.phaseWork.inspect(
+    dependencies.workspaceDirectory,
+    implementationRun.changeId,
+    previous,
+    context.signal,
+  );
+  return {
+    kind: "continue",
+    next: "execute-change-tasks",
+    state: {
+      phaseProgress: decision.progress,
+      implementationRun: clearImplementationBatch(implementationRun, headCommit),
+      pendingImplementationFindingResolutionSession: null,
+    },
+    summary,
   };
 }
 
