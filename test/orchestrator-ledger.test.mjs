@@ -24,24 +24,10 @@ async function temporaryHome(context) {
   return directory;
 }
 
-function pendingReviewSession(changeId, parentBranch) {
-  return {
-    changeId,
-    parentBranch,
-    reviewBranch: `planning/${changeId}/initial`,
-    parentBaselineCommit: "a".repeat(40),
-    baselineCommit: "b".repeat(40),
-    repositoryHost: "github.com",
-    repositoryNameWithOwner: "example/project",
-    repositoryUrl: "https://github.com/example/project",
-    parentPullRequestNumber: 42,
-  };
-}
-
 function workflowBranches(changeId) {
   return {
     changeBranch: `change/${changeId}`,
-    activeBranch: `planning/${changeId}/initial`,
+    activeBranch: `change/${changeId}`,
   };
 }
 
@@ -49,234 +35,81 @@ function implementationRun(changeId) {
   return {
     changeId,
     changeBranch: `change/${changeId}`,
-    implementationBranch: `implementation/${changeId}/phase-1/run-1`,
+    implementationBranch: `change/${changeId}`,
+    phaseNumber: 1,
+    runNumber: 1,
     rootBaselineCommit: "a".repeat(40),
     repository: {
       host: "github.com",
       nameWithOwner: "example/project",
       url: "https://github.com/example/project",
     },
-    publication: {
-      kind: "draft-pr",
-      number: 51,
-      url: "https://github.com/example/project/pull/51",
-      title: `Реализация OpenSpec change «${changeId}»`,
-    },
-    batch: { kind: "empty", baseCommit: "c".repeat(40) },
-    lastDeliveryHead: "b".repeat(40),
-    processedFeedbackFingerprints: [],
+    publication: { kind: "unreviewed" },
+    batch: { kind: "empty", baseCommit: "a".repeat(40) },
   };
 }
 
-test("checkpoint версий 1–4 не мигрируется, а версия 5 заполняет default", () => {
-  assert.throws(
-    () =>
-      workflowCheckpointSchema.parse({
-        version: 1,
-        nextStepId: "initialize-change",
-        state: { ...workflowBranches("legacy-change"), change: { id: "legacy-change" } },
-      }),
-  );
-  assert.throws(() =>
-    workflowCheckpointSchema.parse({
-      version: 2,
+test("checkpoint v5 не мигрируется, версия 6 восстанавливает значения по умолчанию", () => {
+  for (const version of [1, 2, 3, 4, 5]) {
+    assert.throws(() => workflowCheckpointSchema.parse({
+      version,
       nextStepId: "initialize-change",
       state: { ...workflowBranches("legacy-change"), change: { id: "legacy-change" } },
-    }),
-  );
-  assert.throws(() =>
-    workflowCheckpointSchema.parse({
-      version: 3,
-      nextStepId: "initialize-change",
-      state: { ...workflowBranches("legacy-change"), change: { id: "legacy-change" } },
-    }),
-  );
-  assert.throws(() =>
-    workflowCheckpointSchema.parse({
-      version: 4,
-      nextStepId: "initialize-change",
-      state: { ...workflowBranches("legacy-change"), change: { id: "legacy-change" } },
-    }),
-  );
+    }));
+  }
   const parsed = workflowCheckpointSchema.parse({
-    version: 5,
+    version: 6,
     nextStepId: "initialize-change",
-    state: { ...workflowBranches("legacy-change"), change: { id: "legacy-change" } },
+    state: { ...workflowBranches("new-change"), change: { id: "new-change" } },
   });
-  assert.equal(parsed.version, 5);
+  assert.equal(parsed.version, 6);
   assert.equal(parsed.state.pendingChangeInitializationSession, null);
   assert.equal(parsed.state.pendingPlanningBranchSession, null);
-  assert.equal(parsed.state.pendingPlanningMergeSession, null);
 });
 
-test("workflow не принимает несколько незавершённых агентских сессий", () => {
-  assert.throws(
-    () =>
-      workflowStateSchema.parse({
-        ...workflowBranches("conflicting-sessions"),
-        activeBranch: "implementation/conflicting-sessions/phase-1/run-1",
-        change: { id: "conflicting-sessions" },
-        pendingArtifactSession: {
-          artifactId: "proposal",
-          schemaName: "spec-driven",
-          baselineCommit: "a".repeat(40),
-        },
-        pendingReviewSession: pendingReviewSession(
-          "conflicting-sessions",
-          "change/conflicting-sessions",
-        ),
-      }),
-    /одновременно восстанавливать несколько агентских сессий/,
-  );
-  assert.throws(
-    () =>
-      workflowStateSchema.parse({
-        ...workflowBranches("conflicting-sessions"),
-        change: { id: "conflicting-sessions" },
-        pendingArtifactSession: null,
-        pendingReviewSession: null,
-        pendingFindingResolutionSession: {
-          changeId: "conflicting-sessions",
-          branch: "implementation/conflicting-sessions/phase-1/run-1",
-          findingId: "F1",
-          baselineCommit: "c".repeat(40),
-        },
-        pendingImplementationFindingResolutionSession: {
-          changeId: "conflicting-sessions",
-          branch: "implementation/conflicting-sessions/phase-1/run-1",
-          findingId: "F2",
-          baselineCommit: "d".repeat(40),
-        },
-      }),
-    /одновременно восстанавливать несколько агентских сессий/,
-  );
-  assert.throws(
-    () =>
-      workflowStateSchema.parse({
-        ...workflowBranches("conflicting-sessions"),
-        change: { id: "conflicting-sessions" },
-        pendingArtifactSession: null,
-        pendingReviewSession: pendingReviewSession(
-          "conflicting-sessions",
-          "change/conflicting-sessions",
-        ),
-        pendingFindingResolutionSession: {
-          changeId: "conflicting-sessions",
-          branch: "planning/conflicting-sessions/initial",
-          findingId: "F1",
-          baselineCommit: "c".repeat(40),
-        },
-      }),
-    /одновременно восстанавливать несколько агентских сессий/,
-  );
+test("workflow запрещает дочернюю активную ветку и несколько pending-сессий", () => {
+  assert.throws(() => workflowStateSchema.parse({
+    ...workflowBranches("branch-check"),
+    activeBranch: "planning/branch-check/initial",
+    change: { id: "branch-check" },
+  }), /workflow|корневую|Git-ветка/iu);
+  assert.throws(() => workflowStateSchema.parse({
+    ...workflowBranches("session-check"),
+    change: { id: "session-check" },
+    pendingArtifactSession: {
+      artifactId: "proposal",
+      schemaName: "spec-driven",
+      baselineCommit: "a".repeat(40),
+    },
+    pendingPlanningBranchSession: {
+      changeId: "session-check",
+      changeBranch: "change/session-check",
+      planningBranch: "change/session-check",
+      baselineCommit: "a".repeat(40),
+    },
+  }), /одновременно восстанавливать несколько агентских сессий/u);
 });
 
-test("workflow отклоняет checkpoint-сессии другого change или этапа ветвления", () => {
-  assert.throws(
-    () =>
-      workflowStateSchema.parse({
-        changeBranch: "change/expected-change",
-        activeBranch: "change/expected-change",
-        change: null,
-        pendingChangeInitializationSession: {
-          changeId: "other-change",
-          changeBranch: "change/other-change",
-          baselineCommit: "a".repeat(40),
-          changeExisted: false,
-          openSpecRoot: "/workspace/project",
-          existingRootPullRequest: null,
-        },
-      }),
-    /Сессия инициализации не соответствует/,
-  );
-  assert.throws(
-    () =>
-      workflowStateSchema.parse({
-        ...workflowBranches("expected-change"),
-        activeBranch: "change/expected-change",
-        change: { id: "expected-change" },
-        pendingPlanningBranchSession: {
-          changeId: "other-change",
-          changeBranch: "change/other-change",
-          planningBranch: "planning/other-change/initial",
-          baselineCommit: "b".repeat(40),
-        },
-      }),
-    /Сессия planning-ветки не соответствует/,
-  );
-  assert.throws(
-    () =>
-      workflowStateSchema.parse({
-        ...workflowBranches("expected-change"),
-        activeBranch: "change/expected-change",
-        change: { id: "expected-change" },
-        pendingPlanningMergeSession: {
-          changeId: "expected-change",
-          changeBranch: "change/expected-change",
-          planningBranch: "planning/expected-change/initial",
-          planningPullRequestNumber: 43,
-          mergedPlanningHead: "c".repeat(40),
-          repositoryHost: "github.com",
-          repositoryNameWithOwner: "example/project",
-          repositoryUrl: "https://github.com/example/project",
-        },
-      }),
-    /Сессия merge-gate не соответствует/,
-  );
-});
-
-test("workflow связывает durable implementation-сессии с точным run", () => {
+test("workflow связывает implementation run с корневой веткой", () => {
   const changeId = "durable-implementation";
   const run = implementationRun(changeId);
   const state = {
-    changeBranch: run.changeBranch,
-    activeBranch: run.implementationBranch,
+    ...workflowBranches(changeId),
     change: { id: changeId },
     implementationRun: run,
+    phaseTarget: { kind: "implementation", phaseNumber: 1, runNumber: 1 },
     phaseProgress: {
       phases: [{ number: 1, fingerprint: "1".repeat(64) }],
-      tasks: [{
-        id: "task-a",
-        number: "1.1",
-        description: "1.1 Реализовать поведение",
-        done: false,
-        fingerprint: phaseTaskFingerprint(
-          "task-a",
-          "1.1",
-          "1.1 Реализовать поведение",
-        ),
-      }],
+      tasks: [{ id: "task-a", number: "1.1", description: "1.1 Работа", done: false,
+        fingerprint: phaseTaskFingerprint("task-a", "1.1", "1.1 Работа") }],
       nextImplementationRun: 2,
-    },
-    pendingPrFeedbackReviewSession: {
-      changeId,
-      changeBranch: run.changeBranch,
-      implementationBranch: run.implementationBranch,
-      rootBaselineCommit: run.rootBaselineCommit,
-      rangeHead: run.lastDeliveryHead,
-      baselineCommit: run.batch.baseCommit,
-      reportBlob: "d".repeat(40),
-      repository: run.repository,
-      items: [{
-        source: "comment",
-        nodeId: "PRC_kwDOExample",
-        updatedAt: "2026-09-19T10:00:00Z",
-        body: "Проверить крайний случай",
-        fingerprint: "e".repeat(64),
-      }],
     },
   };
   assert.doesNotThrow(() => workflowStateSchema.parse(state));
-  assert.throws(
-    () => workflowStateSchema.parse({
-      ...state,
-      pendingPrFeedbackReviewSession: {
-        ...state.pendingPrFeedbackReviewSession,
-        rangeHead: "f".repeat(40),
-      },
-    }),
-    /не соответствует implementation-run/u,
-  );
+  assert.throws(() => workflowStateSchema.parse({
+    ...state,
+    implementationRun: { ...run, implementationBranch: "change/other" },
+  }));
 });
 
 test("reporter хранит ровно одно действие и завершает handle один раз", async (context) => {
@@ -381,7 +214,7 @@ test("ledger сохраняет checkpoint workflow и полностью очи
     change: { id: "change-a" },
   }));
   const checkpoint = workflowCheckpointSchema.parse({
-    version: 5,
+    version: 6,
     nextStepId: "review-change",
     state: {
       ...workflowBranches("checkpoint"),
@@ -478,21 +311,21 @@ test("семантически несовместимый ledger переход�
   assert.equal(await readFile(path, "utf8"), source);
 });
 
-test("ledger с checkpoint v4 остаётся read-only degraded до Clear", async (context) => {
+test("ledger с checkpoint v5 остаётся read-only degraded до Clear", async (context) => {
   context.mock.method(console, "error", () => undefined);
   const paseoHome = await temporaryHome(context);
-  const path = getLedgerPath("workspace-v4", paseoHome);
+  const path = getLedgerPath("workspace-v5", paseoHome);
   await mkdir(dirname(path), { recursive: true });
   const source = JSON.stringify({
     version: 1,
-    workspaceId: "workspace-v4",
+    workspaceId: "workspace-v5",
     revision: 3,
     change: { id: "legacy-change" },
     lifecycle: { status: "failed", availableCommand: "retry" },
     currentAction: null,
     history: [],
     checkpoint: {
-      version: 4,
+      version: 5,
       nextStepId: "execute-change-tasks",
       state: {
         changeBranch: "change/legacy-change",
@@ -504,9 +337,9 @@ test("ledger с checkpoint v4 остаётся read-only degraded до Clear", a
   await writeFile(path, source, "utf8");
 
   const ledger = new OrchestratorLedger({ paseoHome });
-  const snapshot = await ledger.open("workspace-v4");
+  const snapshot = await ledger.open("workspace-v5");
   assert.equal(snapshot.persistence.status, "degraded");
-  assert.equal(ledger.getWorkflowCheckpoint("workspace-v4"), null);
+  assert.equal(ledger.getWorkflowCheckpoint("workspace-v5"), null);
   await ledger.close();
   assert.equal(await readFile(path, "utf8"), source);
 });

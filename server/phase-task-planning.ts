@@ -159,7 +159,7 @@ export function createPhaseTaskPlanningService(
       const planningBranch = planningBranchSchema.parse(planningBranchInput);
       const progress = phaseProgressSchema.parse(progressInput);
       if (planningBranch !== phasePlanningBranchFor(changeId, phaseNumber)) {
-        throw new PhaseTaskPlanningError("Активна неверная phase planning-ветка");
+        throw new PhaseTaskPlanningError("Активна неверная корневая ветка change");
       }
       const gitRoot = await readTaskGitRoot(command, workspaceDirectory, signal);
       await assertPlanningGitState(command, gitRoot, planningBranch, signal);
@@ -420,7 +420,7 @@ async function assertPlanningGitState(
 ): Promise<void> {
   await assertCleanTaskWorktree(command, gitRoot, signal);
   if (await readCurrentTaskBranch(command, gitRoot, signal) !== planningBranch) {
-    throw new PhaseTaskPlanningError(`Текущей должна быть planning-ветка «${planningBranch}»`);
+    throw new PhaseTaskPlanningError(`Текущей должна быть корневая ветка «${planningBranch}»`);
   }
 }
 

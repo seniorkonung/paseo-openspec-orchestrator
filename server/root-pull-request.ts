@@ -1,6 +1,5 @@
 import { z } from "zod";
 import { runBoundedCommand, type BoundedCommandRunner } from "./bounded-command.ts";
-import { commitHashSchema } from "./change-artifact-model.ts";
 import { changeBranchFor, changeBranchSchema } from "./change-branch.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import {
@@ -9,7 +8,6 @@ import {
   readCurrentReviewBranch,
   readLocalReviewBranchCommit,
   readOptionalRemoteReviewBranchCommit,
-  readRemoteReviewBranchCommit,
   readReviewHeadCommit,
   readReviewPullRequest,
   resolveReviewRepository,
@@ -198,56 +196,22 @@ export function createRootPullRequestService(
         throw new RootPullRequestError(`Перед проверкой должна быть активна ветка «${changeBranch}»`);
       }
       try {
-        const local = await readLocalReviewBranchCommit(
-          command,
-          workspaceDirectory,
-          changeBranch,
-          signal,
-        );
+        const [local, head, remote] = await Promise.all([
+          readLocalReviewBranchCommit(command, workspaceDirectory, changeBranch, signal),
+          readReviewHeadCommit(command, workspaceDirectory, signal),
+          readOptionalRemoteReviewBranchCommit(command, workspaceDirectory, changeBranch, signal),
+        ]);
         if (local === null) throw new Error("Локальная root-ветка отсутствует");
-        const remoteBeforeFetch = await readOptionalRemoteReviewBranchCommit(
-          command,
-          workspaceDirectory,
-          changeBranch,
-          signal,
-        );
-        // После финального merge GitHub может удалить head branch. Точный
-        // local head всё равно будет сверен с immutable headRefOid merged PR.
-        if (remoteBeforeFetch === null) return local;
-        await command(
-          "git",
-          ["fetch", "--no-tags", "origin", `refs/heads/${changeBranch}`],
-          { cwd: workspaceDirectory, signal },
-        );
-        const fetchedResult = await command("git", ["rev-parse", "FETCH_HEAD"], {
-          cwd: workspaceDirectory,
-          signal,
-        });
-        const fetched = commitHashSchema.parse(fetchedResult.stdout.trim());
-        const remote = await readRemoteReviewBranchCommit(
-          command,
-          workspaceDirectory,
-          changeBranch,
-          signal,
-        );
-        if (fetched !== remote) throw new Error("FETCH_HEAD не совпал с remote");
-        await command("git", ["merge-base", "--is-ancestor", local, fetched], {
-          cwd: workspaceDirectory,
-          signal,
-        });
-        await command("git", ["merge", "--ff-only", fetched], {
-          cwd: workspaceDirectory,
-          signal,
-        });
-        if (await readReviewHeadCommit(command, workspaceDirectory, signal) !== remote) {
-          throw new Error("HEAD не совпал с remote");
+        // После финального merge GitHub может удалить remote branch. При
+        // существующем remote не принимаем посторонний fast-forward.
+        if (head !== local || (remote !== null && remote !== local)) {
+          throw new Error("Локальный и удалённый HEAD расходятся");
         }
-        await assertCleanReviewWorktree(command, workspaceDirectory, signal);
-        return remote;
+        return local;
       } catch (error) {
         if (signal?.aborted) throw error;
         throw new RootPullRequestError(
-          `Корневую ветку «${changeBranch}» невозможно безопасно обновить fast-forward`,
+          `Корневая ветка «${changeBranch}» расходится с origin или локальным HEAD`,
         );
       }
     },

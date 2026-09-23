@@ -288,7 +288,7 @@ export function changeTaskExecutionPrompt(input: {
 }): string {
   const { session } = input;
   const applyInstruction = input.alreadyCommitted
-    ? "This is a recovery session: the selected task is already implemented in the one expected commit. Do not invoke the apply skill, change files, or create or amend another commit; continue only with push and completion."
+    ? "This is a recovery session: the selected task is already implemented in the one expected commit. Do not invoke the apply skill, change files, or create or amend another commit; call the completion tool."
     : `Invoke exactly this skill command as the implementation request:
 
 \`$openspec-apply-change ${session.changeId} Выполни задачу ${session.taskNumber}. К другим задачам не приступай.\`
@@ -325,7 +325,7 @@ Stop the apply loop right after task ${session.taskNumber}: implement its full s
     body: [
       applyInstruction,
       commitInstruction,
-      `Publish the task commit with \`git push --set-upstream origin ${session.implementationBranch}\`.`,
+      "Do not push. The orchestrator verifies and publishes the task commit to the root branch.",
     ],
     completion: completionInstruction({
       tool: "complete_change_task",

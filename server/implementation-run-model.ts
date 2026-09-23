@@ -20,7 +20,6 @@ import {
   taskNumberSchema,
 } from "./change-task-model.ts";
 
-export const MAX_PROCESSED_FEEDBACK_FINGERPRINTS = 4_096;
 export const MAX_IMPLEMENTATION_BATCH_TASKS = 4_096;
 
 export const implementationRepositorySchema = z
@@ -89,14 +88,9 @@ const implementationPullRequestPublicationSchema = z
   .strict();
 
 export const implementationPublicationSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("unpublished") }).strict(),
-  implementationPullRequestPublicationSchema.extend({ kind: z.literal("draft-pr") }),
-  implementationPullRequestPublicationSchema.extend({ kind: z.literal("ready-pr") }),
+  z.object({ kind: z.literal("unreviewed") }).strict(),
+  implementationPullRequestPublicationSchema.extend({ kind: z.literal("reviewed") }),
 ]);
-
-export const feedbackFingerprintSchema = z
-  .string()
-  .regex(/^[0-9a-f]{64}$/u, "Fingerprint feedback должен быть SHA-256");
 
 export const implementationRunSchema = z
   .object({
@@ -109,14 +103,6 @@ export const implementationRunSchema = z
     repository: implementationRepositorySchema,
     publication: implementationPublicationSchema,
     batch: implementationBatchSchema,
-    lastDeliveryHead: commitHashSchema.nullable(),
-    processedFeedbackFingerprints: z
-      .array(feedbackFingerprintSchema)
-      .max(MAX_PROCESSED_FEEDBACK_FINGERPRINTS)
-      .refine(
-        (values) => new Set(values).size === values.length,
-        "Обработанные fingerprints feedback не должны повторяться",
-      ),
   })
   .strict()
   .superRefine((run, context) => {
@@ -144,39 +130,11 @@ export const implementationRunSchema = z
         message: "Непустой implementation-пакет должен продвигать Git HEAD",
       });
     }
-    if (run.batch.kind === "reviewed" && run.lastDeliveryHead !== run.batch.headCommit) {
-      context.addIssue({
-        code: "custom",
-        path: ["lastDeliveryHead"],
-        message: "Reviewed-пакет должен быть последним проверенным delivery head",
-      });
-    }
-    if (run.publication.kind !== "unpublished" && run.lastDeliveryHead === null) {
+    if (run.batch.kind === "reviewed" && run.publication.kind === "unreviewed") {
       context.addIssue({
         code: "custom",
         path: ["publication"],
-        message: "Implementation PR нельзя опубликовать до успешного review",
-      });
-    }
-    if (run.publication.kind === "unpublished" && run.lastDeliveryHead !== null) {
-      context.addIssue({
-        code: "custom",
-        path: ["lastDeliveryHead"],
-        message: "Неопубликованный implementation-run не может иметь delivery head",
-      });
-    }
-    if (run.batch.kind === "reviewed" && run.publication.kind === "unpublished") {
-      context.addIssue({
-        code: "custom",
-        path: ["publication"],
-        message: "Reviewed-пакет должен иметь единый implementation PR",
-      });
-    }
-    if (run.publication.kind === "ready-pr" && run.batch.kind !== "empty") {
-      context.addIssue({
-        code: "custom",
-        path: ["publication"],
-        message: "Ready implementation PR требует пустой task-пакет",
+        message: "Reviewed-пакет должен быть привязан к корневому PR",
       });
     }
   });

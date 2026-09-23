@@ -81,7 +81,7 @@ function reviewedRun(
   if (run.batch.kind !== "collecting") throw new ImplementationReviewError("Task-пакет уже изменился");
   return implementationRunSchema.parse({
     ...run,
-    publication: { kind: "draft-pr", ...review.pullRequest },
+    publication: { kind: "reviewed", ...review.pullRequest },
     batch: {
       kind: "reviewed",
       baseCommit: run.batch.baseCommit,
@@ -89,7 +89,6 @@ function reviewedRun(
       reviewCommit: review.reviewCommit,
       tasks: run.batch.tasks,
     },
-    lastDeliveryHead: review.reviewedHead,
   });
 }
 

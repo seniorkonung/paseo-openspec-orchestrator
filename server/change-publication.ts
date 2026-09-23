@@ -34,8 +34,6 @@ import {
 import {
   changeBranchFor,
   changeBranchSchema,
-  assertPlanningBranchFor,
-  planningBranchSchema,
 } from "./change-branch.ts";
 import { createManagedAgentSession } from "./managed-agent-session.ts";
 import {
@@ -108,27 +106,18 @@ export function createChangePublicationService(
         throw new ChangePublicationError("Change ID не соответствует kebab-case");
       }
       const parsedChangeBranch = changeBranchSchema.safeParse(request.changeBranch);
-      const parsedActiveBranch = planningBranchSchema.safeParse(request.activeBranch);
-      let validPlanningBranch = false;
-      if (parsedActiveBranch.success) {
-        try {
-          assertPlanningBranchFor(parsedActiveBranch.data, parsedChangeId.data);
-          validPlanningBranch = true;
-        } catch { /* Ошибка нормализуется ниже. */ }
-      }
       if (
         !parsedChangeBranch.success ||
-        !parsedActiveBranch.success ||
         parsedChangeBranch.data !== changeBranchFor(parsedChangeId.data) ||
-        !validPlanningBranch
+        request.activeBranch !== parsedChangeBranch.data
       ) {
         throw new ChangePublicationError(
-          "Для публикации требуются согласованные change/<id> и planning/<id>/{initial|phase-N} ветки",
+          "Для публикации требуется активная корневая ветка change/<id>",
         );
       }
       const changeId = parsedChangeId.data;
       const changeBranch = parsedChangeBranch.data;
-      const activeBranch = parsedActiveBranch.data;
+      const activeBranch = parsedChangeBranch.data;
       const target = await inspectPublicationTarget(
         command,
         request.workspaceDirectory,
@@ -289,7 +278,7 @@ export function changePublicationPrompt(input: {
       `2. Run \`mise exec --no-deps -- openspec status --change ${input.changeId} --json\` and read every \`existingOutputPaths\` file of each done artifact. Read only regular files inside the reported change root and fail on any path that escapes it. Ignore skipped artifacts.`,
       "3. From those artifacts write a stable Russian title for the outcome of the whole change, using only letters, digits, spaces, and the punctuation `.,:«»—–/_-`. Leave out the change ID, branches, task numbers, artifact names, WIP/Draft markers, and anything else that changes while work continues.",
       `4. Write the Russian body with exactly these ordered sections: \`## Суть\`, \`## Ожидаемый результат\`, \`## Границы change\`, \`## OpenSpec change\`. Keep it high-level, omit task and commit progress, and put the exact change ID \`${input.changeId}\` in backticks in the final section.`,
-      `5. Publish the planning commits with \`git push --set-upstream origin ${input.activeBranch}\`. Never push the root branch, create a commit, or modify a repository file.`,
+      "5. Do not push or create a commit. The orchestrator verifies and publishes the current root HEAD after completion.",
       `6. Do not modify root pull request #${pullRequestNumber} or any other GitHub resource. The orchestrator owns pull-request mutation and will publish the title and body after validating them.`,
     ],
     completion: completionInstruction({

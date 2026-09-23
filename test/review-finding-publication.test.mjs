@@ -13,7 +13,7 @@ import {
 const workspaceDirectory = process.cwd();
 const changeId = "publication-contract";
 const parentBranch = `change/${changeId}`;
-const branch = `planning/${changeId}/initial`;
+const branch = parentBranch;
 const baselineCommit = "a".repeat(40);
 const expectedHead = "b".repeat(40);
 
@@ -22,9 +22,9 @@ function pullRequest(overrides = {}) {
     number: 43,
     url: "https://github.com/example/project/pull/43",
     state: "OPEN",
-    isDraft: false,
+    isDraft: true,
     isCrossRepository: false,
-    baseRefName: parentBranch,
+    baseRefName: "main",
     headRefName: branch,
     headRefOid: expectedHead,
     title: reviewPullRequestTitle(changeId),
@@ -234,13 +234,13 @@ test("публикация очищает временный JSON-файл по�
   const fixture = githubFixture({ updateError: new Error("GitHub API failed") });
   await assert.rejects(
     publishReviewFindingOutcome(publicationRequest(), createCommand(fixture)),
-    /Не удалось обновить описание review pull request #43/,
+    /Не удалось обновить описание корневого PR #43/,
   );
   assert.equal(fixture.bodyFiles.length, 1);
   await assert.rejects(access(fixture.bodyFiles[0]));
 });
 
-test("проверка review PR отклоняет отсутствие, дубли и неверные metadata", async (t) => {
+test("проверка корневого PR отклоняет отсутствие, дубли и неверные metadata", async (t) => {
   const cases = [
     ["отсутствующий PR", (fixture) => { fixture.pullRequests = []; }],
     ["дублированный PR", (fixture) => {
@@ -253,15 +253,14 @@ test("проверка review PR отклоняет отсутствие, дуб
       ];
     }],
     ["закрытый PR", (fixture) => { fixture.pullRequest.state = "CLOSED"; }],
-    ["Draft PR", (fixture) => { fixture.pullRequest.isDraft = true; }],
+    ["Ready PR", (fixture) => { fixture.pullRequest.isDraft = false; }],
     ["PR из fork", (fixture) => { fixture.pullRequest.isCrossRepository = true; }],
     ["PR в неверную base-ветку", (fixture) => {
-      fixture.pullRequest.baseRefName = "main";
+      fixture.pullRequest.baseRefName = "develop";
     }],
     ["PR с неверной head-веткой", (fixture) => {
       fixture.pullRequest.headRefName = "feature/other-review";
     }],
-    ["PR с неверным title", (fixture) => { fixture.pullRequest.title = "Другой title"; }],
     ["PR другого репозитория", (fixture) => {
       fixture.pullRequest.url = "https://github.com/other/project/pull/43";
     }],

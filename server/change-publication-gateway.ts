@@ -21,6 +21,11 @@ import {
   type GitHubRemoteIdentity,
 } from "./github-repository-identity.ts";
 import { updateGitHubPullRequest } from "./github-pull-request-mutation.ts";
+import { deliverRootCommit } from "./root-branch-delivery.ts";
+
+const SUMMARY_START = "<!-- paseo-openspec-orchestrator:summary:start -->";
+const SUMMARY_END = "<!-- paseo-openspec-orchestrator:summary:end -->";
+const MAX_MANAGED_BODY_LENGTH = 65_536;
 
 export async function inspectPublicationTarget(
   command: BoundedCommandRunner,
@@ -179,18 +184,14 @@ export async function publishPublication(
       "Git HEAD изменился во время публикации; этап не должен создавать коммиты",
     );
   }
-
-  const remoteHead = await readRemoteCommit(
-    command,
+  await deliverRootCommit(
     request.workspaceDirectory,
-    request.activeBranch,
+    request.changeId,
+    request.target.expectedChangeHead,
+    head,
     request.signal,
+    command,
   );
-  if (remoteHead !== head) {
-    throw new ChangePublicationError(
-      `Git remote origin не содержит текущий HEAD ветки «${request.activeBranch}»`,
-    );
-  }
 
   const changeHead = await readRemoteCommit(
     command,
@@ -198,7 +199,7 @@ export async function publishPublication(
     request.changeBranch,
     request.signal,
   );
-  if (changeHead !== request.target.expectedChangeHead) {
+  if (changeHead !== head) {
     throw new ChangePublicationError(
       `Корневая ветка «${request.changeBranch}» изменилась во время planning`,
     );
@@ -218,9 +219,10 @@ export async function publishPublication(
     request.changeBranch,
     changeHead,
   );
+  const managedBody = mergeManagedSummary(pullRequest.body, request.input.body);
   if (
     pullRequest.title !== request.input.title ||
-    pullRequest.body !== request.input.body
+    pullRequest.body !== managedBody
   ) {
     try {
       await updateGitHubPullRequest(
@@ -228,7 +230,7 @@ export async function publishPublication(
         request.workspaceDirectory,
         request.target.repositoryIdentity,
         expectedNumber,
-        { title: request.input.title, body: request.input.body },
+        { title: request.input.title, body: managedBody },
         request.signal,
       );
     } catch (error) {
@@ -253,7 +255,7 @@ export async function publishPublication(
   }
   if (
     pullRequest.title !== request.input.title ||
-    pullRequest.body !== request.input.body
+    pullRequest.body !== managedBody
   ) {
     throw new ChangePublicationError(
       "GitHub не подтвердил обновлённые название и описание pull request",
@@ -290,6 +292,27 @@ export async function publishPublication(
     url: pullRequest.url,
     title: pullRequestTitleSchema.parse(pullRequest.title),
   };
+}
+
+export function mergeManagedSummary(existingBody: string, summary: string): string {
+  if (summary.includes("paseo-openspec-orchestrator:") || summary.includes("<!--")) {
+    throw new ChangePublicationError("Описание change содержит служебный marker");
+  }
+  const start = existingBody.indexOf(SUMMARY_START);
+  const end = existingBody.indexOf(SUMMARY_END);
+  if ((start === -1) !== (end === -1) ||
+      (start !== -1 && (end < start || existingBody.indexOf(SUMMARY_START, start + 1) !== -1 ||
+        existingBody.indexOf(SUMMARY_END, end + 1) !== -1))) {
+    throw new ChangePublicationError("Секция описания корневого PR повреждена");
+  }
+  const section = `${SUMMARY_START}\n${summary.trim()}\n${SUMMARY_END}`;
+  const body = start === -1
+    ? [existingBody.trim(), section].filter(Boolean).join("\n\n")
+    : existingBody.slice(0, start) + section + existingBody.slice(end + SUMMARY_END.length);
+  if (body.length > MAX_MANAGED_BODY_LENGTH) {
+    throw new ChangePublicationError("Описание корневого PR превышает допустимую длину");
+  }
+  return body;
 }
 
 function assertPublicationPullRequest(

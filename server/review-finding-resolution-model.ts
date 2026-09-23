@@ -130,9 +130,9 @@ export function buildFindingResolutionPrompt(
   const subject = variant.commitSubject(input.findingId);
   const resolved = input.alreadyCommitted || input.publicationAlreadyCompleted;
   const resolutionInstruction = input.publicationAlreadyCompleted
-    ? `This is a recovery session: finding \`${input.findingId}\` already has a valid committed resolution and a verified entry in the review pull request. Change nothing: do not invoke the skill, request the user's decision, commit, or push.`
+    ? `This is a recovery session: finding \`${input.findingId}\` already has a valid committed resolution and a verified entry in the root pull request. Change nothing: do not invoke the skill, request the user's decision, commit, or push.`
     : input.alreadyCommitted
-      ? `This is a recovery session: finding \`${input.findingId}\` is already absent from a valid committed resolution, but its review pull-request entry is missing. Do not invoke the skill, do not request the user's decision again, and do not create or amend a commit; publish the existing commit if needed and derive the Russian summaries from the finding and the committed diff.`
+      ? `This is a recovery session: finding \`${input.findingId}\` is already absent from a valid committed resolution, but its root pull-request entry is missing. Do not invoke the skill, do not request the user's decision again, and do not create or amend a commit; let the orchestrator publish the existing commit if needed and derive the Russian summaries from the finding and the committed diff.`
       : `Invoke the \`${variant.skill}\` skill for change \`${input.changeId}\` to analyze only finding \`${input.findingId}\`. Follow the interaction contract before changing artifacts or accepting risk. Do not inspect the agent command catalog first.`;
   const interactionContract = resolved
     ? ""
@@ -144,7 +144,7 @@ export function buildFindingResolutionPrompt(
 4. Validate the resulting artifact changes and report state. Then stage only files inside the change root and create exactly one commit with subject \`${subject}\` without asking for another approval; never amend or add a second commit. Report the changes and validation to the user while continuing through publication and completion without pausing for permission.`;
   const completion = input.publicationAlreadyCompleted
     ? `Finish by calling the orchestrator MCP tool \`${variant.toolName}\` with \`{"mode":"acknowledge-existing"}\`. If it reports an error, follow its feedback and retry the same tool.`
-    : `Publish the branch with \`git push --set-upstream origin ${input.branch}\`, then call the orchestrator MCP tool \`${variant.toolName}\` with \`{"mode":"publish","problem":"<краткая проблема>","resolution":"<краткий итог>"}\` without asking for additional permission. Both summaries are truthful single-line Russian text of at most 500 characters; for an accepted risk describe the acceptance and its rationale in \`resolution\`. If it reports an error, follow its feedback and retry the same tool.`;
+    : `Call the orchestrator MCP tool \`${variant.toolName}\` with \`{"mode":"publish","problem":"<краткая проблема>","resolution":"<краткий итог>"}\` without asking for additional permission. The orchestrator publishes the verified commit to the root branch and records the result in its pull request. Both summaries are truthful single-line Russian text of at most 500 characters; for an accepted risk describe the acceptance and its rationale in \`resolution\`. If it reports an error, follow its feedback and retry the same tool.`;
 
   return buildAgentPrompt({
     role: `You own the resolution of one finding from ${variant.reviewName}.`,
@@ -163,6 +163,7 @@ export function buildFindingResolutionPrompt(
       OPENSPEC_CLI_RULE,
       NO_GITHUB_RULE,
       FIXED_BRANCH_RULE,
+      "Do not push. The orchestrator verifies and publishes the commit to the existing root Draft pull request.",
       STAGE_SCOPE_RULE,
       "Change only planning artifacts inside the selected change root: never edit implementation code or tests and never invoke Apply.",
     ],

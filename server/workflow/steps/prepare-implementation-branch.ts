@@ -20,7 +20,7 @@ async function runStep(
     activeBranch !== changeBranch ||
     phaseTarget?.kind !== "implementation"
   ) {
-    return { kind: "halt", summary: "Недостаточно данных для implementation-ветки", message: "Change или его корневая ветка не сохранены" };
+    return { kind: "halt", summary: "Недостаточно данных для реализации", message: "Change или его корневая ветка не сохранены" };
   }
   let session = context.state.pendingImplementationBranchSession;
   try {
@@ -52,13 +52,13 @@ async function runStep(
         phaseTarget: null,
         pendingImplementationBranchSession: null,
       },
-      summary: `Подготовлена implementation-ветка Phase ${run.phaseNumber}, run ${run.runNumber}: ${run.implementationBranch}`,
+      summary: `Phase ${run.phaseNumber}, run ${run.runNumber} выполняется в ${run.changeBranch}`,
     };
   } catch (error) {
     if (context.signal.aborted) throw error;
     const summary = error instanceof ImplementationBranchError
       ? error.message
-      : "Не удалось подготовить implementation-ветку";
+      : "Не удалось подготовить реализацию";
     return { kind: "halt", summary, message: `${summary}; исправьте состояние и нажмите «Повторить»` };
   }
 }
@@ -66,5 +66,5 @@ async function runStep(
 export function createPrepareImplementationBranchStep(
   dependencies: PrepareImplementationBranchDependencies,
 ): WorkflowStepDefinition {
-  return { id: "prepare-implementation-branch", label: "Подготавливаю implementation-ветку", run: (context) => runStep(dependencies, context) };
+  return { id: "prepare-implementation-branch", label: "Проверяю корневую ветку перед реализацией", run: (context) => runStep(dependencies, context) };
 }

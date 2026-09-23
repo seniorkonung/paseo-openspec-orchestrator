@@ -166,7 +166,7 @@ export async function updateReviewPullRequestBody(
   } catch (error) {
     if (signal?.aborted) throw error;
     throw new ChangeReviewPublicationError(
-      `Не удалось обновить описание review pull request #${pullRequestNumber}`,
+      `Не удалось обновить описание корневого PR #${pullRequestNumber}`,
     );
   }
 }

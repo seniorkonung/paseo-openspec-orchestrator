@@ -1,88 +1,71 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mergeManagedSummary } from "../server/change-publication-gateway.ts";
 import {
+  clearImplementationBatch,
   collectImplementationTask,
   implementationRunSchema,
 } from "../server/implementation-run-model.ts";
-import {
-  IMPLEMENTATION_SUMMARY_END,
-  IMPLEMENTATION_SUMMARY_START,
-  renderImplementationSummary,
-  replaceImplementationSummary,
-} from "../server/implementation-publication.ts";
 
 const changeId = "one-pull-request";
+const branch = `change/${changeId}`;
 const base = "a".repeat(40);
 const commit = "b".repeat(40);
 const run = {
   changeId,
-  changeBranch: `change/${changeId}`,
-  implementationBranch: `implementation/${changeId}/phase-1/run-1`,
+  changeBranch: branch,
+  implementationBranch: branch,
+  phaseNumber: 1,
+  runNumber: 1,
   rootBaselineCommit: base,
   repository: {
     host: "github.com",
     nameWithOwner: "example/project",
     url: "https://github.com/example/project",
   },
-  publication: { kind: "unpublished" },
+  publication: { kind: "unreviewed" },
   batch: { kind: "empty", baseCommit: base },
-  lastDeliveryHead: null,
-  processedFeedbackFingerprints: [],
 };
 
-test("run-state собирает task-коммиты в один ordered batch", () => {
+test("run-state собирает task-коммиты в проверяемый пакет", () => {
   const first = collectImplementationTask(run, { taskId: "a", taskNumber: "1.1", commit });
   const second = collectImplementationTask(first, { taskId: "b", taskNumber: "1.2", commit: "c".repeat(40) });
   assert.equal(second.batch.kind, "collecting");
   assert.deepEqual(second.batch.tasks.map(({ taskNumber }) => taskNumber), ["1.1", "1.2"]);
   assert.equal(second.batch.baseCommit, base);
   assert.equal(second.batch.headCommit, "c".repeat(40));
+  assert.throws(() => collectImplementationTask(first, { taskId: "b", taskNumber: "1.2", commit }), /повторяющийся commit/u);
 });
 
-test("run-state отклоняет ветки другого change и повторный commit", () => {
-  assert.throws(() => implementationRunSchema.parse({ ...run, implementationBranch: "implementation/other/phase-1/run-1" }));
-  const first = collectImplementationTask(run, { taskId: "a", taskNumber: "1.1", commit });
-  assert.throws(
-    () => collectImplementationTask(first, { taskId: "b", taskNumber: "1.2", commit }),
-    /повторяющийся commit/u,
-  );
-});
-
-test("run-state не представляет reviewed без PR и Ready с непустым пакетом", () => {
+test("run-state связывает review с корневым PR и сохраняет baseline нового пакета", () => {
   const task = { taskId: "a", taskNumber: "1.1", commit };
-  assert.throws(() => implementationRunSchema.parse({
+  const reviewedBatch = {
+    kind: "reviewed", baseCommit: base, headCommit: commit,
+    reviewCommit: "c".repeat(40), tasks: [task],
+  };
+  assert.throws(() => implementationRunSchema.parse({ ...run, batch: reviewedBatch }), /корневому PR/u);
+  const reviewed = implementationRunSchema.parse({
     ...run,
-    batch: {
-      kind: "reviewed",
-      baseCommit: base,
-      headCommit: commit,
-      reviewCommit: "c".repeat(40),
-      tasks: [task],
-    },
-    lastDeliveryHead: commit,
-  }), /должен иметь единый implementation PR/u);
-  assert.throws(() => implementationRunSchema.parse({
-    ...run,
+    batch: reviewedBatch,
     publication: {
-      kind: "ready-pr",
-      number: 7,
+      kind: "reviewed", number: 7,
       url: "https://github.com/example/project/pull/7",
-      title: "Реализация",
+      title: "Изменение",
     },
-    batch: { kind: "collecting", baseCommit: base, headCommit: commit, tasks: [task] },
-    lastDeliveryHead: commit,
-  }), /Ready implementation PR требует пустой task-пакет/u);
+  });
+  const next = clearImplementationBatch(reviewed, "d".repeat(40));
+  assert.deepEqual(next.batch, { kind: "empty", baseCommit: "d".repeat(40) });
+  assert.equal(next.publication.number, 7);
+  assert.throws(() => implementationRunSchema.parse({ ...run, implementationBranch: "change/other" }));
 });
 
-test("managed summary сохраняет пользовательский текст и findings", () => {
-  const original = `Пользовательский пролог\n\n${IMPLEMENTATION_SUMMARY_START}\nстарое\n${IMPLEMENTATION_SUMMARY_END}\n\n<!-- paseo-openspec-orchestrator:findings:start -->\n## Результаты устранения замечаний\n\nзапись\n<!-- paseo-openspec-orchestrator:findings:end -->`;
-  const summary = renderImplementationSummary({ ...run, lastDeliveryHead: commit });
-  const updated = replaceImplementationSummary(original, summary);
-  assert.match(updated, /Пользовательский пролог/u);
-  assert.match(updated, /Результаты устранения замечаний/u);
-  assert.match(updated, new RegExp(commit, "u"));
-  assert.throws(
-    () => replaceImplementationSummary(`${IMPLEMENTATION_SUMMARY_START}\nбез конца`, summary),
-    /повреждённ/u,
-  );
+test("управляемая сводка корневого PR сохраняет пользовательский текст и findings", () => {
+  const findings = "<!-- paseo-openspec-orchestrator:findings:start -->\nРезультаты\n<!-- paseo-openspec-orchestrator:findings:end -->";
+  const first = mergeManagedSummary(`Текст пользователя\n\n${findings}`, "## Суть\nПервый вариант");
+  const second = mergeManagedSummary(first, "## Суть\nИсправленный вариант");
+  assert.match(second, /Текст пользователя/u);
+  assert.match(second, /Результаты/u);
+  assert.match(second, /Исправленный вариант/u);
+  assert.doesNotMatch(second, /Первый вариант/u);
+  assert.throws(() => mergeManagedSummary("<!-- paseo-openspec-orchestrator:summary:start -->", "новое"), /повреждена/u);
 });

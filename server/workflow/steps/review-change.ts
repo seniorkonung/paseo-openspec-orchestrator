@@ -45,6 +45,7 @@ async function reviewChangeStep(
         change.id,
         changeBranch,
         activeBranch,
+        context.state.planningRun?.phaseNumber ?? null,
         context.signal,
       );
       await context.checkpointState({

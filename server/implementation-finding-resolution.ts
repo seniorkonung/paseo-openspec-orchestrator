@@ -79,7 +79,7 @@ export function createImplementationFindingResolutionService(
     agent: {
       toolName: "complete_implementation_review_finding",
       toolDescription:
-        "Проверить устранение и Git-публикацию implementation finding, затем опубликовать её итог в review PR",
+        "Проверить устранение и Git-публикацию implementation finding, затем опубликовать её итог в корневом PR",
       title: (findingId) => `Устранение implementation finding: ${findingId}`,
       logLabel: "implementation review finding",
       completionLabel: "Implementation finding",

@@ -13,13 +13,7 @@ import {
   implementationRunSchema,
   type ImplementationRun,
 } from "./implementation-run-model.ts";
-import {
-  assertImplementationPullRequest,
-  renderImplementationSummary,
-  replaceImplementationSummary,
-} from "./implementation-publication.ts";
-import { readReviewPullRequest } from "./review-publication-gateway.ts";
-import { repositoryArgument } from "./review-publication-model.ts";
+import { createRootPullRequestService } from "./root-pull-request.ts";
 
 export interface ImplementationRunVerifier {
   assertCurrent(
@@ -44,6 +38,7 @@ export function createImplementationRunVerifier(
   options: ImplementationRunVerifierOptions = {},
 ): ImplementationRunVerifier {
   const command = options.command ?? runBoundedCommand;
+  const rootPullRequest = createRootPullRequestService({ command });
 
   return {
     async assertCurrent(workspaceDirectory, runInput, signal) {
@@ -56,32 +51,22 @@ export function createImplementationRunVerifier(
           head,
           localRoot,
           remoteRoot,
-          remoteImplementation,
           repository,
         ] = await Promise.all([
           readCurrentTaskBranch(command, gitRoot, signal),
           readTaskHeadCommit(command, gitRoot, signal),
           readLocalTaskBranchCommit(command, gitRoot, run.changeBranch, signal),
           readRemoteTaskBranchCommit(command, gitRoot, run.changeBranch, signal),
-          readRemoteTaskBranchCommit(command, gitRoot, run.implementationBranch, signal),
           resolveTaskRepository(command, gitRoot, signal),
         ]);
         if (branch !== run.implementationBranch) {
           throw new ImplementationRunVerificationError(
-            `Текущей должна быть implementation-ветка «${run.implementationBranch}»`,
+            `Текущей должна быть корневая ветка «${run.implementationBranch}»`,
           );
         }
-        if (
-          localRoot !== run.rootBaselineCommit ||
-          remoteRoot !== run.rootBaselineCommit
-        ) {
+        if (localRoot !== head || remoteRoot !== head) {
           throw new ImplementationRunVerificationError(
-            `Root baseline ветки «${run.changeBranch}» изменился`,
-          );
-        }
-        if (remoteImplementation !== head) {
-          throw new ImplementationRunVerificationError(
-            "Local и origin implementation-ветки должны указывать на один commit",
+            `Корневая ветка «${run.changeBranch}» расходится с текущим HEAD`,
           );
         }
         if (
@@ -102,19 +87,10 @@ export function createImplementationRunVerifier(
           "Implementation HEAD не продолжает root baseline",
           signal,
         );
-        if (run.publication.kind !== "unpublished") {
-          const pullRequest = await readReviewPullRequest(
-            command,
-            gitRoot,
-            repositoryArgument(run.repository),
-            run.publication.number,
-            signal,
-          );
-          assertImplementationPullRequest(pullRequest, run, head, true);
-          replaceImplementationSummary(
-            pullRequest.body,
-            renderImplementationSummary(run),
-          );
+        const pr = await rootPullRequest.inspect(gitRoot, run.changeId, run.changeBranch, null, signal);
+        if (pr.kind !== "open" || !pr.isDraft ||
+            (run.publication.kind === "reviewed" && pr.identity.number !== run.publication.number)) {
+          throw new ImplementationRunVerificationError("Корневой Draft PR изменился во время реализации");
         }
         return head;
       } catch (error) {

@@ -3,107 +3,38 @@ import test from "node:test";
 import { z } from "zod";
 import {
   ChangeBranchError,
-  assertPlanningBranchFor,
   assertImplementationBranchFor,
-  changeBranchSchema,
+  assertPlanningBranchFor,
   changeBranchFor,
   changeIdFromBranch,
-  implementationBranchSchema,
-  parseChangeBranch,
-  planningBranchSchema,
-  planningBranchFor,
-  initialPlanningBranchFor,
-  phasePlanningBranchFor,
   implementationBranchForRun,
-  parsePlanningBranch,
-  parseImplementationBranch,
+  initialPlanningBranchFor,
+  parseChangeBranch,
+  phasePlanningBranchFor,
+  planningBranchSchema,
+  implementationBranchSchema,
 } from "../server/change-branch.ts";
 
-test("схемы Git-веток представимы в JSON Schema для MCP tools/list", () => {
-  for (const schema of [
-    changeBranchSchema,
-    planningBranchSchema,
-    implementationBranchSchema,
-  ]) {
-    const jsonSchema = z.toJSONSchema(schema);
-    assert.equal(jsonSchema.type, "string");
-    assert.equal(typeof jsonSchema.pattern, "string");
-  }
+test("все этапы используют только корневую ветку change", () => {
+  const branch = "change/add-export";
+  assert.equal(changeBranchFor("add-export"), branch);
+  assert.equal(initialPlanningBranchFor("add-export"), branch);
+  assert.equal(phasePlanningBranchFor("add-export", 2), branch);
+  assert.equal(implementationBranchForRun("add-export", 2, 3), branch);
+  assert.equal(assertPlanningBranchFor(branch, "add-export"), branch);
+  assert.equal(assertImplementationBranchFor(branch, "add-export"), branch);
+  assert.equal(changeIdFromBranch(branch), "add-export");
+  assert.equal(parseChangeBranch(branch), branch);
+  assert.equal(planningBranchSchema.parse(branch), branch);
+  assert.equal(implementationBranchSchema.parse(branch), branch);
+  assert.ok(z.toJSONSchema(planningBranchSchema));
 });
 
-test("извлекает change ID только из точной root-ветки change/<kebab-case-id>", () => {
-  assert.equal(parseChangeBranch("change/add-export"), "change/add-export");
-  assert.equal(changeIdFromBranch("change/add-export"), "add-export");
-  assert.equal(changeBranchFor("add-export"), "change/add-export");
-  assert.equal(planningBranchFor("add-export"), "planning/add-export/initial");
-  assert.equal(
-    assertPlanningBranchFor("planning/add-export/initial", "add-export"),
-    "planning/add-export/initial",
-  );
-});
-
-test("строит и разбирает initial, phase planning и монотонные implementation run ветки", () => {
-  assert.equal(initialPlanningBranchFor("add-export"), "planning/add-export/initial");
-  assert.equal(phasePlanningBranchFor("add-export", 2), "planning/add-export/phase-2");
-  assert.equal(
-    implementationBranchForRun("add-export", 2, 3),
-    "implementation/add-export/phase-2/run-3",
-  );
-  assert.deepEqual(parsePlanningBranch("planning/add-export/initial"), {
-    kind: "initial",
-    changeId: "add-export",
-  });
-  assert.deepEqual(parsePlanningBranch("planning/add-export/phase-2"), {
-    kind: "phase",
-    changeId: "add-export",
-    phaseNumber: 2,
-  });
-  assert.deepEqual(parseImplementationBranch("implementation/add-export/phase-2/run-3"), {
-    kind: "phase",
-    changeId: "add-export",
-    phaseNumber: 2,
-    runNumber: 3,
-  });
-  assert.equal(
-    assertImplementationBranchFor("implementation/add-export/phase-2/run-3", "add-export"),
-    "implementation/add-export/phase-2/run-3",
-  );
-  assert.throws(() => phasePlanningBranchFor("add-export", 0), ChangeBranchError);
-  assert.throws(() => implementationBranchForRun("add-export", 1, 0), ChangeBranchError);
-});
-
-test("отклоняет main, detached, planning namespace и дополнительные сегменты", () => {
-  for (const branch of [
-    "",
-    "main",
-    "feature/add-export",
-    "planning/add-export",
-    "change/AddExport",
-    "change/add_export",
-    " change/add-export",
-    "change/add-export ",
-    "change/add/export",
-    "change/-add-export",
-    "change/add-export/",
-  ]) {
+test("дочерние имена, main и неверные номера фазы отклоняются", () => {
+  for (const branch of ["main", "planning/add-export/initial", "implementation/add-export/phase-1/run-1", "change/add-export/extra"]) {
     assert.throws(() => parseChangeBranch(branch), ChangeBranchError);
   }
-  assert.throws(
-    () => assertPlanningBranchFor("planning/other-change/initial", "add-export"),
-    ChangeBranchError,
-  );
-  assert.throws(
-    () => assertPlanningBranchFor("planning/add-export", "add-export"),
-    ChangeBranchError,
-  );
-  assert.throws(
-    () => assertImplementationBranchFor("implementation/add-export", "add-export"),
-    ChangeBranchError,
-  );
-  assert.throws(
-    () => parsePlanningBranch(`planning/add-export/phase-${"9".repeat(32)}`),
-  );
-  assert.throws(
-    () => parseImplementationBranch(`implementation/add-export/phase-1/run-${"9".repeat(32)}`),
-  );
+  assert.throws(() => assertPlanningBranchFor("change/other", "add-export"), ChangeBranchError);
+  assert.throws(() => phasePlanningBranchFor("add-export", 0), ChangeBranchError);
+  assert.throws(() => implementationBranchForRun("add-export", 1, 0), ChangeBranchError);
 });

@@ -38,9 +38,10 @@ import {
   readImplementationReviewContext,
   type ImplementationReviewContext,
 } from "./implementation-review-context.ts";
-import {
-  reconcileDraftImplementationPullRequest,
-} from "./implementation-publication.ts";
+import { deliverRootCommit } from "./root-branch-delivery.ts";
+import { createRootPullRequestService } from "./root-pull-request.ts";
+import { readReviewPullRequest } from "./review-publication-gateway.ts";
+import { repositoryArgument } from "./review-publication-model.ts";
 import { createManagedAgentSession } from "./managed-agent-session.ts";
 import { McpToolError, OrchestratorMcpToolHost, defineMcpTool } from "./orchestrator-mcp-tool-host.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
@@ -129,6 +130,7 @@ export function createImplementationReviewService(
   options: ImplementationReviewServiceOptions,
 ): ImplementationReviewService {
   const command = options.command ?? runBoundedCommand;
+  const rootPullRequest = createRootPullRequestService({ command });
   const updateNotificationLabel = options.updateNotificationLabel ?? updateAgentNotificationLabel;
   const mcpHost = options.mcpHost ?? OrchestratorMcpToolHost;
   const agentDrainTimeoutMs = options.agentDrainTimeoutMs ?? DEFAULT_AGENT_DRAIN_TIMEOUT_MS;
@@ -222,7 +224,7 @@ export function createImplementationReviewService(
       const scope = await agentSession.openScope(() => host.expose({
         complete_implementation_review: defineMcpTool({
           description:
-            "Проверить точный implementation-диапазон, review-коммит, push и единый Draft PR",
+            "Проверить точный implementation-диапазон и опубликовать review-коммит в корневом Draft PR",
           inputSchema: z.object({}).strict(),
           outputSchema,
           execute: (_input, toolContext) => agentSession.runExclusive(async () => {
@@ -238,19 +240,37 @@ export function createImplementationReviewService(
                   session,
                   combined.signal,
                 );
-                const pullRequest = await reconcileDraftImplementationPullRequest(
+                await deliverRootCommit(
+                  context.gitRoot,
+                  session.changeId,
+                  session.reviewedHead,
+                  local.reviewCommit,
+                  combined.signal,
+                  command,
+                );
+                const pullRequest = await rootPullRequest.inspect(
+                  context.gitRoot,
+                  session.changeId,
+                  session.changeBranch,
+                  null,
+                  combined.signal,
+                );
+                if (pullRequest.kind !== "open" || !pullRequest.isDraft) {
+                  throw new ImplementationReviewError("Корневой PR должен оставаться Draft во время review");
+                }
+                const fullPullRequest = await readReviewPullRequest(
                   command,
                   context.gitRoot,
-                  { ...run, lastDeliveryHead: session.reviewedHead },
-                  local.reviewCommit,
+                  repositoryArgument(run.repository),
+                  pullRequest.identity.number,
                   combined.signal,
                 );
                 verified = {
                   ...local,
                   pullRequest: {
-                    number: pullRequest.number,
-                    url: pullRequest.url,
-                    title: pullRequest.title,
+                    number: pullRequest.identity.number,
+                    url: pullRequest.identity.url,
+                    title: fullPullRequest.title,
                   },
                 };
               } catch (error) {
@@ -349,7 +369,7 @@ export function implementationReviewPrompt(input: {
     : `Invoke \`openspec-review-implementation\` for the exact immutable range \`${session.baseCommit}..${session.reviewedHead}\` and change \`${session.changeId}\`. Review every listed task commit and map every task to at least one review unit.`;
   const delegationInstruction = input.alreadyCommitted
     ? ""
-    : `You may spawn review subagents to inspect the exact immutable range \`${session.baseCommit}..${session.reviewedHead}\`. Give them the same stage boundaries and target commits from the workflow data. They may only inspect and report findings. Only you may write the report, create the review commit, push, and call \`complete_implementation_review\`.`;
+    : `You may spawn review subagents to inspect the exact immutable range \`${session.baseCommit}..${session.reviewedHead}\`. Give them the same stage boundaries and target commits from the workflow data. They may only inspect and report findings. Only you may write the report, create the review commit, and call \`complete_implementation_review\`.`;
   const commitInstruction = input.alreadyCommitted
     ? ""
     : `When the report is complete and format-valid, stage only the report and create exactly one commit after the reviewed head with subject \`${subject}\`.`;
@@ -379,7 +399,7 @@ export function implementationReviewPrompt(input: {
       delegationInstruction,
       `The report needs complete coverage and the exact Base commit, Reviewed head, and ordered Target commits from the workflow data. Modify only \`${input.reviewRepositoryPath}\`: never fix findings or implementation and never change task state.`,
       commitInstruction,
-      `Push \`${session.implementationBranch}\` to origin.`,
+      "Do not push or create a pull request. The orchestrator publishes the verified review commit to the root branch.",
     ],
     completion: completionInstruction({
       tool: "complete_implementation_review",
@@ -405,12 +425,12 @@ async function inspectExistingReviewCommit(
     );
     if (remoteHead !== session.reviewedHead) {
       throw new ImplementationReviewError(
-        "Origin implementation-ветки не совпадает с reviewed head",
+        "Origin корневой ветки не совпадает с reviewed head",
       );
     }
     return false;
   }
-  await verifyCompletedReview(command, context, session, signal, false);
+  await verifyCompletedReview(command, context, session, signal);
   return true;
 }
 
@@ -419,7 +439,6 @@ async function verifyCompletedReview(
   context: ImplementationReviewContext,
   session: PendingImplementationReviewSession,
   signal: AbortSignal,
-  requireRemote = true,
 ): Promise<Omit<CompletedImplementationReview, "pullRequest">> {
   await assertSessionRepositoryState(command, context.gitRoot, session, signal);
   await assertCleanTaskWorktree(command, context.gitRoot, signal);
@@ -473,14 +492,9 @@ async function verifyCompletedReview(
     session.implementationBranch,
     signal,
   );
-  if (
-    (requireRemote && remoteHead !== head) ||
-    (!requireRemote && remoteHead !== session.reviewedHead && remoteHead !== head)
-  ) {
+  if (remoteHead !== session.reviewedHead && remoteHead !== head) {
     throw new ImplementationReviewError(
-      requireRemote
-        ? "Origin не содержит implementation review commit"
-        : "Origin implementation-ветки содержит неожиданный commit",
+      "Origin корневой ветки содержит неожиданный commit",
     );
   }
   return {
@@ -524,7 +538,7 @@ async function assertImplementationState(
   }
   if (remoteHead !== expectedHead) {
     throw new ImplementationReviewError(
-      "Origin implementation-ветки не совпадает с reviewed head пакета",
+      "Origin корневой ветки не совпадает с reviewed head пакета",
     );
   }
 }
@@ -544,11 +558,12 @@ async function assertSessionRepositoryState(
   ]);
   if (branch !== session.implementationBranch) {
     throw new ImplementationReviewError(
-      `Текущей должна быть implementation-ветка «${session.implementationBranch}»`,
+      `Текущей должна быть корневая ветка «${session.implementationBranch}»`,
     );
   }
-  if (localRoot !== session.rootBaselineCommit || remoteRoot !== session.rootBaselineCommit) {
-    throw new ImplementationReviewError("Root baseline изменился во время implementation review");
+  if (localRoot !== await readTaskHeadCommit(command, gitRoot, signal) ||
+      (remoteRoot !== session.reviewedHead && remoteRoot !== localRoot)) {
+    throw new ImplementationReviewError("Корневая ветка изменилась во время implementation review");
   }
   if (
     repository.host !== session.repository.host ||

@@ -9,10 +9,8 @@ import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import {
   changeBranchFor,
   changeBranchSchema,
-  assertImplementationBranchFor,
   implementationBranchSchema,
   type ImplementationBranch,
-  parseImplementationBranch,
 } from "./change-branch.ts";
 
 export const TASK_REMOTE = "origin";
@@ -134,15 +132,7 @@ export const pendingTaskExecutionSessionSchema = z
         message: "Корневая ветка task-сессии не соответствует change",
       });
     }
-    try {
-      assertImplementationBranchFor(session.implementationBranch, session.changeId);
-      if (
-        parseImplementationBranch(session.implementationBranch).phaseNumber !==
-          session.phaseNumber
-      ) {
-        throw new Error("Неверная фаза");
-      }
-    } catch {
+    if (session.implementationBranch !== session.changeBranch) {
       context.addIssue({
         code: "custom",
         path: ["implementationBranch"],

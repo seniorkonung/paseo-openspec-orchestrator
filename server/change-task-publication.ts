@@ -5,7 +5,6 @@ import {
   assertTaskCommitDescendsFrom as assertDescendsFrom,
   readCurrentTaskBranch as readCurrentBranch,
   readLocalTaskBranchCommit as readLocalBranchCommit,
-  readOptionalRemoteTaskBranchCommit as readOptionalRemoteCommit,
   readRemoteTaskBranchCommit as readRemoteCommit,
   readTaskChangedPaths as readChangedPaths,
   readTaskCommitCount as readCommitCount,
@@ -14,6 +13,7 @@ import {
   readTaskHeadCommit as readHeadCommit,
   resolveTaskRepository as resolveRepository,
 } from "./change-task-gateway.ts";
+import { deliverRootCommit } from "./root-branch-delivery.ts";
 import {
   ChangeTaskExecutionError,
   applyInstructionsSchema,
@@ -66,7 +66,7 @@ export async function planChangeTaskExecution(
   ]);
   if (currentBranch !== run.implementationBranch) {
     throw new ChangeTaskExecutionError(
-      `Текущей должна быть implementation-ветка «${run.implementationBranch}»`,
+      `Текущей должна быть корневая ветка «${run.implementationBranch}»`,
     );
   }
   const expectedHead = run.batch.kind === "empty"
@@ -186,6 +186,14 @@ export async function verifyCompletedTask(
     instructions,
     signal,
   );
+  await deliverRootCommit(
+    gitRoot,
+    session.changeId,
+    session.baselineCommit,
+    head,
+    signal,
+    command,
+  );
   const remoteHead = await readRemoteCommit(
     command,
     gitRoot,
@@ -194,7 +202,7 @@ export async function verifyCompletedTask(
   );
   if (remoteHead !== head) {
     throw new ChangeTaskExecutionError(
-      `Git remote origin не содержит текущий HEAD implementation-ветки «${session.implementationBranch}»`,
+      `Git remote origin не содержит текущий HEAD корневой ветки «${session.implementationBranch}»`,
     );
   }
   return {
@@ -344,7 +352,7 @@ async function verifyLocalTaskCommit(
   const currentBranch = await readCurrentBranch(command, gitRoot, signal);
   if (currentBranch !== session.implementationBranch) {
     throw new ChangeTaskExecutionError(
-      `Текущей должна быть implementation-ветка «${session.implementationBranch}»`,
+      `Текущей должна быть корневая ветка «${session.implementationBranch}»`,
     );
   }
   const head = await readHeadCommit(command, gitRoot, signal);
@@ -415,14 +423,13 @@ async function assertImplementationRunState(
       "Git remote origin больше не соответствует implementation-run",
     );
   }
-  const [localRoot, remoteRoot, remoteImplementation] = await Promise.all([
+  const [localRoot, remoteRoot] = await Promise.all([
     readLocalBranchCommit(command, gitRoot, run.changeBranch, signal),
     readRemoteCommit(command, gitRoot, run.changeBranch, signal),
-    readOptionalRemoteCommit(command, gitRoot, run.implementationBranch, signal),
   ]);
-  if (localRoot !== run.rootBaselineCommit || remoteRoot !== run.rootBaselineCommit) {
+  if (localRoot !== implementationHead || remoteRoot !== implementationHead) {
     throw new ChangeTaskExecutionError(
-      `Корневая ветка «${run.changeBranch}» изменилась после начала implementation-run`,
+      `Корневая ветка «${run.changeBranch}» расходится с сохранённым implementation HEAD`,
     );
   }
   await assertDescendsFrom(
@@ -433,11 +440,6 @@ async function assertImplementationRunState(
     "Implementation-ветка больше не продолжает root baseline",
     signal,
   );
-  if (remoteImplementation !== null && remoteImplementation !== implementationHead) {
-    throw new ChangeTaskExecutionError(
-      `Local и origin/${run.implementationBranch} расходятся перед новой задачей`,
-    );
-  }
 }
 
 async function assertTaskSessionState(
@@ -449,7 +451,7 @@ async function assertTaskSessionState(
   const currentBranch = await readCurrentBranch(command, gitRoot, signal);
   if (currentBranch !== session.implementationBranch) {
     throw new ChangeTaskExecutionError(
-      `Для восстановления задачи требуется implementation-ветка «${session.implementationBranch}»`,
+      `Для восстановления задачи требуется корневая ветка «${session.implementationBranch}»`,
     );
   }
   const repository = await resolveRepository(command, gitRoot, signal);
@@ -462,13 +464,13 @@ async function assertTaskSessionState(
       "Git remote origin больше не соответствует сохранённому репозиторию",
     );
   }
-  const [localRoot, remoteRoot, head, remoteImplementation] = await Promise.all([
+  const [localRoot, remoteRoot, head] = await Promise.all([
     readLocalBranchCommit(command, gitRoot, session.changeBranch, signal),
     readRemoteCommit(command, gitRoot, session.changeBranch, signal),
     readHeadCommit(command, gitRoot, signal),
-    readOptionalRemoteCommit(command, gitRoot, session.implementationBranch, signal),
   ]);
-  if (localRoot !== session.rootBaselineCommit || remoteRoot !== session.rootBaselineCommit) {
+  if (localRoot !== head ||
+      (remoteRoot !== session.baselineCommit && remoteRoot !== head)) {
     throw new ChangeTaskExecutionError(
       `Корневая ветка «${session.changeBranch}» изменилась после начала task-сессии`,
     );
@@ -481,13 +483,4 @@ async function assertTaskSessionState(
     "Implementation-ветка больше не продолжает baseline task-сессии",
     signal,
   );
-  if (
-    remoteImplementation !== null &&
-    remoteImplementation !== session.baselineCommit &&
-    remoteImplementation !== head
-  ) {
-    throw new ChangeTaskExecutionError(
-      `Origin/${session.implementationBranch} содержит неожиданный commit`,
-    );
-  }
 }

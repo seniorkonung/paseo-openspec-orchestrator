@@ -11,7 +11,7 @@ import { createInitialWorkflowState } from "../server/workflow/types.ts";
 
 const changeId = "implementation-findings";
 const changeBranch = `change/${changeId}`;
-const implementationBranch = `implementation/${changeId}/phase-1/run-1`;
+const implementationBranch = changeBranch;
 const hashes = Object.fromEntries(
   "abc".split("").map((key) => [key, key.repeat(40)]),
 );
@@ -57,9 +57,9 @@ const implementationRun = {
     url: "https://github.com/example/project",
   },
   publication: {
-    kind: "draft-pr",
-    number: 51,
-    url: "https://github.com/example/project/pull/51",
+    kind: "reviewed",
+    number: 41,
+    url: "https://github.com/example/project/pull/41",
     title: "Implementation",
   },
   batch: {
@@ -69,8 +69,6 @@ const implementationRun = {
     reviewCommit: hashes.c,
     tasks: [{ taskId: "task-1.1", taskNumber: "1.1", commit: hashes.b }],
   },
-  lastDeliveryHead: hashes.b,
-  processedFeedbackFingerprints: [],
 };
 
 async function runFindingTransition(mode) {
@@ -106,8 +104,8 @@ async function runFindingTransition(mode) {
           commit: hashes.c,
           remainingFindingIds: [],
           pullRequest: {
-            number: 51,
-            url: "https://github.com/example/project/pull/51",
+            number: 41,
+            url: "https://github.com/example/project/pull/41",
           },
         };
       },

@@ -62,21 +62,21 @@ async function executeChangeTasksStep(
             summary: `Пакет из ${implementationRun.batch.tasks.length} задач готов к implementation review`,
           };
         }
-        if (implementationRun.lastDeliveryHead === null) {
+        if (implementationRun.publication.kind === "unreviewed") {
           return {
             kind: "halt",
-            summary: "После planning merge нет implementation-коммитов",
+            summary: "Для фазы нет implementation-коммитов",
             message:
-              "OpenSpec не содержит задач для выполнения; пустой implementation pull request не создаётся",
+              "OpenSpec не содержит задач для выполнения; проверьте план фазы",
           };
         }
         return {
           kind: "continue",
-          next: "inspect-implementation-feedback",
-          state: { pendingTaskExecutionSession: null },
+          next: "inspect-phase-work",
+          state: { pendingTaskExecutionSession: null, implementationRun: null },
           summary: plan.reason === "phase-complete"
-            ? `Все задачи Phase ${implementationRun.phaseNumber} выполнены; проверяю PR feedback`
-            : `Все OpenSpec-задачи change ${change.id} выполнены; проверяю PR feedback`,
+            ? `Все задачи Phase ${implementationRun.phaseNumber} выполнены`
+            : `Все OpenSpec-задачи change ${change.id} выполнены`,
         };
       }
       session = plan.session;

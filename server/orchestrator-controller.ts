@@ -15,11 +15,8 @@ import { OpenSpecOrchestratorEngine } from "./openspec-orchestrator-engine.ts";
 import { inspectMiseToolchain } from "./mise-toolchain.ts";
 import { verifyOpenSpecChange } from "./openspec-change.ts";
 import { createPlanningBranchService } from "./planning-branch.ts";
-import { createPlanningMergeService } from "./planning-merge.ts";
 import { createImplementationBranchService } from "./implementation-branch.ts";
 import { createImplementationReviewService } from "./implementation-review.ts";
-import { createImplementationPullRequestService } from "./implementation-pull-request.ts";
-import { createPrFeedbackReviewService } from "./pr-feedback-review.ts";
 import { createPhaseWorkService } from "./phase-work.ts";
 import { createPhaseTaskPlanningService } from "./phase-task-planning.ts";
 import { createRootPullRequestService } from "./root-pull-request.ts";
@@ -165,11 +162,8 @@ export class OrchestratorController {
       miseToolchain: inspectMiseToolchain,
       changeInitialization: createChangeInitializationService(),
       planningBranch: createPlanningBranchService(),
-      planningMerge: createPlanningMergeService(),
       implementationBranch: createImplementationBranchService(),
       implementationReview: createImplementationReviewService({ createAgent }),
-      implementationPullRequest: createImplementationPullRequestService(),
-      prFeedbackReview: createPrFeedbackReviewService({ createAgent }),
       implementationRunVerification: createImplementationRunVerifier(),
       verifyChange: verifyOpenSpecChange,
       changeArtifacts: createChangeArtifactCreationService({ createAgent }),

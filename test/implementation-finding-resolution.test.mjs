@@ -11,15 +11,11 @@ import {
   implementationFindingResolutionCommitSubject,
   implementationFindingResolutionPrompt,
 } from "../server/implementation-finding-resolution.ts";
-import {
-  implementationPullRequestTitle,
-  renderImplementationSummary,
-} from "../server/implementation-publication.ts";
 
 const execFileAsync = promisify(execFile);
 const changeId = "resolve-implementation-findings";
 const parentBranch = `change/${changeId}`;
-const branch = `implementation/${changeId}/phase-1/run-1`;
+const branch = parentBranch;
 const reviewedBase = "a".repeat(40);
 const reviewedHead = "b".repeat(40);
 const publishInput = {
@@ -172,25 +168,11 @@ async function createRepository(context, findingIds = ["F1", "F3"], { report = t
       state: "OPEN",
       isDraft: true,
       isCrossRepository: false,
-      baseRefName: parentBranch,
+      baseRefName: "main",
       headRefName: branch,
       headRefOid: baselineCommit,
-      title: implementationPullRequestTitle(changeId),
-      body: renderImplementationSummary({
-        changeId,
-        changeBranch: parentBranch,
-        implementationBranch: branch,
-        rootBaselineCommit: reviewedBase,
-        repository: {
-          host: "github.com",
-          nameWithOwner: "example/project",
-          url: "https://github.com/example/project",
-        },
-        publication: { kind: "unpublished" },
-        batch: { kind: "empty", baseCommit: reviewedBase },
-        lastDeliveryHead: reviewedHead,
-        processedFeedbackFingerprints: [],
-      }),
+      title: "Корневой change PR",
+      body: "Описание change",
     },
   };
 }
@@ -309,7 +291,7 @@ test("plan выбирает первую implementation finding, а отсутс
   });
 });
 
-test("High завершает implementation finding только после commit и push", async (context) => {
+test("High завершает implementation finding, а оркестратор публикует коммит", async (context) => {
   const fixture = await createRepository(context);
   const { command, calls } = createCommand(fixture);
   const labels = [];
@@ -388,14 +370,6 @@ test("High завершает implementation finding только после com
   await execFileAsync("git", ["commit", "-m", implementationFindingResolutionCommitSubject("F1")], {
     cwd: fixture.workspace,
   });
-  result = await client.callTool({
-    name: "complete_implementation_review_finding",
-    arguments: publishInput,
-  });
-  assert.equal(result.isError, true);
-  assert.match(firstText(result), /origin не содержит текущий HEAD/);
-
-  await execFileAsync("git", ["push", "origin", branch], { cwd: fixture.workspace });
   result = await client.callTool({
     name: "complete_implementation_review_finding",
     arguments: publishInput,
@@ -608,7 +582,7 @@ test("ошибка checkpoint восстанавливает ntfy и recovery н
   ]);
 });
 
-test("prompt требует одно решение, сохраняет задачи и завершает commit+push без новой паузы", () => {
+test("prompt требует одно решение, сохраняет задачи и оставляет push оркестратору", () => {
   const prompt = implementationFindingResolutionPrompt({
     changeId,
     findingId: "F42",
@@ -624,10 +598,7 @@ test("prompt требует одно решение, сохраняет зада
   assert.match(prompt, /never reopen a completed task/);
   assert.match(prompt, /append new unfinished tasks/);
   assert.doesNotMatch(prompt, /second explicit permission|third permission/);
-  assert.match(
-    prompt,
-    /git push --set-upstream origin implementation\/resolve-implementation-findings/,
-  );
+  assert.match(prompt, /Do not push/u);
   assert.match(prompt, /complete_implementation_review_finding/);
   assert.match(prompt, /"mode":"publish"/);
   assert.doesNotMatch(prompt, /gh pr/);

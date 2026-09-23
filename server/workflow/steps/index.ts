@@ -11,11 +11,8 @@ import type { ImplementationFindingResolutionService } from "../../implementatio
 import type { MiseToolchainProbe } from "../../mise-toolchain.ts";
 import type { OpenSpecChangeVerifier } from "../../openspec-change.ts";
 import type { PlanningBranchService } from "../../planning-branch.ts";
-import type { PlanningMergeService } from "../../planning-merge.ts";
 import type { ImplementationBranchService } from "../../implementation-branch.ts";
 import type { ImplementationReviewService } from "../../implementation-review.ts";
-import type { ImplementationPullRequestService } from "../../implementation-pull-request.ts";
-import type { PrFeedbackReviewService } from "../../pr-feedback-review.ts";
 import type { ImplementationRunVerifier } from "../../implementation-run-verification.ts";
 import type { PhaseWorkService } from "../../phase-work.ts";
 import type { PhaseTaskPlanningService } from "../../phase-task-planning.ts";
@@ -34,12 +31,8 @@ import { createReviewChangeStep } from "./review-change.ts";
 import { createInitializeChangeStep } from "./initialize-change.ts";
 import { createPreparePlanningBranchStep } from "./prepare-planning-branch.ts";
 import { createInspectChangeStep } from "./inspect-change.ts";
-import { createAwaitPlanningMergeStep } from "./await-planning-merge.ts";
 import { createPrepareImplementationBranchStep } from "./prepare-implementation-branch.ts";
 import { createReviewImplementationStep } from "./review-implementation.ts";
-import { createInspectImplementationFeedbackStep } from "./inspect-implementation-feedback.ts";
-import { createReviewPrFeedbackStep } from "./review-pr-feedback.ts";
-import { createAwaitImplementationMergeStep } from "./await-implementation-merge.ts";
 import { createInspectPhaseWorkStep } from "./inspect-phase-work.ts";
 import { createPreparePhasePlanningBranchStep } from "./prepare-phase-planning-branch.ts";
 import { createPlanPhaseTasksStep } from "./plan-phase-tasks.ts";
@@ -60,11 +53,8 @@ export interface OpenSpecWorkflowDependencies {
   readonly miseToolchain: MiseToolchainProbe;
   readonly changeInitialization: ChangeInitializationService;
   readonly planningBranch: PlanningBranchService;
-  readonly planningMerge: PlanningMergeService;
   readonly implementationBranch: ImplementationBranchService;
   readonly implementationReview: ImplementationReviewService;
-  readonly implementationPullRequest: ImplementationPullRequestService;
-  readonly prFeedbackReview: PrFeedbackReviewService;
   readonly implementationRunVerification: ImplementationRunVerifier;
   readonly verifyChange: OpenSpecChangeVerifier;
   readonly changeArtifacts: ChangeArtifactCreationService;
@@ -141,11 +131,6 @@ export function createOpenSpecWorkflow(
         findingResolution: dependencies.changeFindingResolution,
         implementationRunVerification: dependencies.implementationRunVerification,
       }),
-      createAwaitPlanningMergeStep({
-        workspaceDirectory: dependencies.workspaceDirectory,
-        planningMerge: dependencies.planningMerge,
-        verifyChange: dependencies.verifyChange,
-      }),
       createInspectPhaseWorkStep({
         workspaceDirectory: dependencies.workspaceDirectory,
         phaseWork: dependencies.phaseWork,
@@ -184,22 +169,6 @@ export function createOpenSpecWorkflow(
         findingResolution: dependencies.implementationFindingResolution,
         implementationRunVerification: dependencies.implementationRunVerification,
         phaseWork: dependencies.phaseWork,
-      }),
-      createInspectImplementationFeedbackStep({
-        workspaceDirectory: dependencies.workspaceDirectory,
-        pullRequest: dependencies.implementationPullRequest,
-        feedbackReview: dependencies.prFeedbackReview,
-      }),
-      createReviewPrFeedbackStep({
-        workspaceDirectory: dependencies.workspaceDirectory,
-        readAgentProfiles: dependencies.readAgentProfiles,
-        feedbackReview: dependencies.prFeedbackReview,
-      }),
-      createAwaitImplementationMergeStep({
-        workspaceDirectory: dependencies.workspaceDirectory,
-        pullRequest: dependencies.implementationPullRequest,
-        feedbackReview: dependencies.prFeedbackReview,
-        verifyChange: dependencies.verifyChange,
       }),
     ]),
   };

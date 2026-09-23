@@ -25,7 +25,7 @@ async function preparePhasePlanningBranchStep(
   ) {
     return {
       kind: "halt",
-      summary: "Недостаточно данных для phase planning-ветки",
+      summary: "Недостаточно данных для phase planning",
       message: "Целевая фаза или её сохранённый progress отсутствуют",
     };
   }
@@ -66,13 +66,13 @@ async function preparePhasePlanningBranchStep(
         phaseTarget: null,
         pendingPlanningBranchSession: null,
       },
-      summary: `Создана planning-ветка Phase ${phaseTarget.phaseNumber}: ${planningBranch}`,
+      summary: `Phase ${phaseTarget.phaseNumber} планируется в ${planningBranch}`,
     };
   } catch (error) {
     if (context.signal.aborted) throw error;
     const summary = error instanceof PlanningBranchError
       ? error.message
-      : "Не удалось подготовить phase planning-ветку";
+      : "Не удалось подготовить phase planning";
     return { kind: "halt", summary, message: `${summary}; исправьте состояние и нажмите «Повторить»` };
   }
 }
@@ -82,7 +82,7 @@ export function createPreparePhasePlanningBranchStep(
 ): WorkflowStepDefinition {
   return {
     id: "prepare-phase-planning-branch",
-    label: "Подготавливаю planning-ветку следующей фазы",
+    label: "Проверяю корневую ветку перед планированием фазы",
     run: (context) => preparePhasePlanningBranchStep(dependencies, context),
   };
 }

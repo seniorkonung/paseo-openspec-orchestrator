@@ -11,7 +11,7 @@ const reviewPath = "openspec/changes/delegated-review/implementation-review.md";
 const session = pendingImplementationReviewSessionSchema.parse({
   changeId: "delegated-review",
   changeBranch: "change/delegated-review",
-  implementationBranch: "implementation/delegated-review/phase-1/run-1",
+  implementationBranch: "change/delegated-review",
   rootBaselineCommit: baseCommit,
   baseCommit,
   reviewedHead,
@@ -39,7 +39,8 @@ test("ревью имплементации допускает субагент�
   assert.match(delegation, /You may spawn review subagents/u);
   assert.ok(delegation.includes(`${baseCommit}..${reviewedHead}`));
   assert.match(delegation, /They may only inspect and report findings/u);
-  assert.match(delegation, /Only you may write the report, create the review commit, push, and call `complete_implementation_review`/u);
+  assert.match(delegation, /Only you may write the report, create the review commit, and call `complete_implementation_review`/u);
+  assert.match(result, /Do not push or create a pull request/u);
   assert.match(result, /never create or archive workspaces or changes, and never invoke another workflow/u);
   assert.doesNotMatch(result, /never spawn or archive agents/u);
   assert.match(result, /never fix findings or implementation and never change task state/u);

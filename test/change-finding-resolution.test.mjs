@@ -20,7 +20,7 @@ import { publishReviewFindingOutcome } from "../server/review-finding-publicatio
 const execFileAsync = promisify(execFile);
 const changeId = "resolve-review-findings";
 const parentBranch = `change/${changeId}`;
-const branch = `planning/${changeId}/initial`;
+const branch = parentBranch;
 const publishInput = {
   mode: "publish",
   problem: "Артефакты не фиксировали обязательное поведение.",
@@ -135,9 +135,9 @@ async function createRepository(context, findingIds = ["F1", "F3"]) {
       number: 43,
       url: "https://github.com/example/project/pull/43",
       state: "OPEN",
-      isDraft: false,
+      isDraft: true,
       isCrossRepository: false,
-      baseRefName: parentBranch,
+      baseRefName: "main",
       headRefName: branch,
       headRefOid: baselineCommit,
       title: reviewPullRequestTitle(changeId),
@@ -258,7 +258,7 @@ test("plan выбирает первую finding в порядке review и з�
   assert.match(cleanPlan.headCommit, /^[0-9a-f]{40}$/u);
 });
 
-test("High ждёт scoped MCP и завершает finding только после commit и push", async (context) => {
+test("High ждёт scoped MCP, а оркестратор публикует проверенный finding-коммит", async (context) => {
   const fixture = await createRepository(context);
   const { command, calls } = createCommand(fixture);
   const created = [];
@@ -348,11 +348,6 @@ test("High ждёт scoped MCP и завершает finding только пос
   await execFileAsync("git", ["commit", "-m", findingResolutionCommitSubject("F1")], {
     cwd: fixture.workspace,
   });
-  result = await client.callTool({ name: "complete_review_finding", arguments: publishInput });
-  assert.equal(result.isError, true);
-  assert.match(firstText(result), /origin не содержит текущий HEAD/);
-
-  await execFileAsync("git", ["push", "origin", branch], { cwd: fixture.workspace });
   result = await client.callTool({ name: "complete_review_finding", arguments: publishInput });
   assert.equal(result.isError, undefined);
   await client.close();
@@ -623,7 +618,7 @@ test("полный restart подтверждает уже проверенну�
   );
 });
 
-test("prompt требует одно решение, сохраняет задачи и завершает commit+push без новой паузы", () => {
+test("prompt требует одно решение, сохраняет задачи и оставляет push оркестратору", () => {
   const prompt = changeFindingResolutionPrompt({
     changeId,
     findingId: "F42",
@@ -638,7 +633,7 @@ test("prompt требует одно решение, сохраняет зада
   assert.match(prompt, /never reopen a completed task/);
   assert.match(prompt, /append new unfinished tasks/);
   assert.doesNotMatch(prompt, /second explicit permission|third permission/);
-  assert.match(prompt, /git push --set-upstream origin planning\/resolve-review-findings/);
+  assert.match(prompt, /Do not push/u);
   assert.match(prompt, /complete_review_finding/);
   assert.match(prompt, /"mode":"publish"/);
   assert.doesNotMatch(prompt, /gh pr/);

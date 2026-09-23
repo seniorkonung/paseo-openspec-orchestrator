@@ -142,9 +142,10 @@ function commandFor(fixture) {
       };
     }
     if (executable === "gh" && args[0] === "pr" && args[1] === "list") {
+      const includeAll = args[args.indexOf("--state") + 1] === "all";
       return {
         stdout: JSON.stringify(
-          fixture.pullRequests.filter(({ state }) => state === "OPEN"),
+          fixture.pullRequests.filter(({ state }) => includeAll || state === "OPEN"),
         ),
         stderr: "",
       };
@@ -318,7 +319,7 @@ test("root PR fail-closed проверяет дубли и fork", async (context
     const service = createChangeInitializationService({ command: commandFor(fixture) });
     await assert.rejects(
       service.prepare(fixture.workspace, changeId, changeBranch),
-      /несколько открытых pull request/,
+      /несколько pull request/,
     );
   });
 
@@ -346,7 +347,7 @@ test("root PR fail-closed проверяет дубли и fork", async (context
 
 });
 
-test("закрытый root PR не переоткрывается и не мешает создать новый Draft PR", async (context) => {
+test("закрытый root PR не заменяется новым PR", async (context) => {
   const fixture = await repository(context, { existing: true });
   fixture.pullRequests = [{
     number: 8,
@@ -361,13 +362,9 @@ test("закрытый root PR не переоткрывается и не ме�
     body: "Закрытый PR",
   }];
   const service = createChangeInitializationService({ command: commandFor(fixture) });
-  const session = await service.prepare(fixture.workspace, changeId, changeBranch);
-  const initialized = await service.initialize(fixture.workspace, session);
-
-  assert.equal(initialized.pullRequest.number, 41);
+  await assert.rejects(service.prepare(fixture.workspace, changeId, changeBranch), /закрыт/u);
   assert.equal(fixture.pullRequests.length, 1);
-  assert.equal(fixture.pullRequests[0].number, 41);
-  assert.equal(fixture.pullRequests[0].isDraft, true);
+  assert.equal(fixture.pullRequests[0].number, 8);
 });
 
 test("fail-closed отклоняет некорректный JSON, чужие пути и изменения вне change", async (context) => {

@@ -7,6 +7,8 @@ import {
 } from "./agent-session-control.ts";
 import { runBoundedCommand, type BoundedCommandRunner } from "./bounded-command.ts";
 import { commitHashSchema } from "./change-artifact-model.ts";
+import { changeBranchFor } from "./change-branch.ts";
+import { deliverRootCommit } from "./root-branch-delivery.ts";
 import {
   assertActiveReviewPullRequest,
   findingCompletionInputSchema,
@@ -157,6 +159,9 @@ export function createReviewFindingResolutionService<
   return {
     async plan(workspaceDirectory, changeId, branch, signal) {
       const parsedBranch = parseFindingResolutionBranch(branch);
+      if (parsedBranch !== changeBranchFor(changeId)) {
+        throw new ReviewFindingResolutionError("Finding должен устраняться в корневой ветке change");
+      }
       const context = await contextReader.readContext(
         workspaceDirectory,
         changeId,
@@ -180,7 +185,7 @@ export function createReviewFindingResolutionService<
           throw new ReviewFindingResolutionError(error.message);
         }
         throw new ReviewFindingResolutionError(
-          "Не удалось проверить review pull request текущей ветки",
+          "Не удалось проверить корневой PR текущей ветки",
         );
       }
 
@@ -222,7 +227,7 @@ export function createReviewFindingResolutionService<
       const session = behavior.sessionSchema.parse(request.session);
       const changeId = parseChangeId(request.changeId);
       const branch = parseFindingResolutionBranch(request.branch);
-      if (session.changeId !== changeId || session.branch !== branch) {
+      if (session.changeId !== changeId || session.branch !== branch || branch !== changeBranchFor(changeId)) {
         throw new ReviewFindingResolutionError(
           "Сохранённая finding-сессия относится к другому change или Git-ветке",
         );
@@ -249,6 +254,16 @@ export function createReviewFindingResolutionService<
         contextReader.readReport,
         request.signal,
       );
+      if (existingLocalResolution) {
+        await deliverRootCommit(
+          context.gitRoot,
+          changeId,
+          session.baselineCommit,
+          existingLocalResolution.commit,
+          request.signal,
+          command,
+        );
+      }
       let publicationAlreadyCompleted: boolean;
       try {
         publicationAlreadyCompleted = (
@@ -273,7 +288,7 @@ export function createReviewFindingResolutionService<
           throw new ReviewFindingResolutionError(error.message);
         }
         throw new ReviewFindingResolutionError(
-          "Не удалось проверить публикацию finding в review pull request",
+          "Не удалось проверить публикацию finding в корневом PR",
         );
       }
       if (publicationAlreadyCompleted && !existingLocalResolution) {
@@ -378,7 +393,7 @@ export function createReviewFindingResolutionService<
                   code: errorCode(error),
                 });
                 throw new McpToolError(
-                  "Не удалось обновить review pull request результатом finding",
+                  "Не удалось обновить корневой PR результатом finding",
                 );
               }
 

@@ -113,7 +113,7 @@ test("повторная проверка после Ready обнаружива�
   assert.equal(draftCalls, 1);
 });
 
-test("Retry обнаруживает новую фазу без задач и направляет её в отдельный planning PR", async () => {
+test("Retry обнаруживает новую фазу без задач и направляет её на planning в корневой ветке", async () => {
   let draftCalls = 0;
   const nextProgress = {
     ...progress,

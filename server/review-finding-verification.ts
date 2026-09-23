@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { BoundedCommandRunner } from "./bounded-command.ts";
 import { commitHashSchema } from "./change-artifact-model.ts";
 import type { ReviewFindingOutcome } from "./review-finding-publication.ts";
+import { deliverRootCommit } from "./root-branch-delivery.ts";
 import {
   ReviewFindingResolutionError,
   findingResolutionBranchSchema,
@@ -61,6 +62,14 @@ export async function verifyCompletedResolution<
     behavior,
     readReport,
     signal,
+  );
+  await deliverRootCommit(
+    context.gitRoot,
+    context.changeId,
+    session.baselineCommit,
+    resolution.commit,
+    signal,
+    command,
   );
   await assertRemoteHead(
     command,

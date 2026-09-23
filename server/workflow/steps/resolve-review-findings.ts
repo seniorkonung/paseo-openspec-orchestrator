@@ -69,7 +69,7 @@ async function resolveReviewFindingsStep(
           kind: "continue",
           next: context.state.implementationRun || context.state.planningRun
             ? "resolve-implementation-review-findings"
-            : "await-planning-merge",
+            : "inspect-phase-work",
           state: { pendingFindingResolutionSession: null },
           summary: `В review нет нерешённых findings: ${plan.reviewPath}`,
         };
@@ -147,7 +147,7 @@ async function resolveReviewFindingsStep(
         kind: "continue",
         next: context.state.implementationRun || context.state.planningRun
           ? "resolve-implementation-review-findings"
-          : "await-planning-merge",
+          : "inspect-phase-work",
         state: { pendingFindingResolutionSession: null },
         summary: `Обработана последняя finding review ${completed.findingId}; обновлён PR #${completed.pullRequest.number}`,
       };

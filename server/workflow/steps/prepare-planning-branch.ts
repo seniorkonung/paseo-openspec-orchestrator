@@ -21,7 +21,7 @@ async function preparePlanningBranchStep(
   if (!change || !changeBranch || activeBranch !== changeBranch) {
     return {
       kind: "halt",
-      summary: "Недостаточно данных для planning-ветки",
+      summary: "Недостаточно данных для planning",
       message: "Change или его корневая ветка не сохранены; запустите workflow заново",
     };
   }
@@ -52,14 +52,14 @@ async function preparePlanningBranchStep(
         activeBranch: planningBranch,
         pendingPlanningBranchSession: null,
       },
-      summary: `Planning-ветка создана: ${planningBranch}`,
+      summary: `Planning продолжается в корневой ветке ${planningBranch}`,
     };
   } catch (error) {
     if (context.signal.aborted) throw error;
     const summary =
       error instanceof PlanningBranchError
         ? error.message
-        : "Не удалось подготовить planning-ветку";
+        : "Не удалось подготовить planning";
     return {
       kind: "halt",
       summary,
@@ -73,7 +73,7 @@ export function createPreparePlanningBranchStep(
 ): WorkflowStepDefinition {
   return {
     id: "prepare-planning-branch",
-    label: "Подготавливаю planning-ветку",
+    label: "Проверяю корневую ветку перед planning",
     run: (context) => preparePlanningBranchStep(dependencies, context),
   };
 }

@@ -186,7 +186,7 @@ export async function readTaskCommitCount(
   } catch (error) {
     if (signal.aborted) throw error;
     throw new ChangeTaskExecutionError(
-      "Не удалось проверить историю Git implementation-ветки",
+      "Не удалось проверить историю корневой Git-ветки",
     );
   }
 }

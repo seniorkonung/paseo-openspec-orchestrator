@@ -43,7 +43,7 @@ async function validatePhasePlanningStep(
     );
     await assertCleanTaskWorktree(command, gitRoot, context.signal);
     if (await readCurrentTaskBranch(command, gitRoot, context.signal) !== planningRun.planningBranch) {
-      throw new PhaseTaskPlanningError("Перед финальной проверкой должна быть активна planning-ветка фазы");
+      throw new PhaseTaskPlanningError("Перед финальной проверкой должна быть активна корневая ветка change");
     }
     const head = await readTaskHeadCommit(command, gitRoot, context.signal);
     await assertTaskCommitDescendsFrom(
@@ -81,8 +81,8 @@ async function validatePhasePlanningStep(
     assertPhasePlanningChangedPaths(changedPaths, allowedPaths);
     return {
       kind: "continue",
-      next: "await-planning-merge",
-      state: { phaseProgress: decision.progress },
+      next: "inspect-phase-work",
+      state: { phaseProgress: decision.progress, planningRun: null },
       summary: `Задачи Phase ${planningRun.phaseNumber} согласованы после review и resolver-циклов`,
     };
   } catch (error) {

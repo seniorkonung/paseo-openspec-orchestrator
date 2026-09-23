@@ -17,9 +17,12 @@ import { phaseTaskFingerprint } from "../server/phase-work.ts";
 const execFileAsync = promisify(execFile);
 const changeId = "selected-change";
 const changeBranch = `change/${changeId}`;
-const planningBranch = `planning/${changeId}/initial`;
-const implementationBranch = `implementation/${changeId}/phase-1/run-1`;
-const hashes = Object.fromEntries("abcdefgh".split("").map((key) => [key, key.repeat(40)]));
+const planningBranch = changeBranch;
+const implementationBranch = changeBranch;
+const hashes = Object.fromEntries([
+  ..."abcdef".split("").map((key) => [key, key.repeat(40)]),
+  ["g", "1".repeat(40)], ["h", "2".repeat(40)], ["i", "3".repeat(40)],
+]);
 const repository = {
   host: "github.com",
   nameWithOwner: "example/project",
@@ -70,13 +73,17 @@ function profiles() {
   }));
 }
 
-function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree } = {}) {
+function workflowHarness({ feedbackOnce = false, reviewFindings = 0, twoPhases = false, worktree } = {}) {
   const calls = [];
   let branchReads = 0;
   let planningInspections = 0;
   let taskPlans = 0;
+  const taskPlansByPhase = new Map();
   let feedbackInspections = 0;
   let phaseInspections = 0;
+  let resolvedReviewFindings = 0;
+  let rootReady = false;
+  let rootMerged = false;
   const feedbackItem = {
     source: "comment",
     nodeId: "IC_kwDOExample",
@@ -94,7 +101,7 @@ function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree
     readAgentProfiles: async () => profiles(),
     gitBranch: async () => ({
       kind: "non-main",
-      name: ++branchReads === 1 ? changeBranch : planningBranch,
+      name: changeBranch,
     }),
     gitWorktree: worktree ?? (async () => ({ kind: "clean" })),
     miseToolchain: async () => ({ kind: "available" }),
@@ -166,7 +173,8 @@ function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree
           changeId,
           parentBranch: changeBranch,
           reviewBranch: planningBranch,
-          parentBaselineCommit: hashes.a,
+          phaseNumber: null,
+          parentBaselineCommit: hashes.b,
           baselineCommit: hashes.b,
           repositoryHost: repository.host,
           repositoryNameWithOwner: repository.nameWithOwner,
@@ -180,20 +188,33 @@ function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree
           changeId,
           reviewPath: `openspec/changes/${changeId}/review.md`,
           branch: planningBranch,
-          pullRequest: { number: 43, url: "https://github.com/example/project/pull/43", title: "Review" },
+          pullRequest: { number: 41, url: "https://github.com/example/project/pull/41", title: "Review" },
         };
       },
     },
     changeFindingResolution: {
       async plan(_workspace, _change, branch) {
         calls.push(`review-findings:${branch}`);
+        if (resolvedReviewFindings < reviewFindings) {
+          return { kind: "finding-required", findingId: `F${resolvedReviewFindings + 1}`,
+            session: { changeId, branch, findingId: `F${resolvedReviewFindings + 1}`,
+              baselineCommit: hashes.c } };
+        }
         return {
           kind: "no-findings",
           reviewPath: `openspec/changes/${changeId}/review.md`,
           headCommit: branch === planningBranch ? hashes.c : hashes.f,
         };
       },
-      async run() { throw new Error("findings отсутствуют"); },
+      async run(request) {
+        calls.push("review-finding.resolve");
+        request.onAgentCreated("review-finding-agent");
+        resolvedReviewFindings += 1;
+        await request.onFindingResolved();
+        return { findingId: request.session.findingId, commit: hashes.c,
+          remainingFindingIds: resolvedReviewFindings < reviewFindings ? [`F${resolvedReviewFindings + 1}`] : [],
+          pullRequest: { number: 41, url: rootPullRequestIdentity.url } };
+      },
     },
     planningMerge: {
       async inspect() {
@@ -218,42 +239,48 @@ function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree
       async complete() { calls.push("planning.merge"); return changeBranch; },
     },
     implementationBranch: {
-      async prepare() {
+      async prepare(_workspace, _changeId, _branch, phaseNumber, runNumber) {
         calls.push("implementation.prepare");
-        return { changeId, changeBranch, implementationBranch, rootBaselineCommit: hashes.d, repository };
+        return { changeId, changeBranch, implementationBranch, phaseNumber, runNumber,
+          rootBaselineCommit: phaseNumber === 1 ? hashes.d : hashes.g, repository };
       },
-      async activate() {
+      async activate(_workspace, session) {
         calls.push("implementation.activate");
         return {
           changeId,
           changeBranch,
           implementationBranch,
-          rootBaselineCommit: hashes.d,
+          phaseNumber: session.phaseNumber,
+          runNumber: session.runNumber,
+          rootBaselineCommit: session.rootBaselineCommit,
           repository,
-          publication: { kind: "unpublished" },
-          batch: { kind: "empty", baseCommit: hashes.d },
-          lastDeliveryHead: null,
-          processedFeedbackFingerprints: [],
+          publication: { kind: "unreviewed" },
+          batch: { kind: "empty", baseCommit: session.rootBaselineCommit },
         };
       },
     },
     changeTaskExecution: {
-      async plan() {
+      async plan(_workspace, run) {
         taskPlans += 1;
         calls.push("tasks.plan");
-        if (taskPlans > 1) return { kind: "complete", schemaName: "spec-driven" };
+        const count = (taskPlansByPhase.get(run.phaseNumber) ?? 0) + 1;
+        taskPlansByPhase.set(run.phaseNumber, count);
+        if (count > 1) return { kind: "complete", schemaName: "spec-driven" };
+        const taskId = run.phaseNumber === 1 ? "task-a" : "task-b";
+        const taskNumber = run.phaseNumber === 1 ? "1.1" : "2.1";
         return {
           kind: "next-task",
           session: {
             changeId,
             schemaName: "spec-driven",
-            taskId: "task-a",
-            taskNumber: "1.1",
-            taskDescription: "1.1 Реализовать поведение",
+            taskId,
+            taskNumber,
+            taskDescription: `${taskNumber} Реализовать поведение`,
             changeBranch,
             implementationBranch,
-            rootBaselineCommit: hashes.d,
-            baselineCommit: hashes.d,
+            phaseNumber: run.phaseNumber,
+            rootBaselineCommit: run.rootBaselineCommit,
+            baselineCommit: run.rootBaselineCommit,
             tasksBeforeDigest: "1".repeat(64),
             tasksAfterDigest: "2".repeat(64),
             progressTotal: 1,
@@ -266,12 +293,13 @@ function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree
       },
       async run(request) {
         request.onAgentCreated("task-agent");
+        const phaseNumber = request.session.phaseNumber;
         const result = {
           changeId,
-          taskId: "task-a",
-          taskNumber: "1.1",
+          taskId: request.session.taskId,
+          taskNumber: request.session.taskNumber,
           branch: implementationBranch,
-          commit: hashes.e,
+          commit: phaseNumber === 1 ? hashes.e : hashes.h,
           remainingTasks: 0,
         };
         await request.onTaskCompleted(result);
@@ -284,7 +312,7 @@ function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree
           changeId,
           changeBranch,
           implementationBranch,
-          rootBaselineCommit: hashes.d,
+          rootBaselineCommit: run.rootBaselineCommit,
           baseCommit: run.batch.baseCommit,
           reviewedHead: run.batch.headCommit,
           tasks: run.batch.tasks,
@@ -297,10 +325,10 @@ function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree
         const result = {
           changeId,
           branch: implementationBranch,
-          baseCommit: hashes.d,
-          reviewedHead: hashes.e,
-          reviewCommit: hashes.f,
-          pullRequest: implementationPullRequest,
+          baseCommit: request.session.baseCommit,
+          reviewedHead: request.session.reviewedHead,
+          reviewCommit: request.run.phaseNumber === 1 ? hashes.f : hashes.i,
+          pullRequest: { ...implementationPullRequest, number: 41, url: rootPullRequestIdentity.url },
         };
         await request.onReviewCompleted(result);
         return result;
@@ -375,13 +403,17 @@ function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree
     phaseWork: {
       async inspect() {
         phaseInspections += 1;
-        const progress = phaseInspections === 1
-          ? phaseProgress
-          : {
-              ...phaseProgress,
-              tasks: [{ ...phaseProgress.tasks[0], done: true }],
-              nextImplementationRun: 2,
-            };
+        const secondTask = { id: "task-b", number: "2.1", description: "2.1 Реализовать поведение",
+          done: phaseInspections > 3, fingerprint: phaseTaskFingerprint("task-b", "2.1", "2.1 Реализовать поведение") };
+        const progress = {
+          ...phaseProgress,
+          phases: twoPhases ? [...phaseProgress.phases, { number: 2, fingerprint: "2".repeat(64) }] : phaseProgress.phases,
+          tasks: [
+            { ...phaseProgress.tasks[0], done: phaseInspections > 1 },
+            ...(twoPhases ? [secondTask] : []),
+          ],
+          nextImplementationRun: phaseInspections > 3 ? 3 : 2,
+        };
         return phaseInspections === 1
           ? {
               kind: "implementation-required",
@@ -390,6 +422,8 @@ function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree
               progress,
               snapshot: {},
             }
+          : twoPhases && phaseInspections <= 3
+            ? { kind: "implementation-required", phaseNumber: 2, runNumber: 2, progress, snapshot: {} }
           : { kind: "change-complete", progress, snapshot: {} };
       },
     },
@@ -400,21 +434,19 @@ function workflowHarness({ feedbackOnce = false, mergeOpenOnce = false, worktree
     rootPullRequest: {
       async synchronize() { return hashes.g; },
       async inspect() {
-        return phaseInspections === 0
-          ? { kind: "open", isDraft: true, head: hashes.d, identity: rootPullRequestIdentity }
-          : phaseInspections === 1
-            ? { kind: "open", isDraft: true, head: hashes.d, identity: rootPullRequestIdentity }
-            : { kind: "merged", head: hashes.g, identity: rootPullRequestIdentity };
+        return rootMerged
+          ? { kind: "merged", head: hashes.f, identity: rootPullRequestIdentity }
+          : { kind: "open", isDraft: !rootReady, head: hashes.f, identity: rootPullRequestIdentity };
       },
-      async makeDraft(_workspace, inspection) { return inspection; },
-      async makeReady(_workspace, inspection) { return { ...inspection, isDraft: false }; },
+      async makeDraft(_workspace, inspection) { rootReady = false; return { ...inspection, isDraft: true }; },
+      async makeReady(_workspace, inspection) { rootReady = true; return { ...inspection, isDraft: false }; },
     },
   });
-  return { workflow, calls };
+  return { workflow, calls, mergeRoot: () => { rootMerged = true; }, get rootReady() { return rootReady; } };
 }
 
 async function engineHarness(context, workflow) {
-  const paseoHome = await temporaryHome(context);
+  const paseoHome = await mkdtemp(join(tmpdir(), "openspec-workflow-"));
   const ledger = new OrchestratorLedger({ paseoHome });
   await ledger.open("workspace");
   const engine = new OpenSpecOrchestratorEngine(ledger);
@@ -423,7 +455,7 @@ async function engineHarness(context, workflow) {
     refreshWorkspaceDisplay: async () => ({ projectName: null, workspaceName: null }),
     workflow,
   });
-  context.after(async () => { await engine.dispose(); await ledger.close(); });
+  context.after(async () => { await engine.dispose(); await ledger.close(); await rm(paseoHome, { recursive: true, force: true }); });
   return { engine, ledger };
 }
 
@@ -436,53 +468,82 @@ test("определяет реальную Git-ветку и состояние
   assert.deepEqual(await readGitWorktreeStatus(workspace), { kind: "dirty" });
 });
 
-test("workflow выполняет задачи, review и merge в одной implementation-ветке", async (context) => {
+test("workflow выполняет задачи и ревью в одном PR, затем ждёт ручной merge", async (context) => {
   const harness = workflowHarness();
   const { engine, ledger } = await engineHarness(context, harness.workflow);
   engine.command("workspace", "start");
   await settleWorkflow(ledger);
-  const snapshot = ledger.get("workspace");
-  assert.equal(snapshot.lifecycle.status, "completed");
+  assert.equal(ledger.get("workspace").lifecycle.status, "failed");
+  assert.equal(harness.rootReady, true);
+  assert.equal(ledger.getWorkflowCheckpoint("workspace").version, 6);
+  assert.equal(ledger.getWorkflowCheckpoint("workspace").nextStepId, "inspect-phase-work");
   assert.ok(harness.calls.includes("implementation.prepare"));
   assert.equal(harness.calls.filter((call) => call === "tasks.plan").length, 3);
+  assert.equal(harness.calls.includes("planning.merge"), false);
+  assert.equal(harness.calls.includes("implementation.merge"), false);
+  assert.equal(harness.calls.includes("feedback.inspect"), false);
   assert.deepEqual(
-    snapshot.history.flatMap(({ links }) => links).filter((link) => link.kind === "agent").map(({ agentId }) => agentId),
+    ledger.get("workspace").history.flatMap(({ links }) => links)
+      .filter((link) => link.kind === "agent").map(({ agentId }) => agentId),
     ["publication-agent", "planning-review-agent", "task-agent", "implementation-review-agent"],
   );
+  harness.mergeRoot();
+  engine.command("workspace", "retry");
+  await settleWorkflow(ledger);
+  assert.equal(ledger.get("workspace").lifecycle.status, "completed");
   assert.equal(ledger.getWorkflowCheckpoint("workspace"), null);
 });
 
-test("PR feedback проходит отдельный audit и возвращается в task-цикл", async (context) => {
+test("комментарии корневого PR не запускают обработку feedback", async (context) => {
   const harness = workflowHarness({ feedbackOnce: true });
   const { engine, ledger } = await engineHarness(context, harness.workflow);
   engine.command("workspace", "start");
   await settleWorkflow(ledger);
-  const snapshot = ledger.get("workspace");
-  assert.equal(snapshot.lifecycle.status, "completed");
-  assert.equal(harness.calls.filter((call) => call === "feedback.run").length, 1);
-  assert.ok(harness.calls.indexOf("feedback.run") < harness.calls.lastIndexOf("tasks.plan"));
-  assert.ok(
-    snapshot.history.flatMap(({ links }) => links).some(({ agentId }) =>
-      agentId === "feedback-agent"
-    ),
-  );
+  assert.equal(ledger.get("workspace").lifecycle.status, "failed");
+  assert.equal(harness.calls.includes("feedback.inspect"), false);
+  assert.equal(harness.calls.includes("feedback.run"), false);
+  assert.equal(harness.calls.includes("feedback.plan"), false);
 });
 
-test("открытый planning PR сохраняет checkpoint v5 и Retry продолжает цикл", async (context) => {
-  const harness = workflowHarness({ mergeOpenOnce: true });
+test("две фазы проходят через один Draft PR и завершаются одним ручным merge", async (context) => {
+  const harness = workflowHarness({ twoPhases: true });
   const { engine, ledger } = await engineHarness(context, harness.workflow);
   engine.command("workspace", "start");
   await settleWorkflow(ledger);
-  let snapshot = ledger.get("workspace");
-  assert.equal(snapshot.lifecycle.status, "failed");
-  const checkpoint = ledger.getWorkflowCheckpoint("workspace");
-  assert.equal(checkpoint.version, 5);
-  assert.equal(checkpoint.nextStepId, "await-planning-merge");
+  assert.equal(ledger.get("workspace").lifecycle.status, "failed");
+  assert.equal(harness.rootReady, true);
+  assert.equal(harness.calls.filter((call) => call === "implementation.prepare").length, 2);
+  assert.equal(ledger.get("workspace").history.flatMap(({ links }) => links)
+    .filter((link) => link.kind === "agent" && link.agentId === "implementation-review-agent").length, 2);
+  assert.equal(harness.calls.filter((call) => call === "publication.publish").length, 1);
+  assert.equal(harness.calls.includes("planning.merge"), false);
+  assert.equal(harness.calls.includes("implementation.merge"), false);
+  harness.mergeRoot();
   engine.command("workspace", "retry");
   await settleWorkflow(ledger);
-  snapshot = ledger.get("workspace");
-  assert.equal(snapshot.lifecycle.status, "completed");
-  assert.equal(harness.calls.filter((call) => call === "publication.publish").length, 1);
+  assert.equal(ledger.get("workspace").lifecycle.status, "completed");
+});
+
+test("несколько findings устраняются последовательно в корневом PR", async (context) => {
+  const harness = workflowHarness({ reviewFindings: 2 });
+  const { engine, ledger } = await engineHarness(context, harness.workflow);
+  engine.command("workspace", "start");
+  await settleWorkflow(ledger);
+  assert.equal(ledger.get("workspace").lifecycle.status, "failed");
+  assert.equal(harness.rootReady, true);
+  assert.equal(harness.calls.filter((call) => call === "review-finding.resolve").length, 2);
+  assert.equal(harness.calls.includes("planning.merge"), false);
+  assert.equal(harness.calls.includes("implementation.merge"), false);
+});
+
+test("незавершённый change не допускает преждевременный merge корневого PR", async (context) => {
+  const harness = workflowHarness();
+  harness.mergeRoot();
+  const { engine, ledger } = await engineHarness(context, harness.workflow);
+  engine.command("workspace", "start");
+  await settleWorkflow(ledger);
+  assert.equal(ledger.get("workspace").lifecycle.status, "failed");
+  assert.match(ledger.get("workspace").history.at(-1).text, /слит|merge|PR/iu);
 });
 
 test("грязное дерево блокирует эффекты до Retry", async (context) => {
@@ -499,12 +560,16 @@ test("грязное дерево блокирует эффекты до Retry",
   assert.equal(harness.calls.length, 0);
   engine.command("workspace", "retry");
   await settleWorkflow(ledger);
+  assert.equal(harness.rootReady, true);
+  harness.mergeRoot();
+  engine.command("workspace", "retry");
+  await settleWorkflow(ledger);
   assert.equal(ledger.get("workspace").lifecycle.status, "completed");
 });
 
-test("checkpoint v4 несовместим с v5", () => {
+test("checkpoint v5 несовместим с v6", () => {
   assert.throws(() => workflowCheckpointSchema.parse({
-    version: 4,
+    version: 5,
     nextStepId: "execute-change-tasks",
     state: {
       changeBranch,

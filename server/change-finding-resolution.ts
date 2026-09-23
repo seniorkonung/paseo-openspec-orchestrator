@@ -74,7 +74,7 @@ export function createChangeFindingResolutionService(
     agent: {
       toolName: "complete_review_finding",
       toolDescription:
-        "Проверить устранение и Git-публикацию finding, затем опубликовать её итог в review PR",
+        "Проверить устранение и Git-публикацию finding, затем опубликовать её итог в корневом PR",
       title: (findingId) => `Устранение review finding: ${findingId}`,
       logLabel: "review finding",
       completionLabel: "Finding",

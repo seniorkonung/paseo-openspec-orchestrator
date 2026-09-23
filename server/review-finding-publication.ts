@@ -8,12 +8,8 @@ import { reviewFindingIdSchema } from "./change-review-report.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import {
   changeBranchFor,
-  implementationBranchSchema,
-  parseImplementationBranch,
-  parsePlanningBranch,
-  planningBranchSchema,
+  changeBranchSchema,
 } from "./change-branch.ts";
-import { implementationPullRequestTitle } from "./implementation-publication.ts";
 import {
   listReviewPullRequests,
   readRemoteReviewBranchCommit,
@@ -26,7 +22,6 @@ import {
   MAX_REVIEW_PR_BODY_LENGTH,
   assertPullRequestRepository,
   repositoryArgument,
-  reviewPullRequestTitle,
   type ResolvedReviewRepository,
   type ReviewPullRequest,
 } from "./review-publication-model.ts";
@@ -213,7 +208,7 @@ export async function publishReviewFindingOutcome(
       const expectedEntry = renderFindingEntry(request);
       if (existingEntry.source !== expectedEntry) {
         throw new ChangeReviewPublicationError(
-          "Описание review pull request уже содержит другое резюме выбранной finding",
+          "Описание корневого PR уже содержит другое резюме выбранной finding",
         );
       }
     }
@@ -225,7 +220,7 @@ export async function publishReviewFindingOutcome(
 
   if (request.input.mode === "acknowledge-existing") {
     throw new ChangeReviewPublicationError(
-      "Описание review pull request ещё не содержит результат выбранной finding",
+      "Описание корневого PR ещё не содержит результат выбранной finding",
     );
   }
 
@@ -246,7 +241,7 @@ export async function publishReviewFindingOutcome(
     inspected.pullRequest.body !== expectedBody
   ) {
     throw new ChangeReviewPublicationError(
-      "Описание review pull request изменилось или не сохранилось после публикации finding",
+      "Описание корневого PR изменилось или не сохранилось после публикации finding",
     );
   }
   const publishedEntry = readPublishedFindingEntry(
@@ -255,7 +250,7 @@ export async function publishReviewFindingOutcome(
   );
   if (!publishedEntry || publishedEntry.source !== entry) {
     throw new ChangeReviewPublicationError(
-      "Review pull request не содержит опубликованный результат выбранной finding",
+      "Корневой PR не содержит опубликованный результат выбранной finding",
     );
   }
   assertPublishedFindingOutcome(publishedEntry, request);
@@ -285,12 +280,17 @@ function parseReviewFindingPublicationRequest(
 function parseActiveReviewPullRequest(
   request: ActiveReviewPullRequestRequest,
 ): ActiveReviewPullRequestRequest {
+  const changeId = openSpecChangeIdSchema.parse(request.changeId);
+  const branch = changeBranchSchema.parse(request.branch);
+  if (branch !== changeBranchFor(changeId)) {
+    throw new ChangeReviewPublicationError("Finding относится к другой ветке change");
+  }
   return {
     workspaceDirectory: z.string().trim().min(1).max(8_192).parse(
       request.workspaceDirectory,
     ),
-    changeId: openSpecChangeIdSchema.parse(request.changeId),
-    branch: z.union([planningBranchSchema, implementationBranchSchema]).parse(request.branch),
+    changeId,
+    branch,
     signal: request.signal,
   };
 }
@@ -321,51 +321,37 @@ async function inspectActiveReviewPullRequest(
     request.branch,
     request.signal,
   );
-  const openPullRequests = await listReviewPullRequests(
+  const pullRequests = await listReviewPullRequests(
     command,
     request.workspaceDirectory,
     repositoryArgument(repository),
     request.branch,
-    "open",
+    "all",
     request.signal,
   );
-  if (openPullRequests.length !== 1) {
+  if (pullRequests.length !== 1) {
     throw new ChangeReviewPublicationError(
-      `Для review-ветки «${request.branch}» должен существовать ровно один открытый pull request`,
+      `Для change-ветки «${request.branch}» должен существовать ровно один pull request`,
     );
   }
   const pullRequest = await readReviewPullRequest(
     command,
     request.workspaceDirectory,
     repositoryArgument(repository),
-    openPullRequests[0]!.number,
+    pullRequests[0]!.number,
     request.signal,
   );
   assertPullRequestRepository(pullRequest, repository.url);
-  let planningTarget = false;
-  let implementationTarget = false;
-  try {
-    planningTarget = parsePlanningBranch(request.branch).changeId === request.changeId;
-  } catch { /* Не planning-ветка. */ }
-  try {
-    implementationTarget =
-      parseImplementationBranch(request.branch).changeId === request.changeId;
-  } catch { /* Не implementation-ветка. */ }
-  const expectedTitle = planningTarget
-    ? reviewPullRequestTitle(request.changeId)
-    : implementationPullRequestTitle(request.changeId);
   if (
     pullRequest.state !== "OPEN" ||
-    (planningTarget ? pullRequest.isDraft : !pullRequest.isDraft) ||
+    !pullRequest.isDraft ||
     pullRequest.isCrossRepository ||
     pullRequest.headRefName !== request.branch ||
-    (!planningTarget && !implementationTarget) ||
-    pullRequest.baseRefName !== changeBranchFor(request.changeId) ||
-    pullRequest.headRefOid !== remoteHead ||
-    pullRequest.title !== expectedTitle
+    pullRequest.baseRefName !== "main" ||
+    pullRequest.headRefOid !== remoteHead
   ) {
     throw new ChangeReviewPublicationError(
-      "Review pull request выбранной ветки не соответствует опубликованной цепочке PR",
+      "Корневой Draft PR не соответствует опубликованной ветке change",
     );
   }
   readFindingsSection(pullRequest.body);
@@ -378,7 +364,7 @@ function readFindingsSection(body: string): FindingsSection | null {
   if (start === -1 && end === -1) {
     if (body.includes(FINDING_MARKER_PREFIX)) {
       throw new ChangeReviewPublicationError(
-        "Описание review pull request содержит finding marker вне управляемой секции",
+        "Описание корневого PR содержит finding marker вне управляемой секции",
       );
     }
     return null;
@@ -391,13 +377,13 @@ function readFindingsSection(body: string): FindingsSection | null {
     start >= end
   ) {
     throw new ChangeReviewPublicationError(
-      "Описание review pull request содержит повреждённую секцию результатов findings",
+      "Описание корневого PR содержит повреждённую секцию результатов findings",
     );
   }
   const expectedPrefix = `${FINDINGS_SECTION_START}\n${FINDINGS_SECTION_HEADING}\n\n`;
   if (!body.startsWith(expectedPrefix, start) || body[end - 1] !== "\n") {
     throw new ChangeReviewPublicationError(
-      "Описание review pull request содержит неизвестный формат секции findings",
+      "Описание корневого PR содержит неизвестный формат секции findings",
     );
   }
   validateManagedFindingEntries(
@@ -407,7 +393,7 @@ function readFindingsSection(body: string): FindingsSection | null {
   while (marker !== -1) {
     if (marker < start || marker >= end) {
       throw new ChangeReviewPublicationError(
-        "Описание review pull request содержит finding marker вне управляемой секции",
+        "Описание корневого PR содержит finding marker вне управляемой секции",
       );
     }
     marker = body.indexOf(FINDING_MARKER_PREFIX, marker + FINDING_MARKER_PREFIX.length);
@@ -420,7 +406,7 @@ function validateManagedFindingEntries(source: string): void {
   const markers = new Set<string>();
   if (entries.length === 0 || entries.some((entry) => entry.length === 0)) {
     throw new ChangeReviewPublicationError(
-      "Описание review pull request содержит пустую запись finding",
+      "Описание корневого PR содержит пустую запись finding",
     );
   }
   for (const entry of entries) {
@@ -441,7 +427,7 @@ function validateManagedFindingEntries(source: string): void {
       !marker[3]
     ) {
       throw new ChangeReviewPublicationError(
-        "Описание review pull request содержит повреждённую запись finding",
+        "Описание корневого PR содержит повреждённую запись finding",
       );
     }
     const expectedLabel = marker[1] === "review"
@@ -457,7 +443,7 @@ function validateManagedFindingEntries(source: string): void {
       !lines[2]?.startsWith(outcomePrefix)
     ) {
       throw new ChangeReviewPublicationError(
-        "Описание review pull request содержит несогласованную запись finding",
+        "Описание корневого PR содержит несогласованную запись finding",
       );
     }
     try {
@@ -469,13 +455,13 @@ function validateManagedFindingEntries(source: string): void {
       findingCompletionSummarySchema.parse(lines[2].slice(outcomePrefix.length));
     } catch {
       throw new ChangeReviewPublicationError(
-        "Описание review pull request содержит некорректную запись finding",
+        "Описание корневого PR содержит некорректную запись finding",
       );
     }
     const markerSource = lines[3];
     if (markers.has(markerSource)) {
       throw new ChangeReviewPublicationError(
-        "Описание review pull request содержит дублированный результат finding",
+        "Описание корневого PR содержит дублированный результат finding",
       );
     }
     markers.add(markerSource);
@@ -492,7 +478,7 @@ function readPublishedFindingEntry(
   if (markerIndex === -1) return null;
   if (markerIndex !== body.lastIndexOf(markerLine)) {
     throw new ChangeReviewPublicationError(
-      "Описание review pull request содержит дублированный результат finding",
+      "Описание корневого PR содержит дублированный результат finding",
     );
   }
   const section = readFindingsSection(body);
@@ -606,7 +592,7 @@ function appendFindingEntry(body: string, entry: string): string {
   }
   if (updated.length > MAX_REVIEW_PR_BODY_LENGTH) {
     throw new ChangeReviewPublicationError(
-      `Описание review pull request превышает предел ${MAX_REVIEW_PR_BODY_LENGTH} символов`,
+      `Описание корневого PR превышает предел ${MAX_REVIEW_PR_BODY_LENGTH} символов`,
     );
   }
   return updated;

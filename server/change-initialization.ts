@@ -589,29 +589,29 @@ async function ensureRootPullRequest(
     REVIEW_PARENT_BRANCH,
     signal,
   );
-  let open = await listReviewPullRequests(
+  let requests = await listReviewPullRequests(
     command,
     workspaceDirectory,
     repositoryArgument(repository),
     session.changeBranch,
-    "open",
+    "all",
     signal,
   );
-  if (open.length > 1) {
+  if (requests.length > 1) {
     throw new ChangeInitializationError(
-      `Для ветки «${session.changeBranch}» найдено несколько открытых pull request`,
+      `Для ветки «${session.changeBranch}» найдено несколько pull request`,
     );
   }
   const previous = session.existingRootPullRequest;
   if (
     previous &&
-    (open.length !== 1 || open[0]!.number !== previous.number)
+    (requests.length !== 1 || requests[0]!.number !== previous.number)
   ) {
     throw new ChangeInitializationError(
-      "Сохранённый корневой pull request больше не является единственным открытым PR ветки",
+      "Сохранённый корневой pull request больше не является единственным PR ветки",
     );
   }
-  if (open.length === 0 && previous === null) {
+  if (requests.length === 0 && previous === null) {
     try {
       await command(
         "gh",
@@ -638,15 +638,15 @@ async function ensureRootPullRequest(
         `Не удалось создать Draft pull request ветки «${session.changeBranch}»`,
       );
     }
-    open = await listReviewPullRequests(
+    requests = await listReviewPullRequests(
       command,
       workspaceDirectory,
       repositoryArgument(repository),
       session.changeBranch,
-      "open",
+      "all",
       signal,
     );
-    if (open.length !== 1) {
+    if (requests.length !== 1) {
       throw new ChangeInitializationError(
         "GitHub не подтвердил единственный созданный pull request",
       );
@@ -657,7 +657,7 @@ async function ensureRootPullRequest(
     command,
     workspaceDirectory,
     repositoryArgument(repository),
-    open[0]!.number,
+    requests[0]!.number,
     signal,
   );
   assertPullRequestRepository(pullRequest, repository.url);
@@ -721,20 +721,20 @@ async function inspectExistingRootPullRequest(
       workspaceDirectory,
       signal,
     );
-    const open = await listReviewPullRequests(
+    const requests = await listReviewPullRequests(
       command,
       workspaceDirectory,
       repositoryArgument(repository),
       changeBranch,
-      "open",
+      "all",
       signal,
     );
-    if (open.length > 1) {
+    if (requests.length > 1) {
       throw new ChangeInitializationError(
-        `Для ветки «${changeBranch}» найдено несколько открытых pull request`,
+        `Для ветки «${changeBranch}» найдено несколько pull request`,
       );
     }
-    const pullRequest = open[0];
+    const pullRequest = requests[0];
     if (!pullRequest) return null;
     assertPullRequestRepository(pullRequest, repository.url);
     if (
@@ -743,7 +743,7 @@ async function inspectExistingRootPullRequest(
       pullRequest.headRefName !== changeBranch
     ) {
       throw new ChangeInitializationError(
-        "Существующий корневой pull request не соответствует change-ветке",
+        "Существующий корневой pull request закрыт или не соответствует change-ветке",
       );
     }
     return { number: pullRequest.number, isDraft: pullRequest.isDraft };

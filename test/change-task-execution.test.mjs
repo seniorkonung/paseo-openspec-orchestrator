@@ -10,11 +10,12 @@ import {
   changeTaskExecutionPrompt,
   createChangeTaskExecutionService,
 } from "../server/change-task-execution.ts";
+import { inspectTaskExecutionRecovery, verifyCompletedTask } from "../server/change-task-publication.ts";
 
 const execFileAsync = promisify(execFile);
 const changeId = "selected-change";
 const changeBranch = `change/${changeId}`;
-const implementationBranch = `implementation/${changeId}/phase-1/run-1`;
+const implementationBranch = changeBranch;
 
 async function exec(executable, arguments_, options) {
   const result = await execFileAsync(executable, arguments_, {
@@ -59,7 +60,6 @@ async function fixture(context) {
   const baseline = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim();
   await execFileAsync("git", ["remote", "add", "origin", remote], { cwd: workspace });
   await execFileAsync("git", ["push", "-u", "origin", changeBranch], { cwd: workspace });
-  await execFileAsync("git", ["switch", "-c", implementationBranch], { cwd: workspace });
 
   const apply = async () => {
     const tasks = await readFile(tasksPath, "utf8");
@@ -92,6 +92,17 @@ async function fixture(context) {
         stderr: "",
       };
     }
+    if (executable === "gh" && arguments_[0] === "pr" && ["list", "view"].includes(arguments_[1])) {
+      const output = (await execFileAsync("git", ["ls-remote", "--heads", "origin", `refs/heads/${changeBranch}`], { cwd: workspace })).stdout;
+      const remoteHead = output.trim().split(/\s/u)[0];
+      const pr = {
+        number: 41, url: "https://github.com/example/project/pull/41", state: "OPEN",
+        isDraft: true, isCrossRepository: false, baseRefName: "main",
+        headRefName: changeBranch, headRefOid: remoteHead,
+        title: "Change", body: "Описание",
+      };
+      return { stdout: JSON.stringify(arguments_[1] === "list" ? [pr] : pr), stderr: "" };
+    }
     return exec(executable, arguments_, options);
   };
   const run = {
@@ -104,10 +115,10 @@ async function fixture(context) {
       nameWithOwner: "example/project",
       url: "https://github.com/example/project",
     },
-    publication: { kind: "unpublished" },
+    phaseNumber: 1,
+    runNumber: 1,
+    publication: { kind: "unreviewed" },
     batch: { kind: "empty", baseCommit: baseline },
-    lastDeliveryHead: null,
-    processedFeedbackFingerprints: [],
   };
   return { workspace, remote, tasksPath, baseline, command, run };
 }
@@ -120,7 +131,6 @@ async function commitTask(value, { markSecond = false } = {}) {
   await writeFile(join(value.workspace, "implementation.ts"), "export const implemented = true;\n");
   await execFileAsync("git", ["add", "."], { cwd: value.workspace });
   await execFileAsync("git", ["commit", "-m", "feat(task): implement first task"], { cwd: value.workspace });
-  await execFileAsync("git", ["push", "-u", "origin", implementationBranch], { cwd: value.workspace });
 }
 
 test("plan выбирает первую задачу и сохраняет общий implementation baseline", async (context) => {
@@ -258,6 +268,33 @@ test("completion отклоняет изменение task-state следующ
   assert.match(toolResult.content[0].text, /единственным изменением task-state/u);
   controller.abort();
   await assert.rejects(pending, /abort/iu);
+});
+
+test("task checkpoint восстанавливается до push и после push без повторной публикации", async (context) => {
+  const value = await fixture(context);
+  const calls = [];
+  const command = async (executable, args, options) => {
+    calls.push(`${executable} ${args.join(" ")}`);
+    return value.command(executable, args, options);
+  };
+  const service = createChangeTaskExecutionService({ command, async createAgent() {} });
+  const plan = await service.plan(value.workspace, value.run);
+  assert.equal(plan.kind, "next-task");
+  await commitTask(value);
+  const signal = new AbortController().signal;
+  assert.deepEqual(
+    await inspectTaskExecutionRecovery(command, value.workspace, value.workspace, plan.session, signal),
+    { alreadyCommitted: true },
+  );
+  const first = await verifyCompletedTask(command, value.workspace, value.workspace, plan.session, signal);
+  assert.equal(first.taskId, "internal-a");
+  assert.deepEqual(
+    await inspectTaskExecutionRecovery(command, value.workspace, value.workspace, plan.session, signal),
+    { alreadyCommitted: true },
+  );
+  const second = await verifyCompletedTask(command, value.workspace, value.workspace, plan.session, signal);
+  assert.deepEqual(second, first);
+  assert.equal(calls.filter((call) => call.startsWith("git push ")).length, 1);
 });
 
 test("recovery prompt не повторяет apply и запрещает GitHub-операции", () => {

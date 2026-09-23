@@ -11,7 +11,7 @@ import { assertPhasePlanningChangedPaths } from "../server/workflow/steps/valida
 const session = pendingPhaseTaskPlanningSessionSchema.parse({
   changeId: "phase-change",
   changeBranch: "change/phase-change",
-  planningBranch: "planning/phase-change/phase-2",
+  planningBranch: "change/phase-change",
   phaseNumber: 2,
   baselineCommit: "a".repeat(40),
   baselineProgress: {

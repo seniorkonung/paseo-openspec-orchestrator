@@ -7,7 +7,7 @@ const changeBranch = `change/${changeId}`;
 const head = "a".repeat(40);
 const repositoryUrl = "https://github.com/example/project";
 
-function commandFor(state) {
+function commandFor(state, remoteHead = null) {
   const pullRequest = {
     number: 41,
     url: `${repositoryUrl}/pull/41`,
@@ -29,7 +29,9 @@ function commandFor(state) {
     if (key.startsWith("git for-each-ref ")) {
       return { stdout: `${head}\0refs/heads/${changeBranch}\n`, stderr: "" };
     }
-    if (key.startsWith("git ls-remote --heads origin ")) return { stdout: "", stderr: "" };
+    if (key.startsWith("git ls-remote --heads origin ")) {
+      return { stdout: remoteHead === null ? "" : `${remoteHead}\trefs/heads/${changeBranch}\n`, stderr: "" };
+    }
     if (key === "git remote get-url origin") {
       return { stdout: "git@github.com:example/project.git\n", stderr: "" };
     }
@@ -57,5 +59,14 @@ test("открытый root PR без remote head отклоняется", async
   await assert.rejects(
     service.inspect("/repo", changeId, changeBranch, null),
     /неверные repository, base, head или commit/u,
+  );
+});
+
+test("постороннее продвижение root branch останавливает workflow без fast-forward", async () => {
+  const remoteHead = "b".repeat(40);
+  const service = createRootPullRequestService({ command: commandFor("OPEN", remoteHead) });
+  await assert.rejects(
+    service.synchronize("/repo", changeId, changeBranch),
+    /расходится с origin/u,
   );
 });

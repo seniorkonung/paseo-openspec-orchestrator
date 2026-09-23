@@ -14,7 +14,10 @@ import {
 const FALLBACK_COMMIT_SUBJECT = "docs(openspec): add change review";
 
 export const pendingReviewSessionSchema = reviewPublicationTargetSchema
-  .safeExtend({ changeId: openSpecChangeIdSchema })
+  .safeExtend({
+    changeId: openSpecChangeIdSchema,
+    phaseNumber: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable(),
+  })
   .superRefine((session, context) => {
     if (session.parentBranch !== changeBranchFor(session.changeId)) {
       context.addIssue({

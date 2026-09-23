@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { CompleteRequiredAgentProfile } from "./agent-profiles.ts";
 import {
   FIXED_BRANCH_RULE,
-  GITHUB_CLI_RULE,
+  NO_GITHUB_RULE,
   OPENSPEC_CLI_RULE,
   STAGE_SCOPE_RULE,
   buildAgentPrompt,
@@ -29,10 +29,8 @@ import {
   ChangeReviewPublicationError,
   assertReviewPublicationRecovery,
   prepareReviewPublication,
-  reviewPullRequestBody,
-  reviewPullRequestTitle,
 } from "./change-review-publication.ts";
-import { parsePlanningBranch, planningBranchSchema } from "./change-branch.ts";
+import { planningBranchSchema } from "./change-branch.ts";
 import {
   createChangeReviewVerification,
   type ChangeReviewVerificationOptions,
@@ -84,6 +82,7 @@ export interface ChangeReviewService {
     changeId: string,
     changeBranch: string,
     activeBranch: string,
+    phaseNumber: number | null,
     signal?: AbortSignal,
   ): Promise<PendingReviewSession>;
   run(request: ChangeReviewRequest): Promise<CompletedChangeReview>;
@@ -123,7 +122,7 @@ export function createChangeReviewService(
   const logger = options.logger ?? console;
 
   return {
-    async plan(workspaceDirectory, changeId, changeBranch, activeBranch, signal) {
+    async plan(workspaceDirectory, changeId, changeBranch, activeBranch, phaseNumber, signal) {
       const context = await verification.readContext(
         workspaceDirectory,
         changeId,
@@ -139,6 +138,7 @@ export function createChangeReviewService(
       );
       return pendingReviewSessionSchema.parse({
         changeId: context.changeId,
+        phaseNumber,
         ...target,
       });
     },
@@ -270,6 +270,7 @@ export function createChangeReviewService(
                 reviewBranch: session.reviewBranch,
                 parentBaselineCommit: session.parentBaselineCommit,
                 baselineCommit: session.baselineCommit,
+                phaseNumber: session.phaseNumber,
                 repository:
                   session.repositoryHost === "github.com"
                     ? session.repositoryNameWithOwner
@@ -301,17 +302,15 @@ export function changeReviewPrompt(input: {
   readonly reviewBranch: string;
   readonly parentBaselineCommit: string;
   readonly baselineCommit: string;
+  readonly phaseNumber: number | null;
   readonly repository: string;
   readonly reviewRepositoryPath: string;
   readonly alreadyCommitted: boolean;
 }): string {
-  const parsedBranch = parsePlanningBranch(input.reviewBranch);
-  const phaseNumber = parsedBranch.kind === "phase" ? parsedBranch.phaseNumber : null;
+  const phaseNumber = input.phaseNumber;
   const subject = reviewCommitSubject(input.changeId);
-  const pullRequestTitle = reviewPullRequestTitle(input.changeId);
-  const pullRequestBody = reviewPullRequestBody(input.changeId);
   const reviewInstruction = input.alreadyCommitted
-    ? "This is a recovery session: the finished review is already committed. Do not invoke the review skill again and do not create or amend a commit; continue with publication and pull-request reconciliation."
+    ? "This is a recovery session: the finished review is already committed. Do not invoke the review skill again and do not create or amend a commit; complete the stage."
     : phaseNumber === null
       ? `Invoke the \`openspec-review-change\` skill for change \`${input.changeId}\` and let it produce a finished \`review.md\` in the reported change root.`
       : `Invoke the \`openspec-review-change\` skill for change \`${input.changeId}\` in task-planning review mode focused exclusively on Phase ${phaseNumber}: check that the newly planned ${phaseNumber}.* tasks implement that phase of plan.md completely and without contradicting the other planning artifacts or the preserved tasks. Record all findings, or their absence, in a finished \`review.md\`.`;
@@ -329,22 +328,20 @@ export function changeReviewPrompt(input: {
       remote: "origin",
       reviewPath: input.reviewRepositoryPath,
       commitSubject: subject,
-      pullRequestTitle,
-      pullRequestBody,
       alreadyCommitted: input.alreadyCommitted,
     },
     rules: [
       OPENSPEC_CLI_RULE,
-      GITHUB_CLI_RULE,
+      NO_GITHUB_RULE,
       FIXED_BRANCH_RULE,
       STAGE_SCOPE_RULE,
     ],
     body: [
-      "The planning branch is already published. Verify that it still descends from the artifact baseline and that the root branch still points at parentBaselineCommit.",
+      "The root change branch is already published. Verify that it still descends from the saved baseline.",
       reviewInstruction,
       "Findings do not block this stage: never fix findings, implementation code, or existing planning artifacts, because a later stage owns them. If the review cannot be finished or needs user input, say what is missing and keep the conversation in this session instead of completing the stage.",
       `Keep \`review.md\` and any other file the skill creates inside the change root, materially update an existing \`review.md\`, stage only those files, and create exactly one commit with subject \`${subject}\`. Leave every other pre-existing file, including the planning artifacts, untouched, and do not amend or delete files.`,
-      `Publish the review commit with \`git push --set-upstream origin ${input.reviewBranch}\`, then reconcile exactly one Ready pull request in \`${input.repository}\` from \`${input.reviewBranch}\` into \`${input.parentBranch}\` with the exact title and body from the workflow data. Reuse the matching open pull request while recovering; otherwise create it with \`gh pr create --repo\`, \`--base\`, \`--head\`, \`--title\`, and \`--body-file\`. Never create a Draft pull request or a fork. Keep the body file outside the repository and delete it afterwards.`,
+      "Do not push or create a pull request. The orchestrator verifies and publishes the review commit to the existing Draft root pull request.",
     ],
     completion: completionInstruction({
       tool: "complete_change_review",
