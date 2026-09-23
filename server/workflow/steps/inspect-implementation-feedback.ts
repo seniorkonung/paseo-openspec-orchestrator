@@ -37,6 +37,9 @@ async function runStep(
       await context.checkpointState({ ...context.state, pendingPrFeedbackReviewSession: session });
       return { kind: "continue", next: "review-pr-feedback", summary: `Найдено новых элементов PR feedback: ${inspection.items.length}` };
     }
+    if (inspection.kind === "pending" || inspection.kind === "blocked") {
+      return ciHalt(inspection);
+    }
     const ready = await dependencies.pullRequest.markReady(
       dependencies.workspaceDirectory,
       run,
@@ -51,6 +54,9 @@ async function runStep(
       );
       await context.checkpointState({ ...context.state, pendingPrFeedbackReviewSession: session });
       return { kind: "continue", next: "review-pr-feedback", summary: "Во время Ready-перехода появился новый PR feedback" };
+    }
+    if (ready.kind === "pending" || ready.kind === "blocked") {
+      return ciHalt(ready);
     }
     if (ready.kind === "merged") {
       await context.checkpointState({ ...context.state, pendingImplementationMergeSession: ready.session });
@@ -74,6 +80,13 @@ async function runStep(
     const summary = error instanceof Error ? error.message : "Не удалось проверить implementation PR";
     return { kind: "halt", summary, message: `${summary}; исправьте состояние и нажмите «Повторить»` };
   }
+}
+
+function ciHalt(inspection: { readonly kind: "pending" | "blocked"; readonly checks: readonly string[] }): WorkflowStepResult {
+  const names = inspection.checks.join(", ");
+  return inspection.kind === "pending"
+    ? { kind: "halt", summary: `CI implementation PR ещё выполняется: ${names}`, message: "Дождитесь результата CI и нажмите «Повторить»" }
+    : { kind: "halt", summary: `CI implementation PR не прошёл: ${names}`, message: "Исправьте причину или повторите CI, затем нажмите «Повторить»" };
 }
 
 export function createInspectImplementationFeedbackStep(

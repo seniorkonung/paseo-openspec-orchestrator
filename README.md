@@ -32,7 +32,8 @@ The plugin:
 - executes only that phase's unfinished tasks sequentially, with one agent
   session and one Conventional Commit per task;
 - reviews each new batch of task commits, resolves both review reports, audits
-  untrusted PR feedback, and re-enters the task cycle until it is clean;
+  untrusted PR feedback and CI failures, and re-enters the task cycle until it
+  is clean;
 - creates and reuses one Draft implementation PR, promotes it to Ready only
   after a clean cycle, and waits for its manual merge;
 - repeats inspection after every child PR merge and completes only after all
@@ -148,10 +149,9 @@ The main boundaries are:
   return to the root branch.
 - task modules own one independently verified task commit per iteration on the
   current phase implementation branch.
-- implementation review, publication, feedback, and merge modules own the exact
-  batch range, single Draft/Ready PR, bounded GraphQL feedback ingress, and
-  guarded return to the root branch across GitHub merge, squash, and rebase
-  strategies.
+- implementation review, publication, feedback, CI, and merge modules own the
+  exact batch range, single Draft/Ready PR, bounded GraphQL ingress, and guarded
+  return to the root branch across GitHub merge, squash, and rebase strategies.
 
 External JSON, Git refs, paths, repository identities, PR metadata, persisted
 state, RPC payloads, and MCP inputs are validated before entering trusted code.
@@ -269,19 +269,26 @@ again, so remediation can add tracked tasks and each new batch receives its own
 bounded review.
 
 With no tasks or findings, the orchestrator reads all ordinary PR comments,
-non-empty submitted review summaries, and unresolved review-thread comments
-through paginated GitHub GraphQL. Bodies are bounded JSON data. A
-High feedback agent has no GitHub responsibility and may add a finding
-only after independently proving it against the fixed cumulative implementation
-range.
-Processed fingerprints include GraphQL node ID and `updatedAt`, so edits are
-audited again while rejected feedback is not repeatedly reviewed.
+non-empty submitted review summaries, unresolved review-thread comments, and
+the implementation PR's current CI checks through paginated GitHub GraphQL.
+It uses the test merge commit's checks when GitHub reports them, otherwise the
+PR head's checks. Failed check output, annotations, and available failed GitHub
+Actions logs are bounded untrusted data. A High feedback agent has no GitHub
+responsibility and may add a finding only after independently proving an
+implementation problem against the fixed cumulative range. Infrastructure
+failures do not become implementation findings. Processed fingerprints make
+edited comments and new CI attempts eligible for another audit.
 
-A clean Draft PR is atomically promoted to Ready and checked again for racing
-feedback. The Ready gate halts until Retry. Retry gives merge status priority,
-returns the PR to Draft when new feedback exists, halts again when it remains
-open and clean, and rejects a closed unmerged PR. After merge, the same PR and
-final implementation head are verified. The GitHub-reported merge-result commit
+A clean Draft PR is promoted to Ready only when observed CI checks have passed;
+it is checked again for racing feedback and CI failures. Pending checks halt
+until Retry without polling. A previously audited but still failing check keeps
+the PR blocked until a successful rerun. Success, neutral, and skipped checks
+pass the gate; cancelled and stale checks require a rerun. The Ready gate halts
+until Retry. On Retry, merge status has priority; new feedback or a CI failure
+returns the PR to Draft. An open, clean PR remains halted, while a closed,
+unmerged PR is rejected. A PR with no reported checks follows the existing path.
+After merge, the same PR and final implementation head are verified. The
+GitHub-reported merge-result commit
 must be contained in the fetched `change/<id>` head, so merge commits, squash
 merges, and rebase merges are accepted without assuming that the source commit
 SHA survives. The local root is then updated with `git merge --ff-only

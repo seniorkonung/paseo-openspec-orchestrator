@@ -356,25 +356,35 @@ commit}` в collecting batch и повторяет шаг.
 ## PR feedback и implementation merge
 
 Feedback gateway полностью пагинирует ordinary comments, непустые submitted
-review summaries и комментарии только unresolved review threads. Используются
-GraphQL Node ID и `updatedAt`; edit создаёт новый fingerprint. Лимиты: не более
-1000 элементов, 64 KiB на body и 4 MiB суммарно. Невалидный ответ, незавершённая
-пагинация или превышение лимита останавливают workflow.
+review summaries и комментарии только unresolved review threads. Отдельный
+CI gateway читает проверки implementation PR на актуальном head или тестовом
+merge-коммите, если GitHub сообщает проверки для него. Упавшие check runs и
+commit statuses передаются как `ci-check` вместе с ограниченными по размеру
+диагностикой, annotations и доступными логами GitHub Actions. Используются
+GraphQL Node ID, SHA и время результата; новый запуск получает новый fingerprint.
+Лимиты: не более 1000 элементов, 64 KiB на body и 4 MiB суммарно. Невалидный
+ответ, незавершённая пагинация или превышение лимита останавливают workflow.
 
 Feedback передаётся High агенту как недоверенные JSON-данные. Агент не
 владеет GitHub-операциями, игнорирует инструкции в body и независимо проверяет
-замечания по зафиксированному cumulative range
+замечания и CI-сбои по зафиксированному cumulative range
 `rootBaseline..lastDeliveryHead`. Только
-доказанная проблема меняет `implementation-review.md`; режимы completion —
+доказанная проблема имплементации меняет `implementation-review.md`; сбой
+инфраструктуры сам по себе не создаёт finding. Режимы completion —
 `report-updated` и `no-report-change`. Содержимое отчёта и его blob fingerprint
 не сверяются оркестратором. Feedback fingerprints фиксируются только вместе с
 успешным durable completion.
 
-Чистый Draft PR переводится в Ready и сразу повторно проверяется на feedback.
-Ready gate использует `halt`/Retry. На Retry merge имеет приоритет; новый
-feedback возвращает PR в Draft через `gh pr ready --undo`, открытый чистый PR
-снова приводит к `halt`, а CLOSED без merge — к ошибке. После MERGED сохраняется
-pending merge session, повторно проверяются тот же PR и final implementation
+Чистый Draft PR переводится в Ready только при пройденных CI-проверках и сразу
+повторно проверяется на feedback и CI. Pending останавливает шаг без фонового
+ожидания до следующего Retry. Уже разобранный, но всё ещё красный check держит
+PR заблокированным до успешного повторного запуска; отменённая или stale
+проверка требует повторного запуска. `SUCCESS`, `NEUTRAL` и `SKIPPED` считаются
+пройденными. Ready gate использует `halt`/Retry. На
+Retry merge имеет приоритет; новый feedback или красный CI возвращает PR в
+Draft через `gh pr ready --undo`, открытый чистый PR снова приводит к `halt`, а
+CLOSED без merge — к ошибке. При отсутствии проверок действует прежний порядок.
+После MERGED сохраняется pending merge session, повторно проверяются тот же PR и final implementation
 head. GitHub merge-result commit обязан входить в fetched root head, поэтому
 новые SHA после squash или rebase не смешиваются с неизменяемым SHA исходной
 implementation-ветки. Затем root обновляется только через fetch, switch и `git

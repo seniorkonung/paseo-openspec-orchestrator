@@ -1,14 +1,15 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { BoundedCommandRunner } from "./bounded-command.ts";
-import { feedbackFingerprintSchema } from "./implementation-run-model.ts";
 import type { GitHubRemoteIdentity } from "./github-repository-identity.ts";
+import { feedbackFingerprintSchema } from "./implementation-run-model.ts";
+import { httpsUrlSchema } from "./review-publication-model.ts";
 
 export const MAX_FEEDBACK_ITEMS = 1_000;
 export const MAX_FEEDBACK_BODY_BYTES = 64 * 1_024;
 export const MAX_FEEDBACK_TOTAL_BYTES = 4 * 1_024 * 1_024;
 
-export const implementationFeedbackItemSchema = z
+const commentFeedbackItemSchema = z
   .object({
     source: z.enum(["comment", "review", "review-thread-comment"]),
     nodeId: z.string().trim().min(1).max(512),
@@ -17,7 +18,24 @@ export const implementationFeedbackItemSchema = z
     body: z.string().min(1).max(MAX_FEEDBACK_BODY_BYTES),
     fingerprint: feedbackFingerprintSchema,
   })
-  .strict()
+  .strict();
+
+const ciFeedbackItemSchema = z
+  .object({
+    source: z.literal("ci-check"),
+    nodeId: z.string().trim().min(1).max(512),
+    updatedAt: z.string().datetime({ offset: true }),
+    body: z.string().min(1).max(MAX_FEEDBACK_BODY_BYTES),
+    fingerprint: feedbackFingerprintSchema,
+    checkName: z.string().trim().min(1).max(512),
+    commitOid: z.string().regex(/^[0-9a-f]{40}$/u),
+    conclusion: z.enum(["FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"]),
+    url: httpsUrlSchema,
+  })
+  .strict();
+
+export const implementationFeedbackItemSchema = z
+  .discriminatedUnion("source", [commentFeedbackItemSchema, ciFeedbackItemSchema])
   .superRefine((item, context) => {
     if (Buffer.byteLength(item.body, "utf8") > MAX_FEEDBACK_BODY_BYTES) {
       context.addIssue({
@@ -108,7 +126,7 @@ export async function readImplementationPullRequestFeedback(
   let totalBytes = 0;
 
   const account = (
-    source: ImplementationFeedbackItem["source"],
+    source: z.infer<typeof commentFeedbackItemSchema>["source"],
     node: z.infer<typeof commentSchema> | z.infer<typeof reviewSchema>,
     threadNodeId?: string,
   ) => {
