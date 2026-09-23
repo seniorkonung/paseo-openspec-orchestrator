@@ -38,6 +38,7 @@ test("feedback prompt передаёт перечисленные items и фи�
   assert.match(prompt, /Inspect only the feedback items listed/u);
   assert.match(prompt, new RegExp(`${session.rootBaselineCommit}\.\.${session.rangeHead}`, "u"));
   assert.match(prompt, /Never.*invoke `gh`/u);
+  assert.match(prompt, /never spawn or archive agents/u);
   assert.match(prompt, /Проверьте обработку пустого описания ошибки/u);
 });
 

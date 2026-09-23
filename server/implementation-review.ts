@@ -5,7 +5,6 @@ import {
   FIXED_BRANCH_RULE,
   NO_GITHUB_RULE,
   OPENSPEC_CLI_RULE,
-  STAGE_SCOPE_RULE,
   buildAgentPrompt,
   completionInstruction,
 } from "./agent-prompt.ts";
@@ -50,6 +49,8 @@ import { ChangeReviewPublicationError } from "./review-publication-model.ts";
 
 const REVIEW_SKILL = "openspec-review-implementation";
 const DEFAULT_AGENT_DRAIN_TIMEOUT_MS = 15_000;
+const REVIEW_STAGE_SCOPE_RULE =
+  "Stay inside this stage: never create or archive workspaces or changes, and never invoke another workflow.";
 
 export const pendingImplementationReviewSessionSchema = z
   .object({
@@ -346,6 +347,9 @@ export function implementationReviewPrompt(input: {
   const reviewInstruction = input.alreadyCommitted
     ? "This is a recovery session: the complete report commit already exists. Do not invoke the review skill, edit files, or create or amend a commit."
     : `Invoke \`openspec-review-implementation\` for the exact immutable range \`${session.baseCommit}..${session.reviewedHead}\` and change \`${session.changeId}\`. Review every listed task commit and map every task to at least one review unit.`;
+  const delegationInstruction = input.alreadyCommitted
+    ? ""
+    : `You may spawn review subagents to inspect the exact immutable range \`${session.baseCommit}..${session.reviewedHead}\`. Give them the same stage boundaries and target commits from the workflow data. They may only inspect and report findings. Only you may write the report, create the review commit, push, and call \`complete_implementation_review\`.`;
   const commitInstruction = input.alreadyCommitted
     ? ""
     : `When the report is complete and format-valid, stage only the report and create exactly one commit after the reviewed head with subject \`${subject}\`.`;
@@ -368,10 +372,11 @@ export function implementationReviewPrompt(input: {
       OPENSPEC_CLI_RULE,
       NO_GITHUB_RULE,
       FIXED_BRANCH_RULE,
-      STAGE_SCOPE_RULE,
+      REVIEW_STAGE_SCOPE_RULE,
     ],
     body: [
       reviewInstruction,
+      delegationInstruction,
       `The report needs complete coverage and the exact Base commit, Reviewed head, and ordered Target commits from the workflow data. Modify only \`${input.reviewRepositoryPath}\`: never fix findings or implementation and never change task state.`,
       commitInstruction,
       `Push \`${session.implementationBranch}\` to origin.`,
