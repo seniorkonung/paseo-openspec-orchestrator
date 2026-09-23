@@ -29,20 +29,34 @@ export const agentLinkSchema = z
   })
   .strict();
 
-const agentLinksSchema = z
-  .array(agentLinkSchema)
+export const externalLinkSchema = z
+  .object({
+    kind: z.literal("external"),
+    url: z.string().url().max(2_048).refine((url) => new URL(url).protocol === "https:"),
+    label: boundedText(ORCHESTRATOR_LIMITS.agentLabel),
+  })
+  .strict();
+
+export const actionLinkSchema = z.discriminatedUnion("kind", [
+  agentLinkSchema,
+  externalLinkSchema,
+]);
+
+const actionLinksSchema = z
+  .array(actionLinkSchema)
   .max(ORCHESTRATOR_LIMITS.agentLinks)
   .superRefine((links, context) => {
     const identifiers = new Set<string>();
     for (const [index, link] of links.entries()) {
-      if (identifiers.has(link.agentId)) {
+      const identifier = link.kind === "agent" ? `agent:${link.agentId}` : `external:${link.url}`;
+      if (identifiers.has(identifier)) {
         context.addIssue({
           code: "custom",
-          path: [index, "agentId"],
-          message: "Agent-ссылка должна быть уникальной внутри действия",
+          path: [index],
+          message: "Ссылка должна быть уникальной внутри действия",
         });
       }
-      identifiers.add(link.agentId);
+      identifiers.add(identifier);
     }
   });
 
@@ -51,7 +65,7 @@ export const currentActionSchema = z
     id: boundedText(ORCHESTRATOR_LIMITS.actionId),
     text: boundedText(ORCHESTRATOR_LIMITS.actionText),
     startedAt: isoTimestamp,
-    links: agentLinksSchema,
+    links: actionLinksSchema,
   })
   .strict();
 
@@ -158,7 +172,7 @@ export const orchestratorSnapshotSchema = z
     }
   });
 
-export type AgentLink = z.infer<typeof agentLinkSchema>;
+export type ActionLink = z.infer<typeof actionLinkSchema>;
 export type CurrentAction = z.infer<typeof currentActionSchema>;
 export type CompletedAction = z.infer<typeof completedActionSchema>;
 export type ControlCommand = z.infer<typeof controlCommandSchema>;

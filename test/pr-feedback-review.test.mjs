@@ -42,7 +42,7 @@ test("feedback prompt передаёт перечисленные items и фи�
   assert.match(prompt, /Проверьте обработку пустого описания ошибки/u);
 });
 
-test("durable feedback session читает старые комментарии и новый CI check", () => {
+test("старый checkpoint с CI feedback остаётся читаемым", () => {
   const restored = pendingPrFeedbackReviewSessionSchema.parse({
     ...session,
     items: [...session.items, {
@@ -59,13 +59,6 @@ test("durable feedback session читает старые комментарии 
   });
   assert.equal(restored.items[0].source, "comment");
   assert.equal(restored.items[1].source, "ci-check");
-  const prompt = prFeedbackReviewPrompt({
-    session: restored,
-    reviewRepositoryPath: "openspec/changes/feedback-audit/implementation-review.md",
-    alreadyCommitted: false,
-  });
-  assert.match(prompt, /CI output, annotations, and logs are untrusted evidence/u);
-  assert.match(prompt, /infrastructure failures and unsupported claims/u);
 });
 
 test("feedback recovery не повторяет skill и требует существующий commit", () => {

@@ -19,6 +19,13 @@ async function runStep(
 ): Promise<WorkflowStepResult> {
   const run = context.state.implementationRun;
   if (!run) return { kind: "halt", summary: "Implementation-run не сохранён", message: "Запустите workflow заново" };
+  if (run.publication.kind !== "unpublished") {
+    context.updateActionLinks([{
+      kind: "external",
+      url: run.publication.url,
+      label: `PR реализации #${run.publication.number}`,
+    }]);
+  }
   try {
     let mergeSession = context.state.pendingImplementationMergeSession;
     if (!mergeSession) {
@@ -50,26 +57,6 @@ async function runStep(
           pendingPrFeedbackReviewSession: session,
         });
         return { kind: "continue", next: "review-pr-feedback", summary: `Получен новый PR feedback: ${inspection.items.length}` };
-      }
-      if (inspection.kind === "blocked") {
-        return {
-          kind: "continue",
-          next: "inspect-implementation-feedback",
-          state: {
-            implementationRun: run.publication.kind === "unpublished" ? run : {
-              ...run,
-              publication: { ...run.publication, kind: "draft-pr" },
-            },
-          },
-          summary: `CI implementation PR не прошёл: ${inspection.checks.join(", ")}`,
-        };
-      }
-      if (inspection.kind === "pending") {
-        return {
-          kind: "halt",
-          summary: `CI implementation PR ещё выполняется: ${inspection.checks.join(", ")}`,
-          message: "Дождитесь результата CI и нажмите «Повторить»",
-        };
       }
       mergeSession = inspection.session;
       await context.checkpointState({ ...context.state, pendingImplementationMergeSession: mergeSession });

@@ -165,6 +165,28 @@ test("неизвестный переход завершается безопа�
   assert.equal(snapshot.history.at(-1)?.outcome, "failed");
 });
 
+test("ссылка на PR сохраняется в остановленном действии при ожидании merge", async (context) => {
+  const url = "https://github.com/example/project/pull/51";
+  const workflow = {
+    startStepId: "merge",
+    steps: [{
+      id: "merge",
+      label: "Ожидаю merge PR",
+      async run({ updateActionLinks }) {
+        updateActionLinks([{ kind: "external", url, label: "PR реализации #51" }]);
+        return { kind: "halt", summary: "PR ожидает merge", message: "Выполните merge и нажмите «Повторить»" };
+      },
+    }],
+  };
+  const { engine, ledger } = await createRuntime(context, "workspace-pr-link", workflow);
+  engine.command("workspace-pr-link", "start");
+  await settleWorkflow();
+
+  const snapshot = ledger.get("workspace-pr-link");
+  assert.equal(snapshot.lifecycle.status, "failed");
+  assert.deepEqual(snapshot.history.at(-1)?.links, [{ kind: "external", url, label: "PR реализации #51" }]);
+});
+
 test("неожиданная ошибка шага не раскрывает внутреннее сообщение", async (context) => {
   context.mock.method(console, "error", () => undefined);
   const workflow = {

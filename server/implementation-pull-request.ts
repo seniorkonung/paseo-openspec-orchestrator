@@ -5,7 +5,6 @@ import {
   changeBranchSchema,
   implementationBranchSchema,
 } from "./change-branch.ts";
-import { readImplementationPullRequestCi } from "./implementation-ci-gateway.ts";
 import {
   readImplementationPullRequestFeedback,
   type ImplementationFeedbackItem,
@@ -53,15 +52,11 @@ export type PendingImplementationMergeSession = z.infer<
 
 export type ImplementationFeedbackInspection =
   | { readonly kind: "feedback"; readonly items: readonly ImplementationFeedbackItem[] }
-  | { readonly kind: "pending"; readonly checks: readonly string[] }
-  | { readonly kind: "blocked"; readonly checks: readonly string[] }
   | { readonly kind: "clean" }
   | { readonly kind: "merged"; readonly session: PendingImplementationMergeSession };
 
 export type ImplementationReadyGateInspection =
   | { readonly kind: "feedback"; readonly items: readonly ImplementationFeedbackItem[] }
-  | { readonly kind: "pending"; readonly checks: readonly string[] }
-  | { readonly kind: "blocked"; readonly checks: readonly string[] }
   | { readonly kind: "open"; readonly url: string; readonly number: number }
   | { readonly kind: "merged"; readonly session: PendingImplementationMergeSession };
 
@@ -126,32 +121,23 @@ export function createImplementationPullRequestService(
     );
   };
 
-  const inspectOpenFeedback = async (
+  const unprocessed = async (
     workspaceDirectory: string,
     run: ImplementationRun,
     signal?: AbortSignal,
-  ): Promise<Extract<ImplementationFeedbackInspection, { kind: "feedback" | "pending" | "blocked" | "clean" }>> => {
+  ) => {
     if (run.publication.kind === "unpublished") {
       throw new ImplementationPullRequestError("Implementation pull request ещё не создан");
     }
+    const items = await readImplementationPullRequestFeedback(
+      command,
+      workspaceDirectory,
+      run.repository,
+      run.publication.number,
+      signal,
+    );
     const processed = new Set(run.processedFeedbackFingerprints);
-    const [comments, ci] = await Promise.all([
-      readImplementationPullRequestFeedback(command, workspaceDirectory, run.repository, run.publication.number, signal),
-      readImplementationPullRequestCi(command, workspaceDirectory, run.repository, run.publication.number, currentHead(run), processed, signal),
-    ]);
-    const items = [...comments.filter(({ fingerprint }) => !processed.has(fingerprint)), ...ci.newFailures];
-    if (items.length > 1_000 || items.reduce((sum, item) => sum + Buffer.byteLength(item.body, "utf8"), 0) > 4 * 1_024 * 1_024) {
-      throw new ImplementationPullRequestError("Суммарный PR feedback и CI превышает лимит аудита");
-    }
-    const after = await read(workspaceDirectory, run, signal);
-    if (after.state !== "OPEN") throw new ImplementationPullRequestError("Состояние PR изменилось во время проверки feedback и CI");
-    assertPullRequestShape(after, run, currentHead(run), after.isDraft);
-    if (items.length > 0) return { kind: "feedback", items };
-    if (ci.failed.length > 0 || ci.rerunRequired.length > 0) {
-      return { kind: "blocked", checks: [...ci.failed, ...ci.rerunRequired] };
-    }
-    if (ci.pending.length > 0) return { kind: "pending", checks: ci.pending };
-    return { kind: "clean" };
+    return items.filter(({ fingerprint }) => !processed.has(fingerprint));
   };
 
   const makeDraft = async (
@@ -162,9 +148,6 @@ export function createImplementationPullRequestService(
     if (run.publication.kind === "unpublished") {
       throw new ImplementationPullRequestError("Implementation pull request ещё не создан");
     }
-    const before = await read(workspaceDirectory, run, signal);
-    assertPullRequestShape(before, run, currentHead(run), before.isDraft);
-    if (before.isDraft) return;
     try {
       await command(
         "gh",
@@ -220,11 +203,10 @@ export function createImplementationPullRequestService(
       );
     }
     assertPullRequestShape(pullRequest, run, currentHead(run), pullRequest.isDraft);
-    const inspection = await inspectOpenFeedback(workspaceDirectory, run, signal);
-    if (inspection.kind === "feedback" || inspection.kind === "blocked") {
-      await makeDraft(workspaceDirectory, run, signal);
-    }
-    return inspection;
+    const items = await unprocessed(workspaceDirectory, run, signal);
+    if (items.length === 0) return { kind: "clean" };
+    if (!pullRequest.isDraft) await makeDraft(workspaceDirectory, run, signal);
+    return { kind: "feedback", items };
   };
 
   return {
@@ -289,12 +271,12 @@ export function createImplementationPullRequestService(
           "Implementation pull request остался Draft после gh pr ready",
         );
       }
-      const raced = await inspectOpenFeedback(workspaceDirectory, run, signal);
-      if (raced.kind === "feedback" || raced.kind === "blocked" || raced.kind === "pending") {
+      const raced = await unprocessed(workspaceDirectory, run, signal);
+      if (raced.length > 0) {
         await makeDraft(workspaceDirectory, run, signal);
-        return raced;
+        return { kind: "feedback", items: raced };
       }
-      return raced;
+      return { kind: "clean" };
     },
 
     async inspectReadyGate(workspaceDirectory, runInput, signal) {
@@ -330,12 +312,11 @@ export function createImplementationPullRequestService(
           "Ready gate получил Draft implementation pull request",
         );
       }
-      const inspection = await inspectOpenFeedback(workspaceDirectory, run, signal);
-      if (inspection.kind === "feedback" || inspection.kind === "blocked") {
+      const items = await unprocessed(workspaceDirectory, run, signal);
+      if (items.length > 0) {
         await makeDraft(workspaceDirectory, run, signal);
-        return inspection;
+        return { kind: "feedback", items };
       }
-      if (inspection.kind === "pending") return inspection;
       return { kind: "open", url: pullRequest.url, number: pullRequest.number };
     },
 

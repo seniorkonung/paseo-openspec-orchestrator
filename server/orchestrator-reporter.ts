@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import {
-  agentLinkSchema,
+  actionLinkSchema,
   currentActionSchema,
   lifecycleSchema,
   orchestratorChangeSchema,
-  type AgentLink,
+  type ActionLink,
   type CurrentAction,
   type OrchestratorChange,
   type OrchestratorLifecycle,
@@ -13,12 +13,12 @@ import { OrchestratorLedger } from "./orchestrator-ledger.ts";
 
 export interface BeginActionInput {
   text: string;
-  links?: AgentLink[];
+  links?: ActionLink[];
 }
 
 export interface UpdateActionInput {
   text?: string;
-  links?: AgentLink[];
+  links?: ActionLink[];
 }
 
 export interface ActionHandle {
@@ -72,7 +72,7 @@ export class OrchestratorReporter {
       id: this.#createId(),
       text: input.text,
       startedAt: this.#now().toISOString(),
-      links: (input.links ?? []).map((link) => agentLinkSchema.parse(link)),
+      links: (input.links ?? []).map((link) => actionLinkSchema.parse(link)),
     });
 
     this.#ledger.update(this.#workspaceId, (projection) => {

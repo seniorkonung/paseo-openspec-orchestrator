@@ -20,6 +20,7 @@ const commentFeedbackItemSchema = z
   })
   .strict();
 
+// Сохраняем чтение checkpoint, созданных до удаления автоматической проверки CI.
 const ciFeedbackItemSchema = z
   .object({
     source: z.literal("ci-check"),

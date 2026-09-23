@@ -51,48 +51,17 @@ function pullRequest(state, isDraft = false, mergedRoot = finalHead) {
   };
 }
 
-function ciCheck(id, conclusion, status = "COMPLETED") {
-  return {
-    __typename: "CheckRun", id, name: "tests", status, conclusion,
-    startedAt: "2026-09-23T10:00:00Z",
-    completedAt: status === "COMPLETED" ? "2026-09-23T10:01:00Z" : null,
-    permalink: `https://github.com/example/project/runs/${id}`,
-    checkSuite: { id: "suite-one", workflowRun: null },
-  };
-}
-
-function emptyGraphQl(query, options = {}) {
-  if (query.includes("headRefOid statusCheckRollup")) {
-    const selected = options.ciRollups?.[options.ciRead] ?? null;
-    const ciRollup = selected && (query.includes("contexts(first:1)")
-      ? { id: "ci-rollup", contexts: { totalCount: selected.length } }
-      : {
-        id: "ci-rollup", commit: { oid: finalHead },
-        contexts: { nodes: selected, pageInfo: { hasNextPage: false, endCursor: null }, totalCount: selected.length },
-      });
-    return JSON.stringify({ data: { repository: { pullRequest: {
-      headRefOid: finalHead,
-      statusCheckRollup: ciRollup,
-      potentialMergeCommit: null,
-    } } } });
-  }
-  if (query.includes("query($id:ID!,$after:String){node")) {
-    return JSON.stringify({ data: { node: {
-      id: "failed", summary: "Tests failed", text: "Assertion failed",
-      annotations: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null }, totalCount: 0 },
-    } } });
-  }
+function emptyGraphQl(query) {
   const page = { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } };
   const field = query.includes("reviewThreads(first")
     ? "reviewThreads"
     : query.includes("reviews(first")
       ? "reviews"
-      : "comments";
-  return JSON.stringify({ data: { repository: { pullRequest: {
-    [field]: field === "comments" && options.comment
-      ? { ...page, nodes: [{ id: "comment-one", updatedAt: "2026-09-23T10:00:00Z", body: options.comment, isMinimized: false }] }
-      : page,
-  } } } });
+      : query.includes("comments(first")
+        ? "comments"
+        : null;
+  if (!field) throw new Error("Неожиданный GraphQL-запрос");
+  return JSON.stringify({ data: { repository: { pullRequest: { [field]: page } } } });
 }
 
 function gateCommand(options = {}) {
@@ -101,7 +70,6 @@ function gateCommand(options = {}) {
   let localRoot = options.localRoot ?? root;
   const remoteRoot = options.remoteRoot ?? root;
   let pr = options.pullRequest ?? pullRequest("OPEN");
-  let ciRead = 0;
   const calls = [];
   const command = async (executable, arguments_) => {
     calls.push([executable, ...arguments_]);
@@ -109,15 +77,13 @@ function gateCommand(options = {}) {
     if (executable === "gh" && arguments_[0] === "pr" && arguments_[1] === "view") {
       return { stdout: JSON.stringify(pr), stderr: "" };
     }
-    if (executable === "gh" && arguments_[0] === "api") {
-      const query = arguments_[arguments_.indexOf("-f") + 1].slice("query=".length);
-      const stdout = emptyGraphQl(query, { ...options, ciRead: Math.min(ciRead, (options.ciRollups?.length ?? 1) - 1) });
-      if (query.includes("headRefOid statusCheckRollup") && query.includes("contexts(first:1)")) ciRead += 1;
-      return { stdout, stderr: "" };
-    }
     if (executable === "gh" && arguments_[0] === "pr" && arguments_[1] === "ready") {
       pr = { ...pr, isDraft: arguments_.includes("--undo") };
       return { stdout: "", stderr: "" };
+    }
+    if (executable === "gh" && arguments_[0] === "api") {
+      const query = arguments_[arguments_.indexOf("-f") + 1].slice("query=".length);
+      return { stdout: emptyGraphQl(query), stderr: "" };
     }
     if (executable === "gh" && arguments_[0] === "auth") return { stdout: "", stderr: "" };
     if (executable === "gh" && arguments_[0] === "repo") {
@@ -212,6 +178,17 @@ test("Ready transition после рестарта переиспользует 
   );
 });
 
+test("чистый Draft PR становится Ready без запроса CI", async () => {
+  const harness = gateCommand({ pullRequest: pullRequest("OPEN", true) });
+  const result = await createImplementationPullRequestService({
+    command: harness.command,
+  }).markReady("/workspace", run("draft-pr"));
+  assert.deepEqual(result, { kind: "clean" });
+  assert.equal(harness.calls.filter((call) => call[0] === "gh" && call[1] === "pr" && call[2] === "ready").length, 1);
+  const graphQlCalls = harness.calls.filter((call) => call[0] === "gh" && call[1] === "api");
+  assert.equal(graphQlCalls.length, 6);
+});
+
 test("открытый Ready PR без нового feedback остаётся в halt-gate", async () => {
   const harness = gateCommand({ pullRequest: pullRequest("OPEN", false) });
   const result = await createImplementationPullRequestService({
@@ -222,96 +199,6 @@ test("открытый Ready PR без нового feedback остаётся в
     url: "https://github.com/example/project/pull/51",
     number: 51,
   });
-});
-
-test("новый CI-сбой и комментарий вместе отправляются в audit", async () => {
-  const harness = gateCommand({
-    pullRequest: pullRequest("OPEN", true),
-    ciRollups: [[ciCheck("failed", "FAILURE")]],
-    comment: "Проверьте обработку ошибки",
-  });
-  const inspection = await createImplementationPullRequestService({ command: harness.command })
-    .inspectFeedback("/workspace", run("draft-pr"));
-  assert.equal(inspection.kind, "feedback");
-  assert.deepEqual(inspection.items.map((item) => item.source), ["comment", "ci-check"]);
-});
-
-test("уже разобранный красный CI удерживает Draft PR до нового результата", async () => {
-  const harness = gateCommand({
-    pullRequest: pullRequest("OPEN", true),
-    ciRollups: [[ciCheck("failed", "FAILURE")]],
-  });
-  const service = createImplementationPullRequestService({ command: harness.command });
-  const first = await service.inspectFeedback("/workspace", run("draft-pr"));
-  assert.equal(first.kind, "feedback");
-  const processed = { ...run("draft-pr"), processedFeedbackFingerprints: [first.items[0].fingerprint] };
-  const retry = await service.markReady("/workspace", processed);
-  assert.deepEqual(retry, { kind: "blocked", checks: ["tests"] });
-  assert.equal(harness.calls.some((call) => call[1] === "pr" && call[2] === "ready"), false);
-});
-
-test("зелёный повторный запуск снимает блокировку обработанного CI-сбоя", async () => {
-  const harness = gateCommand({
-    pullRequest: pullRequest("OPEN", true),
-    ciRollups: [[ciCheck("failed", "FAILURE")], [ciCheck("passed", "SUCCESS")]],
-  });
-  const service = createImplementationPullRequestService({ command: harness.command });
-  const failed = await service.inspectFeedback("/workspace", run("draft-pr"));
-  assert.equal(failed.kind, "feedback");
-  const processed = { ...run("draft-pr"), processedFeedbackFingerprints: [failed.items[0].fingerprint] };
-  assert.deepEqual(await service.markReady("/workspace", processed), { kind: "clean" });
-  assert.equal(harness.calls.some((call) => call[1] === "pr" && call[2] === "ready" && !call.includes("--undo")), true);
-});
-
-test("pending CI останавливает Ready-переход и остаётся pending на Retry", async () => {
-  const pendingCheck = ciCheck("queued", null, "QUEUED");
-  const draft = gateCommand({ pullRequest: pullRequest("OPEN", true), ciRollups: [[pendingCheck]] });
-  assert.deepEqual(
-    await createImplementationPullRequestService({ command: draft.command }).markReady("/workspace", run("draft-pr")),
-    { kind: "pending", checks: ["tests"] },
-  );
-  assert.equal(draft.calls.some((call) => call[1] === "pr" && call[2] === "ready"), false);
-
-  const ready = gateCommand({ pullRequest: pullRequest("OPEN", false), ciRollups: [[pendingCheck]] });
-  assert.deepEqual(
-    await createImplementationPullRequestService({ command: ready.command }).inspectReadyGate("/workspace", run()),
-    { kind: "pending", checks: ["tests"] },
-  );
-});
-
-test("новый CI-сбой на Retry возвращает Ready PR в Draft", async () => {
-  const harness = gateCommand({ pullRequest: pullRequest("OPEN", false), ciRollups: [[ciCheck("failed", "FAILURE")]] });
-  const inspection = await createImplementationPullRequestService({ command: harness.command })
-    .inspectReadyGate("/workspace", run());
-  assert.equal(inspection.kind, "feedback");
-  assert.equal(inspection.items[0].source, "ci-check");
-  assert.equal(harness.calls.some((call) => call[1] === "pr" && call[2] === "ready" && call.includes("--undo")), true);
-});
-
-test("CI-сбой, появившийся сразу после Ready, возвращает PR в Draft", async () => {
-  const harness = gateCommand({
-    pullRequest: pullRequest("OPEN", true),
-    ciRollups: [[], [ciCheck("failed", "FAILURE")]],
-  });
-  const inspection = await createImplementationPullRequestService({ command: harness.command })
-    .markReady("/workspace", run("draft-pr"));
-  assert.equal(inspection.kind, "feedback");
-  const readyCalls = harness.calls.filter((call) => call[1] === "pr" && call[2] === "ready");
-  assert.equal(readyCalls.length, 2);
-  assert.equal(readyCalls[1].includes("--undo"), true);
-});
-
-test("pending CI, появившийся сразу после Ready, возвращает PR в Draft", async () => {
-  const harness = gateCommand({
-    pullRequest: pullRequest("OPEN", true),
-    ciRollups: [[], [ciCheck("queued", null, "QUEUED")]],
-  });
-  const inspection = await createImplementationPullRequestService({ command: harness.command })
-    .markReady("/workspace", run("draft-pr"));
-  assert.deepEqual(inspection, { kind: "pending", checks: ["tests"] });
-  const readyCalls = harness.calls.filter((call) => call[1] === "pr" && call[2] === "ready");
-  assert.equal(readyCalls.length, 2);
-  assert.equal(readyCalls[1].includes("--undo"), true);
 });
 
 test("merge completion восстанавливается после уже выполненного fast-forward", async () => {

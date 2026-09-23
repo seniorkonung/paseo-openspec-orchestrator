@@ -446,7 +446,7 @@ test("workflow выполняет задачи, review и merge в одной im
   assert.ok(harness.calls.includes("implementation.prepare"));
   assert.equal(harness.calls.filter((call) => call === "tasks.plan").length, 3);
   assert.deepEqual(
-    snapshot.history.flatMap(({ links }) => links).map(({ agentId }) => agentId),
+    snapshot.history.flatMap(({ links }) => links).filter((link) => link.kind === "agent").map(({ agentId }) => agentId),
     ["publication-agent", "planning-review-agent", "task-agent", "implementation-review-agent"],
   );
   assert.equal(ledger.getWorkflowCheckpoint("workspace"), null);

@@ -7,6 +7,7 @@ import {
   startSynchronizationLoop,
 } from "../client/orchestrator-sync.ts";
 import {
+  currentStateActionLinks,
   currentStateDescription,
   formatChangeLabel,
   formatDuration,
@@ -87,6 +88,21 @@ test("view model покрывает пустой change и основные со
     }),
     "Проверяемая ошибка",
   );
+});
+
+test("панель сохраняет доступ к ссылке PR во время ожидания merge", () => {
+  const link = { kind: "external", url: "https://github.com/example/project/pull/51", label: "PR реализации #51" };
+  const failed = {
+    ...snapshot("4"),
+    lifecycle: { status: "failed", availableCommand: "retry", message: "Дождитесь merge" },
+    history: [{
+      id: "merge", text: "PR ожидает merge", startedAt: "2026-09-23T10:00:00Z",
+      finishedAt: "2026-09-23T10:00:01Z", outcome: "failed", links: [link],
+    }],
+  };
+  assert.deepEqual(currentStateActionLinks(failed), [link]);
+  assert.deepEqual(currentStateActionLinks({ ...failed, lifecycle: { status: "idle", availableCommand: "start" } }), []);
+  assert.deepEqual(currentStateActionLinks({ ...failed, history: [{ ...failed.history[0], outcome: "succeeded" }] }), []);
 });
 
 test("long-poll loop выполняет только один wait одновременно", async () => {

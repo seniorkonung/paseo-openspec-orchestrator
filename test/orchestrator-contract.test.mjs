@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   ORCHESTRATOR_LIMITS,
+  actionLinkSchema,
   agentLinkSchema,
   controlCommandSchema,
   currentActionSchema,
@@ -104,6 +105,24 @@ test("agent-ссылка имеет закрытую типизированну�
     }).success,
     false,
   );
+});
+
+test("внешняя ссылка действия принимает только HTTPS и сохраняется в истории", () => {
+  const link = {
+    kind: "external",
+    url: "https://github.com/example/project/pull/51",
+    label: "PR реализации #51",
+  };
+  assert.deepEqual(actionLinkSchema.parse(link), link);
+  assert.equal(actionLinkSchema.safeParse({ ...link, url: "javascript:alert(1)" }).success, false);
+  assert.equal(actionLinkSchema.safeParse({ ...link, url: "http://github.com/example/project/pull/51" }).success, false);
+  assert.equal(currentActionSchema.safeParse({
+    id: "a", text: "Проверяю PR", startedAt, links: [link, link],
+  }).success, false);
+  assert.equal(orchestratorSnapshotSchema.safeParse(snapshot({ history: [{
+    id: "a", text: "Ожидаю merge", startedAt,
+    finishedAt: "2026-09-16T10:00:01.000Z", outcome: "failed", links: [link],
+  }] })).success, true);
 });
 
 test("контракт требует уникальную хронологическую историю", () => {

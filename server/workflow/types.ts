@@ -74,7 +74,7 @@ import {
 import type { OrchestratorNotificationRequest } from "../../shared/orchestrator-notifications.ts";
 import {
   orchestratorChangeSchema,
-  type AgentLink,
+  type ActionLink,
   type OrchestratorChange,
 } from "../../shared/orchestrator.ts";
 import { z } from "zod";
@@ -498,7 +498,7 @@ export type WorkflowCheckpoint = z.infer<typeof workflowCheckpointSchema>;
 export interface WorkflowStepContext {
   readonly signal: AbortSignal;
   readonly state: Readonly<WorkflowState>;
-  readonly updateActionLinks: (links: readonly AgentLink[]) => void;
+  readonly updateActionLinks: (links: readonly ActionLink[]) => void;
   readonly checkpointState: (nextState: WorkflowState) => Promise<void>;
   /** Ошибка доставки записывается движком в лог и возвращает false, не ломая шаг. */
   readonly notify: (notification: OrchestratorNotificationRequest) => Promise<boolean>;

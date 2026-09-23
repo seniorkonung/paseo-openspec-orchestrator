@@ -1,4 +1,5 @@
 import type {
+  ActionLink,
   CompletedAction,
   ControlCommand,
   OrchestratorChange,
@@ -75,4 +76,14 @@ export function currentStateDescription(snapshot: OrchestratorSnapshot | undefin
     return "Текущее действие завершится перед паузой";
   }
   return "Готовлю следующее действие";
+}
+
+export function currentStateActionLinks(snapshot: OrchestratorSnapshot | undefined): ActionLink[] {
+  if (!snapshot) return [];
+  if (snapshot.currentAction) return snapshot.currentAction.links;
+  if (snapshot.lifecycle.status === "failed") {
+    const lastAction = snapshot.history[snapshot.history.length - 1];
+    return lastAction?.outcome === "failed" ? lastAction.links : [];
+  }
+  return [];
 }

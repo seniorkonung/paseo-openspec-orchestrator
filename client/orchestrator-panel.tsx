@@ -8,6 +8,7 @@ import {
   ActivityIndicator,
   Alert,
   type FlatList as NativeFlatList,
+  Linking,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   Pressable,
@@ -16,12 +17,13 @@ import {
   View,
 } from "react-native";
 import type {
-  AgentLink,
+  ActionLink,
   CompletedAction,
   OrchestratorSnapshot,
 } from "../shared/orchestrator";
 import {
   commandLabels,
+  currentStateActionLinks,
   currentStateDescription,
   formatDuration,
   formatChangeLabel,
@@ -33,13 +35,13 @@ import { useOrchestratorState } from "./use-orchestrator-state";
 
 type Navigation = PluginWorkspacePanelProps["navigation"];
 
-function AgentLinks({
+function ActionLinks({
   links,
   navigation,
   color,
   mutedColor,
 }: {
-  links: AgentLink[];
+  links: ActionLink[];
   navigation: Navigation;
   color: string;
   mutedColor: string;
@@ -48,7 +50,19 @@ function AgentLinks({
   return (
     <View style={sharedStyles.links}>
       {links.map((link) =>
-        navigation ? (
+        link.kind === "external" ? (
+          <Pressable
+            key={link.url}
+            accessibilityRole="link"
+            accessibilityLabel={`Открыть ${link.label}`}
+            onPress={() => void Linking.openURL(link.url).catch(() => Alert.alert("Не удалось открыть ссылку", link.url))}
+            style={({ pressed }) => [sharedStyles.linkPill, pressed && sharedStyles.pressed]}
+          >
+            <Text style={[sharedStyles.linkText, { color }]} numberOfLines={1}>
+              ↗ {link.label}
+            </Text>
+          </Pressable>
+        ) : navigation ? (
           <Pressable
             key={link.agentId}
             accessibilityRole="link"
@@ -169,7 +183,7 @@ export function OrchestratorPanel({
               <Text style={styles.duration}>
                 {formatDuration(item.startedAt, item.finishedAt)}
               </Text>
-              <AgentLinks
+              <ActionLinks
                 links={item.links}
                 navigation={navigation}
                 color={theme.colors.accent}
@@ -333,6 +347,7 @@ function CurrentStatePanel({
     lifecycle?.status === "running" ||
     lifecycle?.status === "pausing";
   const command = lifecycle?.availableCommand ?? null;
+  const actionLinks = currentStateActionLinks(snapshot);
 
   return (
     <View style={styles.currentPanel}>
@@ -354,9 +369,9 @@ function CurrentStatePanel({
             <Text style={styles.currentActionText} numberOfLines={3}>
               {currentAction?.text ?? currentStateDescription(snapshot)}
             </Text>
-            {currentAction ? (
-              <AgentLinks
-                links={currentAction.links}
+            {actionLinks.length > 0 ? (
+              <ActionLinks
+                links={actionLinks}
                 navigation={navigation}
                 color={colors.accent}
                 mutedColor={colors.foregroundMuted}
