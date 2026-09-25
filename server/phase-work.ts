@@ -20,7 +20,7 @@ import { openSpecChangeIdSchema } from "./openspec-change.ts";
 const MAX_PLAN_BYTES = 256 * 1024;
 const MAX_PHASES = 256;
 const TASK_NUMBER_PREFIX = /^(\d+(?:\.\d+)+(?:[A-Za-z]+)?)(?=\s|$)/u;
-const PHASE_HEADING = /^\s{0,3}##[ \t]+Phase[ \t]+([1-9][0-9]*)\b/iu;
+const PHASE_HEADING = /^\s{0,3}##[ \t]+(?:Phase|Фаза)[ \t]+([1-9][0-9]*)\b/iu;
 
 const fingerprintSchema = z.string().regex(/^[0-9a-f]{64}$/u);
 

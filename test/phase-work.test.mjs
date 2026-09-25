@@ -63,6 +63,27 @@ test("parser извлекает только уникальные номера �
   assert.deepEqual(parsePhasedPlan(markdown), [{ number: 1 }, { number: 2 }]);
 });
 
+test("парсер распознаёт русские и английские заголовки, кроме примеров в блоках кода", () => {
+  const markdown = [
+    "## Фаза 1: Первый результат",
+    "## Phase 2: Второй результат",
+    "## ФАЗА 3: Третий результат",
+    "## Phase 1: Повтор первой фазы",
+    "```markdown",
+    "## Фаза 99: Пример",
+    "```",
+    "~~~markdown",
+    "## Phase 98: Пример",
+    "~~~",
+  ].join("\n");
+
+  assert.deepEqual(parsePhasedPlan(markdown), [
+    { number: 1 },
+    { number: 2 },
+    { number: 3 },
+  ]);
+});
+
 test("parser молча пропускает произвольную структуру и не проверяет содержимое фаз", () => {
   assert.deepEqual(parsePhasedPlan([
     "произвольный текст до заголовков",
@@ -177,7 +198,7 @@ test("классификатор сохраняет task fingerprints и зап�
   );
 });
 
-test("service безопасно читает plan.md и отклоняет symlink, oversized и выход из Git root", async (context) => {
+test("сервис читает русский plan.md и отклоняет символьную ссылку, большой файл и выход из Git-репозитория", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "phase-work-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const gitRoot = join(root, "repo");
@@ -185,7 +206,13 @@ test("service безопасно читает plan.md и отклоняет syml
   await mkdir(changeRoot, { recursive: true });
   const planPath = join(changeRoot, "plan.md");
   const tasksPath = join(changeRoot, "tasks.md");
-  await writeFile(planPath, plan(1));
+  await writeFile(planPath, [
+    "## Направление",
+    "",
+    "## Фаза 1: Первый результат",
+    "",
+    "**Цель:** Создать результат",
+  ].join("\n"));
   await writeFile(tasksPath, "- [ ] 1.1 Задача\n");
   const statusGateway = {
     async read() {
