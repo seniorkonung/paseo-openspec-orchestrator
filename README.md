@@ -25,6 +25,7 @@ change/<id>
   | scaffold and planning artifact commits
   | initial OpenSpec review and finding resolutions
   | for each phase: task planning, task commits, bounded reviews, resolutions
+  | final spec synchronization and archive commit
 ```
 
 The workflow stops at the final root PR until the user merges it and presses
@@ -134,14 +135,23 @@ commit before push and an already published commit before checkpoint, without
 repeating the agent's work. The existing root PR is the only pull request
 associated with every stage.
 
+After all phases and review findings are complete, one High agent invokes the
+`openspec-archive-change` skill. It synchronizes every delta spec with the main
+specs, moves the unchanged change directory into the dated archive, and creates
+one verified commit on the root branch. Incomplete artifacts or tasks and a
+failed spec sync stop this stage. The orchestrator publishes the archive commit
+to the Draft root PR and can recover after an interrupted move, commit, or push.
+
 ### Final root PR gate
 
-When every phase has tasks and all tasks are complete, the root PR moves to
-Ready. The orchestrator repeats phase, task, and PR head checks to close races,
-then waits for manual merge and Retry. A closed unmerged PR fails. A merge
-while work remains fails closed. Only a merged PR with the exact final head
-and completed phase work ends the workflow. New work found on Retry returns
-the PR to Draft and resumes the relevant phase.
+When every phase has tasks and all tasks are complete, the orchestrator checks
+the active change once more before archiving. A previously Ready PR returns to
+Draft for the archive commit. After publication, the final gate checks the
+archived tree and the exact PR head, moves the PR to Ready, then waits for
+manual merge and Retry. It no longer reads tasks from the archived change.
+A closed unmerged PR or unexpected head movement stops the workflow. A PR
+already merged before the archive commit also stops: its history cannot be
+changed retroactively.
 
 ## Recovery and development
 

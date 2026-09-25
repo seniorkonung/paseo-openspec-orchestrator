@@ -5,6 +5,7 @@ import type { ChangePublicationService } from "../../change-publication.ts";
 import type { ChangeReviewService } from "../../change-review.ts";
 import type { ChangeInitializationService } from "../../change-initialization.ts";
 import type { ChangeTaskExecutionService } from "../../change-task-execution.ts";
+import type { ChangeArchiveService } from "../../change-archive.ts";
 import type { GitBranchProbe } from "../../git-branch.ts";
 import type { GitWorktreeProbe } from "../../git-worktree.ts";
 import type { ImplementationFindingResolutionService } from "../../implementation-finding-resolution.ts";
@@ -37,6 +38,8 @@ import { createInspectPhaseWorkStep } from "./inspect-phase-work.ts";
 import { createPreparePhasePlanningBranchStep } from "./prepare-phase-planning-branch.ts";
 import { createPlanPhaseTasksStep } from "./plan-phase-tasks.ts";
 import { createValidatePhasePlanningStep } from "./validate-phase-planning.ts";
+import { createArchiveChangeStep } from "./archive-change.ts";
+import { createAwaitRootMergeStep } from "./await-root-merge.ts";
 
 /**
  * Все конкретные зависимости стандартного OpenSpec workflow.
@@ -66,6 +69,7 @@ export interface OpenSpecWorkflowDependencies {
   readonly phaseWork: PhaseWorkService;
   readonly phaseTaskPlanning: PhaseTaskPlanningService;
   readonly rootPullRequest: RootPullRequestService;
+  readonly changeArchive: ChangeArchiveService;
 }
 
 /**
@@ -134,6 +138,19 @@ export function createOpenSpecWorkflow(
       createInspectPhaseWorkStep({
         workspaceDirectory: dependencies.workspaceDirectory,
         phaseWork: dependencies.phaseWork,
+        rootPullRequest: dependencies.rootPullRequest,
+      }),
+      createArchiveChangeStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        readAgentProfiles: dependencies.readAgentProfiles,
+        archive: dependencies.changeArchive,
+        phaseWork: dependencies.phaseWork,
+        changeFindings: dependencies.changeFindingResolution,
+        implementationFindings: dependencies.implementationFindingResolution,
+      }),
+      createAwaitRootMergeStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        archive: dependencies.changeArchive,
         rootPullRequest: dependencies.rootPullRequest,
       }),
       createPreparePhasePlanningBranchStep({

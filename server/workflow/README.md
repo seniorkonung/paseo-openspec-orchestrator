@@ -55,7 +55,8 @@ check-agent-profiles -> check-git-branch -> check-git-worktree
        -> resolve-implementation-review-findings
        -> execute-change-tasks [следующий пакет] -> inspect-phase-work
        | change-complete
-       -> root Ready -> ожидание ручного merge и Retry -> complete
+       -> archive-change [High, sync specs, один коммит]
+       -> await-root-merge [root Ready] -> ожидание ручного merge и Retry -> complete
 ```
 
 Имена трёх `prepare-*-branch` шагов сохранены как внутренние идентификаторы
@@ -66,8 +67,9 @@ check-agent-profiles -> check-git-branch -> check-git-worktree
 заголовки `## Phase N...`, сопоставляет задачи с фазами по первому сегменту
 номера и выбирает первую фазу без задач или с незавершёнными задачами. Перед
 новым этапом он сверяет локальный HEAD с origin без fast-forward и проверяет PR.
-Ready разрешён только при `change-complete`. Merge с оставшейся работой и
-закрытие PR без merge — ошибка.
+Архивация разрешена только при `change-complete`, завершённых артефактах и
+задачах и отсутствии нерешённых findings. Ранее Ready PR возвращается в Draft
+до архивного коммита. Merge до архивации и закрытие PR без merge — ошибка.
 
 Task planning может добавить незавершённые задачи только выбранной фазы,
 сохраняя прежний список задач. Implementation выполняет одну задачу в одном
@@ -81,14 +83,19 @@ Task planning может добавить незавершённые задач�
 
 `WorkflowState` хранит `changeBranch`, `activeBranch`, OpenSpec change,
 identity корневого PR, progress фаз, planning/implementation run и не более
-одной pending-сессии внешнего эффекта. При сохранённом change обе ветки равны
+одной pending-сессии внешнего эффекта. Pending-сессия архивации сохраняет
+baseline, исходный и целевой пути; завершённый архив — commit SHA и эту
+сессию. После архивации финальный gate проверяет дерево и точный HEAD PR,
+не обращаясь к активным задачам. При сохранённом change обе ветки равны
 `change/<id>`. Baseline каждого run и пакета остаётся отдельным commit SHA:
 граница проверки определяется коммитами, а не ответвлением Git.
 
 Checkpoint имеет версию 6. Checkpoint версии 5 и старше не мигрируется и
 остаётся доступным только для просмотра до явного Clear. Активный старый
 workflow нужно завершить прежней версией плагина до обновления либо
-перезапустить вручную. Recovery принимает проверенный локальный коммит до
+перезапустить вручную. Поля архивации необязательны в прежних checkpoint v6;
+если PR уже слит без архива, Retry останавливается с объяснением. Recovery
+принимает проверенный локальный коммит до
 push и уже опубликованный commit до checkpoint; неожиданные состояния
 останавливаются без reset, rebase, force push и автоматического merge.
 

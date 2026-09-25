@@ -43,7 +43,7 @@ function context() {
   };
 }
 
-test("полный change переводит root PR в Ready и ждёт ручной merge через Retry", async () => {
+test("полный change переходит к архивации до перевода root PR в Ready", async () => {
   let readyCalls = 0;
   const step = createInspectPhaseWorkStep({
     workspaceDirectory: "/repo",
@@ -52,7 +52,7 @@ test("полный change переводит root PR в Ready и ждёт руч
     },
     rootPullRequest: {
       async synchronize() { return "a".repeat(40); },
-      async inspect() { return { kind: "open", isDraft: readyCalls === 0, head: "a".repeat(40), identity }; },
+      async inspect() { return { kind: "open", isDraft: true, head: "a".repeat(40), identity }; },
       async makeDraft(_workspace, inspection) { return inspection; },
       async makeReady() {
         readyCalls += 1;
@@ -61,9 +61,9 @@ test("полный change переводит root PR в Ready и ждёт руч
     },
   });
   const result = await step.run(context());
-  assert.equal(result.kind, "halt");
-  assert.equal(readyCalls, 1);
-  assert.match(result.summary, /ожидает merge/u);
+  assert.equal(result.kind, "continue");
+  assert.equal(result.next, "archive-change");
+  assert.equal(readyCalls, 0);
 });
 
 test("повторная проверка после Ready обнаруживает новую задачу и возвращает root PR в Draft", async () => {
@@ -178,4 +178,18 @@ test("merge root PR при оставшейся работе и CLOSED без me
     const result = await step.run(context());
     assert.equal(result.kind, "halt");
   }
+});
+
+test("уже слитый PR без архива останавливается с объяснением", async () => {
+  const step = createInspectPhaseWorkStep({
+    workspaceDirectory: "/repo",
+    phaseWork: { async inspect() { return { kind: "change-complete", progress, snapshot: {} }; } },
+    rootPullRequest: {
+      async synchronize() { return "a".repeat(40); },
+      async inspect() { return { kind: "merged", head: "a".repeat(40), identity }; },
+    },
+  });
+  const result = await step.run(context());
+  assert.equal(result.kind, "halt");
+  assert.match(result.summary, /без архивного коммита/u);
 });

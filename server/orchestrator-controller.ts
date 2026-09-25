@@ -9,6 +9,7 @@ import { createChangeFindingResolutionService } from "./change-finding-resolutio
 import { createImplementationFindingResolutionService } from "./implementation-finding-resolution.ts";
 import { createImplementationRunVerifier } from "./implementation-run-verification.ts";
 import { createChangeTaskExecutionService } from "./change-task-execution.ts";
+import { createChangeArchiveService } from "./change-archive.ts";
 import { readGitBranch } from "./git-branch.ts";
 import { readGitWorktreeStatus } from "./git-worktree.ts";
 import { OpenSpecOrchestratorEngine } from "./openspec-orchestrator-engine.ts";
@@ -154,6 +155,9 @@ export class OrchestratorController {
     const createAgent = (options: Parameters<typeof workspace.agents.create>[0]) =>
       workspace.agents.create(options);
     const phaseWork = createPhaseWorkService();
+    const rootPullRequest = createRootPullRequestService();
+    const changeFindingResolution = createChangeFindingResolutionService({ createAgent });
+    const implementationFindingResolution = createImplementationFindingResolutionService({ createAgent });
     const workflow = createOpenSpecWorkflow({
       workspaceDirectory,
       readAgentProfiles,
@@ -169,14 +173,13 @@ export class OrchestratorController {
       changeArtifacts: createChangeArtifactCreationService({ createAgent }),
       changePublication: createChangePublicationService({ createAgent }),
       changeReview: createChangeReviewService({ createAgent }),
-      changeFindingResolution: createChangeFindingResolutionService({ createAgent }),
-      implementationFindingResolution: createImplementationFindingResolutionService({
-        createAgent,
-      }),
+      changeFindingResolution,
+      implementationFindingResolution,
       changeTaskExecution: createChangeTaskExecutionService({ createAgent }),
       phaseWork,
       phaseTaskPlanning: createPhaseTaskPlanningService({ createAgent, phaseWork }),
-      rootPullRequest: createRootPullRequestService(),
+      rootPullRequest,
+      changeArchive: createChangeArchiveService({ createAgent, rootPullRequest }),
     });
     this.#engine.initialize(workspaceId, {
       workspaceDisplay,

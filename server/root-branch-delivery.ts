@@ -11,6 +11,7 @@ import {
   resolveReviewRepository,
 } from "./review-publication-gateway.ts";
 import { assertPullRequestRepository, repositoryArgument } from "./review-publication-model.ts";
+import type { RootPullRequestIdentity } from "./root-pull-request.ts";
 
 export class RootBranchDeliveryError extends Error {
   constructor(message: string) { super(message); this.name = "RootBranchDeliveryError"; }
@@ -25,6 +26,7 @@ export async function deliverRootCommit(
   headInput: string,
   signal?: AbortSignal,
   command: BoundedCommandRunner = runBoundedCommand,
+  expectedPullRequest?: RootPullRequestIdentity,
 ): Promise<void> {
   const baseline = commitHashSchema.parse(baselineInput);
   const head = commitHashSchema.parse(headInput);
@@ -51,6 +53,13 @@ export async function deliverRootCommit(
   if (requests.length !== 1) throw new RootBranchDeliveryError("Для change требуется ровно один корневой PR");
   const pr = await readReviewPullRequest(command, workspaceDirectory, repositoryArgument(repository), requests[0]!.number, signal);
   assertPullRequestRepository(pr, repository.url);
+  if (expectedPullRequest && (
+    expectedPullRequest.changeBranch !== branch ||
+    expectedPullRequest.number !== pr.number || expectedPullRequest.url !== pr.url ||
+    expectedPullRequest.repositoryHost !== repository.host ||
+    expectedPullRequest.repositoryNameWithOwner.toLowerCase() !== repository.nameWithOwner.toLowerCase() ||
+    expectedPullRequest.repositoryUrl !== repository.url
+  )) throw new RootBranchDeliveryError("Identity корневого PR изменилась до публикации коммита");
   if (pr.state !== "OPEN" || !pr.isDraft || pr.isCrossRepository ||
       pr.baseRefName !== "main" || pr.headRefName !== branch || pr.headRefOid !== remote) {
     throw new RootBranchDeliveryError("Корневой PR изменился или уже не находится в Draft");

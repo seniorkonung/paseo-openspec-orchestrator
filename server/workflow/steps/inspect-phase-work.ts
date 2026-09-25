@@ -102,54 +102,19 @@ async function inspectPhaseWorkStep(
       throw new RootPullRequestError("Корневой pull request закрыт без merge");
     }
     if (pullRequest.kind === "merged") {
-      return {
-        kind: "complete",
-        state: {
-          phaseProgress: decision.progress,
-          rootPullRequest: pullRequest.identity,
-          phaseTarget: null,
-          implementationRun: null,
-          planningRun: null,
-        },
-        summary: `Все фазы change ${change.id} выполнены, корневой PR слит`,
-      };
+      throw new RootPullRequestError("Корневой PR уже слит без архивного коммита; включить архив в этот PR невозможно");
     }
-    if (pullRequest.isDraft) {
-      const ready = await dependencies.rootPullRequest.makeReady(
+    if (!pullRequest.isDraft) {
+      const drafted = await dependencies.rootPullRequest.makeDraft(
         dependencies.workspaceDirectory,
         pullRequest,
         context.signal,
       );
-      if (ready.kind !== "open" || ready.isDraft) {
-        if (ready.kind === "merged") {
-          const raced = await dependencies.phaseWork.inspect(
-            dependencies.workspaceDirectory,
-            change.id,
-            decision.progress,
-            context.signal,
-          );
-          if (raced.kind !== "change-complete") {
-            throw new RootPullRequestError("Корневой PR слит при оставшейся работе");
-          }
-          return {
-            kind: "complete",
-            state: {
-              phaseProgress: raced.progress,
-              rootPullRequest: ready.identity,
-              phaseTarget: null,
-              implementationRun: null,
-              planningRun: null,
-            },
-            summary: `Все фазы change ${change.id} выполнены, корневой PR слит`,
-          };
-        }
-        throw new RootPullRequestError("Корневой pull request не перешёл в Ready");
-      }
-      pullRequest = ready;
+      if (drafted.kind !== "open" || !drafted.isDraft) throw new RootPullRequestError("Корневой PR изменился до архивации");
+      pullRequest = drafted;
     }
 
-    // Повторяем оба наблюдения после Ready: это закрывает гонку между task-state
-    // и head корневого PR до перехода в ручной merge gate.
+    // Перед агентской архивацией повторно проверяем задачи и PR после Draft.
     await dependencies.rootPullRequest.synchronize(
       dependencies.workspaceDirectory,
       change.id,
@@ -190,22 +155,20 @@ async function inspectPhaseWorkStep(
       throw new RootPullRequestError("Корневой pull request закрыт без merge");
     }
     if (racedPullRequest.kind === "merged") {
-      return {
-        kind: "complete",
-        state: {
-          phaseProgress: racedDecision.progress,
-          rootPullRequest: racedPullRequest.identity,
-          phaseTarget: null,
-          implementationRun: null,
-          planningRun: null,
-        },
-        summary: `Все фазы change ${change.id} выполнены, корневой PR слит`,
-      };
+      throw new RootPullRequestError("Корневой PR слит до архивного коммита");
     }
+    if (!racedPullRequest.isDraft) throw new RootPullRequestError("Корневой PR должен оставаться Draft до архивации");
     return {
-      kind: "halt",
-      summary: `Корневой PR #${racedPullRequest.identity.number} ожидает merge`,
-      message: `Выполните merge ${racedPullRequest.identity.url}, затем нажмите «Повторить»`,
+      kind: "continue",
+      next: "archive-change",
+      state: {
+        phaseProgress: racedDecision.progress,
+        rootPullRequest: racedPullRequest.identity,
+        phaseTarget: null,
+        implementationRun: null,
+        planningRun: null,
+      },
+      summary: `Все фазы change ${change.id} выполнены; начинаю архивацию`,
     };
   } catch (error) {
     if (context.signal.aborted) throw error;

@@ -48,6 +48,12 @@ import {
   type PendingPhaseTaskPlanningSession,
 } from "../phase-task-planning.ts";
 import {
+  archivedChangeSchema,
+  pendingArchiveSessionSchema,
+  type ArchivedChange,
+  type PendingArchiveSession,
+} from "../change-archive-model.ts";
+import {
   rootPullRequestIdentitySchema,
   type RootPullRequestIdentity,
 } from "../root-pull-request.ts";
@@ -75,6 +81,8 @@ export interface WorkflowState {
   readonly planningRun: PlanningRun | null;
   readonly phaseProgress: PhaseProgress | null;
   readonly rootPullRequest: RootPullRequestIdentity | null;
+  readonly pendingArchiveSession: PendingArchiveSession | null;
+  readonly archivedChange: ArchivedChange | null;
   readonly phaseTarget:
     | { readonly kind: "planning"; readonly phaseNumber: number }
     | { readonly kind: "implementation"; readonly phaseNumber: number; readonly runNumber: number }
@@ -111,6 +119,8 @@ export const workflowStateSchema = z
     planningRun: planningRunSchema.nullable().default(null),
     phaseProgress: phaseProgressSchema.nullable().default(null),
     rootPullRequest: rootPullRequestIdentitySchema.nullable().default(null),
+    pendingArchiveSession: pendingArchiveSessionSchema.nullable().default(null),
+    archivedChange: archivedChangeSchema.nullable().default(null),
     phaseTarget: z.discriminatedUnion("kind", [
       z.object({
         kind: z.literal("planning"),
@@ -159,6 +169,7 @@ export const workflowStateSchema = z
       state.pendingTaskExecutionSession,
       state.pendingImplementationReviewSession,
       state.pendingPhaseTaskPlanningSession,
+      state.pendingArchiveSession,
     ].filter(Boolean).length;
     if (pendingSessions > 1) {
       context.addIssue({
@@ -200,6 +211,23 @@ export const workflowStateSchema = z
         path: ["rootPullRequest"],
         message: "Identity корневого pull request не соответствует change-ветке",
       });
+    }
+    if (state.pendingArchiveSession && (
+      state.change?.id !== state.pendingArchiveSession.changeId ||
+      state.activeBranch !== state.pendingArchiveSession.branch ||
+      JSON.stringify(state.rootPullRequest) !== JSON.stringify(state.pendingArchiveSession.rootPullRequest) ||
+      !state.phaseProgress || state.phaseTarget || state.implementationRun || state.planningRun || state.archivedChange
+    )) {
+      context.addIssue({ code: "custom", path: ["pendingArchiveSession"], message: "Сессия архивации не соответствует завершённому change" });
+    }
+    if (state.archivedChange && (
+      state.change?.id !== state.archivedChange.session.changeId ||
+      state.activeBranch !== state.archivedChange.session.branch ||
+      JSON.stringify(state.rootPullRequest) !== JSON.stringify(state.archivedChange.session.rootPullRequest) ||
+      !state.phaseProgress || state.phaseTarget || state.implementationRun || state.planningRun ||
+      pendingSessions > 0
+    )) {
+      context.addIssue({ code: "custom", path: ["archivedChange"], message: "Архив не соответствует завершённому change" });
     }
     if (state.phaseTarget && (!state.phaseProgress || state.activeBranch !== state.changeBranch)) {
       context.addIssue({
@@ -483,6 +511,8 @@ export function createInitialWorkflowState(): WorkflowState {
     planningRun: null,
     phaseProgress: null,
     rootPullRequest: null,
+    pendingArchiveSession: null,
+    archivedChange: null,
     phaseTarget: null,
     pendingChangeInitializationSession: null,
     pendingPlanningBranchSession: null,

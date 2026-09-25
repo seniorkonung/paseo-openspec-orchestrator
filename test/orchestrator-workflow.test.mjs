@@ -11,7 +11,7 @@ import { readGitWorktreeStatus } from "../server/git-worktree.ts";
 import { OpenSpecOrchestratorEngine } from "../server/openspec-orchestrator-engine.ts";
 import { OrchestratorLedger } from "../server/orchestrator-ledger.ts";
 import { createOpenSpecWorkflow } from "../server/workflow/steps/index.ts";
-import { workflowCheckpointSchema } from "../server/workflow/types.ts";
+import { createInitialWorkflowState, workflowCheckpointSchema } from "../server/workflow/types.ts";
 import { phaseTaskFingerprint } from "../server/phase-work.ts";
 
 const execFileAsync = promisify(execFile);
@@ -84,6 +84,7 @@ function workflowHarness({ feedbackOnce = false, reviewFindings = 0, twoPhases =
   let resolvedReviewFindings = 0;
   let rootReady = false;
   let rootMerged = false;
+  let archivePublished = false;
   const feedbackItem = {
     source: "comment",
     nodeId: "IC_kwDOExample",
@@ -432,14 +433,31 @@ function workflowHarness({ feedbackOnce = false, reviewFindings = 0, twoPhases =
       async run() { throw new Error("phase planning не требуется"); },
     },
     rootPullRequest: {
-      async synchronize() { return hashes.g; },
+      async synchronize() { return archivePublished ? hashes.h : hashes.f; },
       async inspect() {
         return rootMerged
-          ? { kind: "merged", head: hashes.f, identity: rootPullRequestIdentity }
-          : { kind: "open", isDraft: !rootReady, head: hashes.f, identity: rootPullRequestIdentity };
+          ? { kind: "merged", head: archivePublished ? hashes.h : hashes.f, identity: rootPullRequestIdentity }
+          : { kind: "open", isDraft: !rootReady, head: archivePublished ? hashes.h : hashes.f, identity: rootPullRequestIdentity };
       },
       async makeDraft(_workspace, inspection) { rootReady = false; return { ...inspection, isDraft: true }; },
       async makeReady(_workspace, inspection) { rootReady = true; return { ...inspection, isDraft: false }; },
+    },
+    changeArchive: {
+      async plan() {
+        calls.push("archive.plan");
+        return { changeId, branch: changeBranch, baselineCommit: hashes.f,
+          sourcePath: `openspec/changes/${changeId}`,
+          archivePath: `openspec/changes/archive/2026-09-25-${changeId}`,
+          rootPullRequest: rootPullRequestIdentity };
+      },
+      async run(request) {
+        assert.equal(request.profile.name, "High");
+        calls.push("archive.run");
+        request.onAgentCreated("archive-agent");
+        archivePublished = true;
+        return { session: request.session, commit: hashes.h };
+      },
+      async verifyArchived() { calls.push("archive.verify"); },
     },
   });
   return { workflow, calls, mergeRoot: () => { rootMerged = true; }, get rootReady() { return rootReady; } };
@@ -476,7 +494,8 @@ test("workflow выполняет задачи и ревью в одном PR, �
   assert.equal(ledger.get("workspace").lifecycle.status, "failed");
   assert.equal(harness.rootReady, true);
   assert.equal(ledger.getWorkflowCheckpoint("workspace").version, 6);
-  assert.equal(ledger.getWorkflowCheckpoint("workspace").nextStepId, "inspect-phase-work");
+  assert.equal(ledger.getWorkflowCheckpoint("workspace").nextStepId, "await-root-merge");
+  assert.equal(ledger.getWorkflowCheckpoint("workspace").state.archivedChange.commit, hashes.h);
   assert.ok(harness.calls.includes("implementation.prepare"));
   assert.equal(harness.calls.filter((call) => call === "tasks.plan").length, 3);
   assert.equal(harness.calls.includes("planning.merge"), false);
@@ -485,7 +504,7 @@ test("workflow выполняет задачи и ревью в одном PR, �
   assert.deepEqual(
     ledger.get("workspace").history.flatMap(({ links }) => links)
       .filter((link) => link.kind === "agent").map(({ agentId }) => agentId),
-    ["publication-agent", "planning-review-agent", "task-agent", "implementation-review-agent"],
+    ["publication-agent", "planning-review-agent", "task-agent", "implementation-review-agent", "archive-agent"],
   );
   harness.mergeRoot();
   engine.command("workspace", "retry");
@@ -577,4 +596,13 @@ test("checkpoint v5 несовместим с v6", () => {
       change: { id: changeId },
     },
   }));
+});
+
+test("checkpoint v6 без полей архивации сохраняет совместимость", () => {
+  const state = createInitialWorkflowState();
+  delete state.pendingArchiveSession;
+  delete state.archivedChange;
+  const checkpoint = workflowCheckpointSchema.parse({ version: 6, nextStepId: "inspect-phase-work", state });
+  assert.equal(checkpoint.state.pendingArchiveSession, null);
+  assert.equal(checkpoint.state.archivedChange, null);
 });
