@@ -113,7 +113,6 @@ export interface ReviewFindingPromptVariant {
   readonly skill: string;
   /** MCP-инструмент завершения стадии. */
   readonly toolName: string;
-  readonly commitSubject: (findingId: ReviewFindingId) => string;
 }
 
 /**
@@ -121,13 +120,12 @@ export interface ReviewFindingPromptVariant {
  *
  * Скилл владеет самим исправлением, повторным аудитом и валидацией отчёта.
  * Промпт добавляет только то, чего скилл не знает: выбранный finding, одно
- * явное решение пользователя, ровно один commit и контракт завершения.
+ * явное решение пользователя и контракт завершения.
  */
 export function buildFindingResolutionPrompt(
   variant: ReviewFindingPromptVariant,
   input: ReviewFindingPromptInput,
 ): string {
-  const subject = variant.commitSubject(input.findingId);
   const resolved = input.alreadyCommitted || input.publicationAlreadyCompleted;
   const resolutionInstruction = input.publicationAlreadyCompleted
     ? `This is a recovery session: finding \`${input.findingId}\` already has a valid committed resolution and a verified entry in the root pull request. Change nothing: do not invoke the skill, request the user's decision, commit, or push.`
@@ -141,10 +139,10 @@ export function buildFindingResolutionPrompt(
 1. Explain the finding in Russian to someone who has never seen it: what is wrong, how it affects the product, and what you recommend. Where the resolution depends on a product, contract, architecture, data, security, privacy, or cost choice, give the real options and trade-offs; for an obvious technical correction, explain why product behavior stays the same.
 2. Get one explicit decision from the user about how to resolve this finding before changing any artifact or accepting residual risk. A recommendation is not a decision, and acceptance is never inferred: on acceptance let the skill record it through its own procedure instead of claiming a fix.
 3. Let the skill implement that decision for only this finding and keep later findings intact unless current evidence changes them. If the chosen resolution cannot be implemented or requires a materially different decision, explain the blocker instead of silently changing course. Preserve the existing task list exactly, including completion marks: never reopen a completed task or rewrite or delete an existing task. If more implementation is needed, append new unfinished tasks. The resolution holds only when the agreed outcome is durably owned by the OpenSpec artifacts, any remaining implementation is tracked work, and the finding heading is gone from Findings.
-4. Validate the resulting artifact changes and report state. Then stage only files inside the change root and create exactly one commit with subject \`${subject}\` without asking for another approval; never amend or add a second commit. Report the changes and validation to the user while continuing through publication and completion without pausing for permission.`;
+4. Validate the resulting artifact changes and report state. Then commit only files inside the change root in at least one commit without asking for another approval. Report the changes and validation to the user while continuing through publication and completion without pausing for permission.`;
   const completion = input.publicationAlreadyCompleted
     ? `Finish by calling the orchestrator MCP tool \`${variant.toolName}\` with \`{"mode":"acknowledge-existing"}\`. If it reports an error, follow its feedback and retry the same tool.`
-    : `Call the orchestrator MCP tool \`${variant.toolName}\` with \`{"mode":"publish","problem":"<краткая проблема>","resolution":"<краткий итог>"}\` without asking for additional permission. The orchestrator publishes the verified commit to the root branch and records the result in its pull request. Both summaries are truthful single-line Russian text of at most 500 characters; for an accepted risk describe the acceptance and its rationale in \`resolution\`. If it reports an error, follow its feedback and retry the same tool.`;
+    : `Call the orchestrator MCP tool \`${variant.toolName}\` with \`{"mode":"publish","problem":"<краткая проблема>","resolution":"<краткий итог>"}\` without asking for additional permission. The orchestrator publishes the verified commits to the root branch and records the result in its pull request. Both summaries are truthful single-line Russian text of at most 500 characters; for an accepted risk describe the acceptance and its rationale in \`resolution\`. If it reports an error, follow its feedback and retry the same tool.`;
 
   return buildAgentPrompt({
     role: `You own the resolution of one finding from ${variant.reviewName}.`,
@@ -155,7 +153,6 @@ export function buildFindingResolutionPrompt(
       branch: input.branch,
       remote: "origin",
       reviewPath: input.reviewRepositoryPath,
-      commitSubject: subject,
       alreadyCommitted: input.alreadyCommitted,
       publicationAlreadyCompleted: input.publicationAlreadyCompleted,
     },
@@ -194,7 +191,6 @@ export interface ReviewFindingResolutionBehavior<
   };
   readonly publication: {
     readonly kind: ReviewFindingPublicationKind;
-    readonly commitSubject: (findingId: ReviewFindingId) => string;
   };
 }
 

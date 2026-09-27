@@ -7,12 +7,13 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { prepareReviewPublication } from "../server/change-review-publication.ts";
 import { createChangeReviewVerification } from "../server/change-review-verification.ts";
-import { reviewCommitSubject, changeReviewPrompt } from "../server/change-review.ts";
+import { changeReviewPrompt } from "../server/change-review.ts";
 
 const execFileAsync = promisify(execFile);
 const changeId = "complete-review-workflow";
 const branch = `change/${changeId}`;
 const repositoryUrl = "https://github.com/example/project";
+const reviewSubject = "Review report";
 
 async function fixture(context) {
   const root = await mkdtemp(join(tmpdir(), "openspec-review-"));
@@ -70,7 +71,7 @@ test("review-коммит публикуется в корневой Draft PR и
   assert.equal(target.baselineCommit, value.baseline);
   await writeFile(join(value.changeRoot, "review.md"), "# Review\n\nПроблем не найдено.\n");
   await value.git("add", ".");
-  await value.git("commit", "-m", reviewCommitSubject(changeId));
+  await value.git("commit", "-m", reviewSubject);
   const verification = createChangeReviewVerification({ command: value.command });
   const reviewContext = await verification.readContext(value.workspace, changeId);
   const session = { ...target, changeId, phaseNumber: null };
@@ -82,6 +83,28 @@ test("review-коммит публикуется в корневой Draft PR и
   assert.equal(value.calls.some((call) => call.includes("gh pr create") || call.includes("git switch -c")), false);
 });
 
+test("review публикует несколько коммитов с произвольными сообщениями", async (context) => {
+  const value = await fixture(context);
+  const target = await prepareReviewPublication(value.workspace, changeId, branch, branch, undefined, value.command);
+  await writeFile(join(value.changeRoot, "review.md"), "# Review\n\nПервый проход.\n");
+  await value.git("add", ".");
+  await value.git("commit", "-m", "Первый проход");
+  await writeFile(join(value.changeRoot, "review.md"), "# Review\n\nПроблем не найдено.\n");
+  await value.git("add", ".");
+  await value.git("commit", "-m", "Дополнительная проверка");
+  const verification = createChangeReviewVerification({ command: value.command });
+  const reviewContext = await verification.readContext(value.workspace, changeId);
+  const session = { ...target, changeId, phaseNumber: null };
+  const result = await verification.verifyCompleted(reviewContext, session, new AbortController().signal);
+  assert.equal(result.pullRequest.number, 41);
+  assert.match(
+    await value.git("ls-remote", "--heads", "origin", `refs/heads/${branch}`),
+    new RegExp(`^${await value.git("rev-parse", "HEAD")}`, "u"),
+  );
+  assert.equal(await value.git("rev-list", "--count", `${value.baseline}..HEAD`), "2");
+  assert.equal(value.calls.filter((call) => call.startsWith("git push ")).length, 1);
+});
+
 test("review отклоняет незапланированное изменение и преждевременный merge", async (context) => {
   const value = await fixture(context);
   const target = await prepareReviewPublication(value.workspace, changeId, branch, branch, undefined, value.command);
@@ -90,7 +113,7 @@ test("review отклоняет незапланированное измене�
   await writeFile(join(value.changeRoot, "review.md"), "# Review\n");
   await writeFile(join(value.changeRoot, "proposal.md"), "# Незапланированное изменение\n");
   await value.git("add", ".");
-  await value.git("commit", "-m", reviewCommitSubject(changeId));
+  await value.git("commit", "-m", reviewSubject);
   const verification = createChangeReviewVerification({ command: value.command });
   const reviewContext = await verification.readContext(value.workspace, changeId);
   await assert.rejects(

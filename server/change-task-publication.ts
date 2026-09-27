@@ -8,7 +8,6 @@ import {
   readRemoteTaskBranchCommit as readRemoteCommit,
   readTaskChangedPaths as readChangedPaths,
   readTaskCommitCount as readCommitCount,
-  readTaskCommitSubject as readCommitSubject,
   readTaskGitRoot,
   readTaskHeadCommit as readHeadCommit,
   resolveTaskRepository as resolveRepository,
@@ -32,8 +31,6 @@ import {
 import { runWorkspaceMiseCommand } from "./mise-toolchain.ts";
 
 const TASK_NUMBER_PREFIX = /^(\d+(?:\.\d+)+(?:[A-Za-z]+)?)(?=\s|$)/u;
-const CONVENTIONAL_COMMIT_SUBJECT =
-  /^(?:feat|fix|refactor|test|docs|chore|build|ci|perf|style)(?:\([^\p{Cc}\p{Cf}\r\n()]{1,64}\))?!?: .+/u;
 
 export interface TaskExecutionRecoveryState {
   readonly alreadyCommitted: boolean;
@@ -365,9 +362,9 @@ async function verifyLocalTaskCommit(
     signal,
   );
   const commitCount = await readCommitCount(command, gitRoot, session.baselineCommit, head, signal);
-  if (commitCount !== 1) {
+  if (commitCount < 1) {
     throw new ChangeTaskExecutionError(
-      `Для задачи ${session.taskNumber} требуется ровно один отдельный Git-коммит`,
+      `Для задачи ${session.taskNumber} требуется хотя бы один новый Git-коммит`,
     );
   }
   const changedPaths = await readChangedPaths(
@@ -378,13 +375,7 @@ async function verifyLocalTaskCommit(
     signal,
   );
   if (changedPaths.length === 0) {
-    throw new ChangeTaskExecutionError("Task-коммит не содержит изменений");
-  }
-  const subject = await readCommitSubject(command, gitRoot, head, signal);
-  if (subject.length > 71 || !CONVENTIONAL_COMMIT_SUBJECT.test(subject)) {
-    throw new ChangeTaskExecutionError(
-      "Task-коммит должен иметь Conventional Commit subject короче 72 символов",
-    );
+    throw new ChangeTaskExecutionError("Диапазон коммитов задачи не содержит изменений");
   }
   return head;
 }

@@ -17,7 +17,6 @@ import {
 } from "./change-artifact-git.ts";
 import {
   ChangeArtifactCreationError,
-  artifactCommitSubject,
   openSpecArtifactIdSchema,
   parseChangeId,
   pendingArtifactSessionSchema,
@@ -366,7 +365,6 @@ function artifactCreationPrompt(input: {
   readonly artifactId: string;
   readonly alreadyCreated: boolean;
 }): string {
-  const commitSubject = artifactCommitSubject(input.artifactId);
   const creationInstruction = input.alreadyCreated
     ? `This is a recovery session: the expected artifact is \`${input.artifactId}\` and it already exists. Do not invoke the continue skill again and do not create the next artifact; only review this artifact with the user.`
     : `Invoke the \`${CONTINUE_CHANGE_SKILL}\` skill exactly once: the expected artifact is \`${input.artifactId}\` and the skill must create exactly it.`;
@@ -377,18 +375,17 @@ function artifactCreationPrompt(input: {
     workflowData: {
       changeId: input.changeId,
       artifactId: input.artifactId,
-      commitSubject,
       alreadyCreated: input.alreadyCreated,
     },
     rules: [OPENSPEC_CLI_RULE, STAGE_SCOPE_RULE],
     body: [
       creationInstruction,
       "Show the artifact to the user and ask whether they explicitly approve finishing this stage. While they ask for changes, revise only this artifact and ask again.",
-      `After approval, run \`mise exec --no-deps -- openspec status --change ${input.changeId} --json\`, stage exactly the files listed in \`artifactPaths.${input.artifactId}.existingOutputPaths\`, and create one commit with subject \`${commitSubject}\`. Do not touch another artifact, implement tasks, or amend unrelated files.`,
+      `After approval, run \`mise exec --no-deps -- openspec status --change ${input.changeId} --json\`, commit only the files listed in \`artifactPaths.${input.artifactId}.existingOutputPaths\` in at least one commit. Do not touch another artifact, implement tasks, or change unrelated files.`,
     ],
     completion: completionInstruction({
       tool: "complete_artifact",
-      retryScope: "the expected artifact or its commit",
+      retryScope: "the expected artifact or its commits",
     }),
   });
 }

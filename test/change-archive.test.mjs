@@ -117,6 +117,22 @@ test("архив проверяет задачи, артефакты, перен
   assert.match(changeArchivePrompt(session, "fresh"), /Never choose 'Archive without syncing'/u);
 });
 
+test("архив принимает несколько коммитов с произвольными сообщениями и отклоняет отсутствие коммита", async (context) => {
+  const f = await fixture(context);
+  const session = await f.verification.plan(f.directory, changeId, identity);
+  await assert.rejects(f.verification.verifyCommit(f.directory, session), /хотя бы один новый Git-коммит/u);
+  await f.archive(session);
+  await writeFile(join(f.directory, "openspec", "specs", "api", "spec.md"), `${addedMain}\nДополнение.\n`);
+  await f.git("add", "openspec/specs/api/spec.md");
+  await f.git("commit", "-m", "Дополнительная синхронизация");
+  const head = await f.git("rev-parse", "HEAD");
+  assert.equal(await f.verification.inspectRecovery(f.directory, session), "committed");
+  const archived = await f.verification.verifyCommit(f.directory, session);
+  assert.equal(archived.commit, head);
+  await f.verification.verifyArchived(f.directory, archived);
+  assert.equal(await f.git("rev-list", "--count", `${f.baseline}..HEAD`), "2");
+});
+
 test("архивация останавливается при незавершённых задачах, артефактах и занятом пути", async (context) => {
   const f = await fixture(context);
   f.setCounts(2, 1);

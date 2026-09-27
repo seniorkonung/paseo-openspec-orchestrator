@@ -536,21 +536,7 @@ async function verifyRecoveredCreationCommit(
       ["merge-base", "--is-ancestor", session.baselineCommit, head],
       { cwd: paths.gitRoot, signal },
     );
-    const count = await command(
-      "git",
-      ["rev-list", "--count", `${session.baselineCommit}..${head}`],
-      { cwd: paths.gitRoot, signal },
-    );
-    if (z.coerce.number().int().parse(count.stdout.trim()) !== 1) {
-      throw new Error("Неверное число коммитов");
-    }
-    const subject = await command("git", ["show", "-s", "--format=%s", head], {
-      cwd: paths.gitRoot,
-      signal,
-    });
-    if (subject.stdout.trimEnd() !== changeCommitSubject(session.changeId)) {
-      throw new Error("Неверный subject");
-    }
+    if (head === session.baselineCommit) throw new Error("Отсутствует scaffold-коммит");
     const committedPaths = await readNullSeparatedCommand(
       command,
       "git",
@@ -569,7 +555,7 @@ async function verifyRecoveredCreationCommit(
   } catch (error) {
     if (signal?.aborted) throw error;
     throw new ChangeInitializationError(
-      "Не удалось подтвердить отдельный scaffold-коммит нового change",
+      "Не удалось подтвердить коммиты scaffold нового change",
     );
   }
   await assertCleanWorktree(command, paths.gitRoot, signal);

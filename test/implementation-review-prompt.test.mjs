@@ -28,6 +28,7 @@ function prompt(alreadyCommitted) {
     session,
     reviewRepositoryPath: reviewPath,
     alreadyCommitted,
+    targetCommits: [reviewedHead],
   });
 }
 

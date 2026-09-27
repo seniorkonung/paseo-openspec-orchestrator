@@ -288,7 +288,7 @@ export function changeTaskExecutionPrompt(input: {
 }): string {
   const { session } = input;
   const applyInstruction = input.alreadyCommitted
-    ? "This is a recovery session: the selected task is already implemented in the one expected commit. Do not invoke the apply skill, change files, or create or amend another commit; call the completion tool."
+    ? "This is a recovery session: the selected task is already implemented and committed. Do not invoke the apply skill, change files, or create or amend another commit; call the completion tool."
     : `Invoke exactly this skill command as the implementation request:
 
 \`$openspec-apply-change ${session.changeId} Выполни задачу ${session.taskNumber}. К другим задачам не приступай.\`
@@ -296,7 +296,7 @@ export function changeTaskExecutionPrompt(input: {
 Stop the apply loop right after task ${session.taskNumber}: implement its full specified behavior, run the relevant verification, and mark only its checkbox complete. Leave the description, numbering, order, and completion state of every other task unchanged.`;
   const commitInstruction = input.alreadyCommitted
     ? ""
-    : `When implementation and verification are complete, stage only the files task ${session.taskNumber} needed and create exactly one commit after the baseline, with a Conventional Commits subject shorter than 72 characters. Do not amend, merge, or add a second commit.`;
+    : `When implementation and verification are complete, commit the files task ${session.taskNumber} needed in at least one commit after the baseline.`;
 
   return buildAgentPrompt({
     role: "You own exactly one OpenSpec implementation task.",
@@ -325,11 +325,11 @@ Stop the apply loop right after task ${session.taskNumber}: implement its full s
     body: [
       applyInstruction,
       commitInstruction,
-      "Do not push. The orchestrator verifies and publishes the task commit to the root branch.",
+      "Do not push. The orchestrator verifies and publishes the task commits to the root branch.",
     ],
     completion: completionInstruction({
       tool: "complete_change_task",
-      retryScope: "this task's commit or push state",
+      retryScope: "this task's commits or push state",
       afterSuccess:
         "After it succeeds, end the turn silently instead of sending another message.",
     }),

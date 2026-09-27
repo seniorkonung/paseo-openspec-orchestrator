@@ -4,7 +4,6 @@ import {
   ChangeReviewReportError,
   readChangeReviewReport,
   reviewFindingIdSchema,
-  type ReviewFindingId,
 } from "./change-review-report.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import { implementationBranchSchema, planningBranchSchema } from "./change-branch.ts";
@@ -82,14 +81,8 @@ export function createChangeFindingResolutionService(
     },
     publication: {
       kind: "review",
-      commitSubject: findingResolutionCommitSubject,
     },
   });
-}
-
-export function findingResolutionCommitSubject(findingId: ReviewFindingId): string {
-  const normalizedFindingId = reviewFindingIdSchema.parse(findingId);
-  return `docs(openspec): resolve ${normalizedFindingId} review finding`;
 }
 
 export function changeFindingResolutionPrompt(
@@ -100,7 +93,6 @@ export function changeFindingResolutionPrompt(
       reviewName: "an OpenSpec change review",
       skill: "openspec-review-change",
       toolName: "complete_review_finding",
-      commitSubject: findingResolutionCommitSubject,
     },
     input,
   );

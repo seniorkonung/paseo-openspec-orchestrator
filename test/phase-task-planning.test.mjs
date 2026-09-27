@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import {
+  createPhaseTaskPlanningService,
   pendingPhaseTaskPlanningSessionSchema,
   phaseTaskPlanningPrompt,
   assertPhasePlanningDecision,
@@ -30,6 +37,8 @@ const session = pendingPhaseTaskPlanningSessionSchema.parse({
   },
   taskPaths: ["openspec/changes/phase-change/tasks.md"],
 });
+
+const execFileAsync = promisify(execFile);
 
 test("prompt прямо поручает openspec-update-change только одну фазу без catalog probe", () => {
   const prompt = phaseTaskPlanningPrompt(session, false);
@@ -113,4 +122,83 @@ test("финальная проверка phase planning не допускает
     ),
     /недопустимый файл/u,
   );
+});
+
+test("phase planning завершает два коммита с произвольными сообщениями", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "phase-task-planning-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const taskPath = join(workspace, "openspec", "changes", "phase-change", "tasks.md");
+  await mkdir(join(workspace, "openspec", "changes", "phase-change"), { recursive: true });
+  const git = async (...args) => (await execFileAsync("git", args, { cwd: workspace })).stdout.trim();
+  await git("init", "-b", "change/phase-change");
+  await git("config", "user.name", "OpenSpec Test");
+  await git("config", "user.email", "openspec@example.test");
+  await writeFile(taskPath, "- [x] 1.1 Готовая задача\n");
+  await git("add", ".");
+  await git("commit", "-m", "Начальное состояние");
+  const command = async (executable, args, options) => {
+    const result = await execFileAsync(executable, args, { cwd: options.cwd, signal: options.signal });
+    return { stdout: String(result.stdout), stderr: String(result.stderr) };
+  };
+  const preserved = { ...session.baselineProgress.tasks[0], phaseNumber: 1 };
+  const added = {
+    id: "task-b", number: "2.1", description: "2.1 Новая задача", done: false,
+    phaseNumber: 2, fingerprint: phaseTaskFingerprint("task-b", "2.1", "2.1 Новая задача"),
+  };
+  const phaseWork = {
+    async inspect() {
+      const count = Number(await git("rev-list", "--count", "HEAD"));
+      return count === 1
+        ? { kind: "planning-required", phaseNumber: 2, snapshot: { taskArtifactPaths: [taskPath] } }
+        : { kind: "implementation-required", phaseNumber: 2, runNumber: 4,
+          progress: session.baselineProgress, snapshot: { tasks: [preserved, added] } };
+    },
+  };
+  let toolUrl;
+  const service = createPhaseTaskPlanningService({
+    command,
+    phaseWork,
+    async createAgent(options) {
+      [{ url: toolUrl }] = Object.values(options.config.mcpServers);
+      return { id: "phase-agent", async waitForFinish() { return { status: "idle" }; } };
+    },
+    updateNotificationLabel: async () => {},
+    logger: { error() {}, warn() {} },
+  });
+  const prepared = await service.prepare(
+    workspace, "phase-change", "change/phase-change", "change/phase-change", 2, session.baselineProgress,
+  );
+  const controller = new AbortController();
+  let toolResult;
+  let flow;
+  const running = service.run({
+    workspaceDirectory: workspace,
+    profile: { id: "profile-high", name: "High", provider: "codex", model: "gpt-6-astra", modeId: "default", thinkingOptionId: "high" },
+    session: prepared,
+    signal: controller.signal,
+    onAgentCreated() {
+      flow = (async () => {
+        await writeFile(taskPath, "- [x] 1.1 Готовая задача\n- [ ] 2.1 Новая задача\n");
+        await git("add", ".");
+        await git("commit", "-m", "Планирование фазы");
+        await writeFile(taskPath, "- [x] 1.1 Готовая задача\n- [ ] 2.1 Новая задача\n\nДополнение.\n");
+        await git("add", ".");
+        await git("commit", "-m", "Уточнение плана");
+        const client = new Client({ name: "phase-test", version: "1.0.0" });
+        await client.connect(new StreamableHTTPClientTransport(new URL(toolUrl)));
+        try {
+          toolResult = await client.callTool({ name: "complete_phase_task_planning", arguments: {} });
+        } finally {
+          await client.close();
+        }
+      })();
+      flow.catch(() => controller.abort());
+    },
+    async onCompleted() {},
+  });
+  const completed = await running;
+  await flow;
+  assert.equal(toolResult.isError, undefined);
+  assert.equal(completed.commit, await git("rev-parse", "HEAD"));
+  assert.equal(await git("rev-list", "--count", `${prepared.baselineCommit}..HEAD`), "2");
 });

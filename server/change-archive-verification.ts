@@ -122,13 +122,13 @@ export function createChangeArchiveVerification(options: {
         const { stdout: worktree } = await command("git", ["status", "--porcelain", "-z"], { cwd: directory, signal });
         return sourceExists && !targetExists && worktree.length === 0 ? "fresh" : "partial";
       }
-      await assertSingleCommit(command, directory, session.baselineCommit, signal);
+      await assertCommittedArchive(command, directory, session.baselineCommit, signal);
       return "committed";
     },
     async verifyCommit(directory, sessionInput, signal) {
       const session = pendingArchiveSessionSchema.parse(sessionInput);
       await assertCleanReviewWorktree(command, directory, signal);
-      const commit = await assertSingleCommit(command, directory, session.baselineCommit, signal);
+      const commit = await assertCommittedArchive(command, directory, session.baselineCommit, signal);
       await verifyTree(directory, session, signal);
       const matches = (await readChanges(directory, signal)).filter((change) => change.name === session.changeId);
       if (matches.length !== 0) throw new ChangeArchiveError("Архивированный change всё ещё числится активным");
@@ -139,24 +139,25 @@ export function createChangeArchiveVerification(options: {
       await assertCleanReviewWorktree(command, directory, signal);
       const head = await readReviewHeadCommit(command, directory, signal);
       if (head !== archived.commit) throw new ChangeArchiveError("HEAD изменился после архивного коммита");
-      await assertSingleCommit(command, directory, parsed.baselineCommit, signal);
+      await assertCommittedArchive(command, directory, parsed.baselineCommit, signal);
       await verifyTree(directory, parsed, signal);
     },
   };
 }
 
-async function assertSingleCommit(command: BoundedCommandRunner, directory: string, baseline: string, signal?: AbortSignal): Promise<string> {
-  const [{ stdout: headOutput }, { stdout: parentOutput }, { stdout: subjectOutput }] = await Promise.all([
-    command("git", ["rev-parse", "HEAD"], { cwd: directory, signal }),
-    command("git", ["rev-parse", "HEAD^"], { cwd: directory, signal }),
-    command("git", ["log", "-1", "--format=%s"], { cwd: directory, signal }),
-  ]);
-  const head = headOutput.trim();
-  const subject = subjectOutput.trim();
-  if (parentOutput.trim() !== baseline || !/^(feat|fix|refactor|test|docs|chore|build|ci|perf|style)\([a-z0-9-]+\): .+/u.test(subject) || subject.length >= 72) {
-    throw new ChangeArchiveError("Архивация требует ровно один Conventional Commit после baseline");
+async function assertCommittedArchive(command: BoundedCommandRunner, directory: string, baseline: string, signal?: AbortSignal): Promise<string> {
+  try {
+    const { stdout } = await command("git", ["rev-parse", "HEAD"], { cwd: directory, signal });
+    const head = stdout.trim();
+    if (head === baseline) {
+      throw new ChangeArchiveError("Архивация требует хотя бы один новый Git-коммит после baseline");
+    }
+    await command("git", ["merge-base", "--is-ancestor", baseline, head], { cwd: directory, signal });
+    return head;
+  } catch (error) {
+    if (error instanceof ChangeArchiveError || signal?.aborted) throw error;
+    throw new ChangeArchiveError("Архивный HEAD не продолжает baseline");
   }
-  return head;
 }
 
 async function readTree(command: BoundedCommandRunner, directory: string, revision: string, prefix: string, signal?: AbortSignal, regularOnly = true): Promise<Map<string, string>> {

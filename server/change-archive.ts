@@ -134,7 +134,7 @@ export function createChangeArchiveService(options: {
 export function changeArchivePrompt(session: PendingArchiveSession, recovery: "fresh" | "partial" | "committed"): string {
   const specRoot = `${dirname(dirname(session.sourcePath))}/specs`;
   const action = recovery === "committed"
-    ? "Recovery: the expected archive commit already exists. Do not invoke the skill, change files, or create another commit. Call the completion tool."
+    ? "Recovery: the expected archive commits already exist. Do not invoke the skill, change files, or create another commit. Call the completion tool."
     : recovery === "partial"
       ? "Recovery: inspect the existing uncommitted archive/spec changes. If the active change still exists, resume the `openspec-archive-change` skill. If it has already moved, finish and verify spec sync using the skill's archive rules without moving it again."
       : `Invoke the installed \`openspec-archive-change\` skill for change \`${session.changeId}\`.`;
@@ -155,9 +155,9 @@ export function changeArchivePrompt(session: PendingArchiveSession, recovery: "f
       action,
       "The user has already chosen mandatory delta-spec synchronization. If delta specs exist, sync and verify every capability before moving the change. Never choose 'Archive without syncing' or proceed with incomplete artifacts, tasks, or a sync blocker. If already synced, archive directly. Report a genuine blocker in Russian.",
       `Use the exact archive target \`${session.archivePath}\`. Preserve every file in the change unchanged during the move. Limit changes to \`${session.sourcePath}\`, \`${session.archivePath}\`, and \`${specRoot}\`. Do not edit implementation code, push, merge, or change PR state.`,
-      recovery === "committed" ? "" : "After verification, stage only the allowed paths and create exactly one Conventional Commit after the baseline with a subject shorter than 72 characters; do not amend.",
+      recovery === "committed" ? "" : "After verification, commit only the allowed paths in at least one commit after the baseline.",
     ],
-    completion: completionInstruction({ tool: "complete_change_archive", retryScope: "the archive, main specs, or its single commit" }),
+    completion: completionInstruction({ tool: "complete_change_archive", retryScope: "the archive, main specs, or its commits" }),
   });
 }
 

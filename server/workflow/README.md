@@ -21,12 +21,14 @@ change/<id>
   | task-коммиты, пакетное implementation review и исправления
 ```
 
-Начальная публикация PR, task-коммит, review-коммит и finding-коммит проходят
+Начальная публикация PR, task-коммиты, review-коммиты и finding-коммиты проходят
 проверку состава изменений и сохранённого baseline. Публикацию проверенного
 HEAD выполняет `root-branch-delivery.ts`: remote должен указывать на baseline
 или уже опубликованный HEAD, а точный корневой PR — быть открытым Draft из
 `change/<id>` в `main`. Никаких force push. Преждевременный merge, чужой
 коммит и смена репозитория останавливают этап.
+Каждому этапу нужен хотя бы один новый коммит; число дополнительных коммитов
+и их сообщения не влияют на завершение.
 
 Название и описание PR меняет только оркестратор через REST gateway.
 Сформированное описание change и результаты findings находятся в отдельных
@@ -55,7 +57,7 @@ check-agent-profiles -> check-git-branch -> check-git-worktree
        -> resolve-implementation-review-findings
        -> execute-change-tasks [следующий пакет] -> inspect-phase-work
        | change-complete
-       -> archive-change [High, sync specs, один коммит]
+       -> archive-change [High, sync specs, один или несколько коммитов]
        -> await-root-merge [root Ready] -> ожидание ручного merge и Retry -> complete
 ```
 
@@ -73,8 +75,8 @@ check-agent-profiles -> check-git-branch -> check-git-worktree
 до архивного коммита. Merge до архивации и закрытие PR без merge — ошибка.
 
 Task planning может добавить незавершённые задачи только выбранной фазы,
-сохраняя прежний список задач. Implementation выполняет одну задачу в одном
-коммите; непустой пакет проверяется по точному диапазону
+сохраняя прежний список задач. Implementation выполняет одну задачу с одним
+или несколькими коммитами; непустой пакет проверяется по точному диапазону
 `baseCommit..reviewedHead`. Findings из `review.md` и
 `implementation-review.md` устраняются по одному после предусмотренного
 промптом решения пользователя. Новые задачи после исправления образуют
@@ -96,8 +98,8 @@ Checkpoint имеет версию 6. Checkpoint версии 5 и старше 
 workflow нужно завершить прежней версией плагина до обновления либо
 перезапустить вручную. Поля архивации необязательны в прежних checkpoint v6;
 если PR уже слит без архива, Retry останавливается с объяснением. Recovery
-принимает проверенный локальный коммит до
-push и уже опубликованный commit до checkpoint; неожиданные состояния
+принимает проверенный локальный диапазон коммитов до
+push и уже опубликованный диапазон до checkpoint; неожиданные состояния
 останавливаются без reset, rebase, force push и автоматического merge.
 
 `WorkflowStepContext` содержит `signal`, read-only `state`, durable

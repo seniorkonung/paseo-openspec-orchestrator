@@ -32,6 +32,7 @@ import {
   implementationRepositorySchema,
   implementationRunSchema,
   implementationTaskCommitSchema,
+  type ImplementationTaskCommit,
   type ImplementationRun,
 } from "./implementation-run-model.ts";
 import {
@@ -122,10 +123,6 @@ export class ImplementationReviewError extends Error {
   }
 }
 
-export function implementationReviewCommitSubject(): string {
-  return "docs(openspec): review implementation batch";
-}
-
 export function createImplementationReviewService(
   options: ImplementationReviewServiceOptions,
 ): ImplementationReviewService {
@@ -160,11 +157,7 @@ export function createImplementationReviewService(
         run.batch.headCommit,
         signal,
       );
-      if (!sameStrings(commits, run.batch.tasks.map(({ commit }) => commit))) {
-        throw new ImplementationReviewError(
-          "Task-коммиты пакета не совпадают с точным Git-диапазоном review",
-        );
-      }
+      assertTaskCommitCoverage(commits, run.batch.tasks);
       return pendingImplementationReviewSessionSchema.parse({
         changeId: run.changeId,
         changeBranch: run.changeBranch,
@@ -195,6 +188,14 @@ export function createImplementationReviewService(
         session,
         request.signal,
       );
+      const targetCommits = await readCommitRange(
+        command,
+        context.gitRoot,
+        session.baseCommit,
+        session.reviewedHead,
+        request.signal,
+      );
+      assertTaskCommitCoverage(targetCommits, session.tasks);
       const host = await mcpHost.listen();
       let completed: CompletedImplementationReview | null = null;
       const agentSession = createManagedAgentSession<CompletedImplementationReview>({
@@ -345,6 +346,7 @@ export function createImplementationReviewService(
           session,
           reviewRepositoryPath: context.reviewRepositoryPath,
           alreadyCommitted,
+          targetCommits,
         }));
         const result = await agentSession.waitForCompletion();
         await new Promise<void>((resolveDrain) => setImmediate(resolveDrain));
@@ -361,18 +363,18 @@ export function implementationReviewPrompt(input: {
   readonly session: PendingImplementationReviewSession;
   readonly reviewRepositoryPath: string;
   readonly alreadyCommitted: boolean;
+  readonly targetCommits: readonly string[];
 }): string {
   const { session } = input;
-  const subject = implementationReviewCommitSubject();
   const reviewInstruction = input.alreadyCommitted
-    ? "This is a recovery session: the complete report commit already exists. Do not invoke the review skill, edit files, or create or amend a commit."
-    : `Invoke \`openspec-review-implementation\` for the exact immutable range \`${session.baseCommit}..${session.reviewedHead}\` and change \`${session.changeId}\`. Review every listed task commit and map every task to at least one review unit.`;
+    ? "This is a recovery session: the complete report commits already exist. Do not invoke the review skill, edit files, or create or amend a commit."
+    : `Invoke \`openspec-review-implementation\` for the exact immutable range \`${session.baseCommit}..${session.reviewedHead}\` and change \`${session.changeId}\`. Review every target commit and map every task to at least one review unit.`;
   const delegationInstruction = input.alreadyCommitted
     ? ""
     : `You may spawn review subagents to inspect the exact immutable range \`${session.baseCommit}..${session.reviewedHead}\`. Give them the same stage boundaries and target commits from the workflow data. They may only inspect and report findings. Only you may write the report, create the review commit, and call \`complete_implementation_review\`.`;
   const commitInstruction = input.alreadyCommitted
     ? ""
-    : `When the report is complete and format-valid, stage only the report and create exactly one commit after the reviewed head with subject \`${subject}\`.`;
+    : "When the report is complete and format-valid, commit only the report in at least one commit after the reviewed head.";
 
   return buildAgentPrompt({
     role: "You own one bounded implementation-review stage.",
@@ -382,10 +384,15 @@ export function implementationReviewPrompt(input: {
       branch: session.implementationBranch,
       baseCommit: session.baseCommit,
       reviewedHead: session.reviewedHead,
-      targetCommits: session.tasks.map(({ commit }) => commit),
+      targetCommits: input.targetCommits,
       tasks: session.tasks,
+      taskCommitRanges: session.tasks.map((task, index) => ({
+        taskId: task.taskId,
+        taskNumber: task.taskNumber,
+        fromExclusive: index === 0 ? session.baseCommit : session.tasks[index - 1]!.commit,
+        throughInclusive: task.commit,
+      })),
       reviewPath: input.reviewRepositoryPath,
-      commitSubject: subject,
       alreadyCommitted: input.alreadyCommitted,
     },
     rules: [
@@ -403,7 +410,7 @@ export function implementationReviewPrompt(input: {
     ],
     completion: completionInstruction({
       tool: "complete_implementation_review",
-      retryScope: "the report commit or its push",
+      retryScope: "the report commits or their push",
     }),
   });
 }
@@ -458,9 +465,9 @@ async function verifyCompletedReview(
     head,
     signal,
   );
-  if (commitCount !== 1) {
+  if (commitCount < 1) {
     throw new ImplementationReviewError(
-      "После reviewed head требуется ровно один implementation review commit",
+      "После reviewed head требуется хотя бы один новый implementation review commit",
     );
   }
   const changedPaths = await readTaskChangedPaths(
@@ -473,17 +480,6 @@ async function verifyCompletedReview(
   if (!sameStrings(changedPaths, [context.reviewRepositoryPath])) {
     throw new ImplementationReviewError(
       "Implementation review commit должен изменять только implementation-review.md",
-    );
-  }
-  const subject = (
-    await command("git", ["log", "-1", "--format=%s", head], {
-      cwd: context.gitRoot,
-      signal,
-    })
-  ).stdout.trim();
-  if (subject !== implementationReviewCommitSubject()) {
-    throw new ImplementationReviewError(
-      `Review commit должен иметь subject «${implementationReviewCommitSubject()}»`,
     );
   }
   const remoteHead = await readRemoteTaskBranchCommit(
@@ -600,6 +596,27 @@ async function readCommitRange(
   } catch (error) {
     if (signal?.aborted) throw error;
     throw new ImplementationReviewError("Не удалось прочитать task-коммиты review range");
+  }
+}
+
+function assertTaskCommitCoverage(
+  commits: readonly string[],
+  tasks: readonly ImplementationTaskCommit[],
+): void {
+  let cursor = 0;
+  for (const task of tasks) {
+    while (cursor < commits.length && commits[cursor] !== task.commit) cursor += 1;
+    if (cursor === commits.length) {
+      throw new ImplementationReviewError(
+        "Завершающие коммиты задач не идут по порядку в Git-диапазоне review",
+      );
+    }
+    cursor += 1;
+  }
+  if (cursor !== commits.length) {
+    throw new ImplementationReviewError(
+      "После завершающего коммита последней задачи есть непроверенные коммиты",
+    );
   }
 }
 

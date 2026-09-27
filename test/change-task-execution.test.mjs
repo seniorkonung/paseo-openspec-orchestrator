@@ -11,6 +11,8 @@ import {
   createChangeTaskExecutionService,
 } from "../server/change-task-execution.ts";
 import { inspectTaskExecutionRecovery, verifyCompletedTask } from "../server/change-task-publication.ts";
+import { collectImplementationTask } from "../server/implementation-run-model.ts";
+import { createImplementationReviewService, implementationReviewPrompt } from "../server/implementation-review.ts";
 
 const execFileAsync = promisify(execFile);
 const changeId = "selected-change";
@@ -80,6 +82,16 @@ async function fixture(context) {
   };
   const command = async (executable, arguments_, options) => {
     if (executable === "mise") {
+      if (arguments_.includes("status")) {
+        return {
+          stdout: JSON.stringify({
+            changeName: changeId,
+            changeRoot: join(workspace, "openspec", "changes", changeId),
+            actionContext: { mode: "repo-local", sourceOfTruth: "repo" },
+          }),
+          stderr: "",
+        };
+      }
       return { stdout: JSON.stringify(await apply()), stderr: "" };
     }
     if (executable === "git" && arguments_.join(" ") === "remote get-url origin") {
@@ -131,6 +143,12 @@ async function commitTask(value, { markSecond = false } = {}) {
   await writeFile(join(value.workspace, "implementation.ts"), "export const implemented = true;\n");
   await execFileAsync("git", ["add", "."], { cwd: value.workspace });
   await execFileAsync("git", ["commit", "-m", "feat(task): implement first task"], { cwd: value.workspace });
+}
+
+async function commitTaskFollowup(value) {
+  await writeFile(join(value.workspace, "followup.ts"), "export const followup = true;\n");
+  await execFileAsync("git", ["add", "followup.ts"], { cwd: value.workspace });
+  await execFileAsync("git", ["commit", "-m", "Additional work for the same task"], { cwd: value.workspace });
 }
 
 test("plan выбирает первую задачу и сохраняет общий implementation baseline", async (context) => {
@@ -281,6 +299,7 @@ test("task checkpoint восстанавливается до push и после
   const plan = await service.plan(value.workspace, value.run);
   assert.equal(plan.kind, "next-task");
   await commitTask(value);
+  await commitTaskFollowup(value);
   const signal = new AbortController().signal;
   assert.deepEqual(
     await inspectTaskExecutionRecovery(command, value.workspace, value.workspace, plan.session, signal),
@@ -295,6 +314,100 @@ test("task checkpoint восстанавливается до push и после
   const second = await verifyCompletedTask(command, value.workspace, value.workspace, plan.session, signal);
   assert.deepEqual(second, first);
   assert.equal(calls.filter((call) => call.startsWith("git push ")).length, 1);
+});
+
+test("implementation review получает все коммиты задачи и её завершающий SHA", async (context) => {
+  const value = await fixture(context);
+  const taskService = createChangeTaskExecutionService({ command: value.command, async createAgent() {} });
+  const taskPlan = await taskService.plan(value.workspace, value.run);
+  assert.equal(taskPlan.kind, "next-task");
+  await commitTask(value);
+  const first = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: value.workspace })).stdout.trim();
+  await commitTaskFollowup(value);
+  const completed = await verifyCompletedTask(
+    value.command, value.workspace, value.workspace, taskPlan.session, new AbortController().signal,
+  );
+  const run = collectImplementationTask(value.run, {
+    taskId: completed.taskId,
+    taskNumber: completed.taskNumber,
+    commit: completed.commit,
+  });
+  const review = createImplementationReviewService({ command: value.command, async createAgent() {} });
+  const session = await review.plan(value.workspace, run);
+  const prompt = implementationReviewPrompt({
+    session,
+    reviewRepositoryPath: `openspec/changes/${changeId}/implementation-review.md`,
+    alreadyCommitted: false,
+    targetCommits: [first, completed.commit],
+  });
+  assert.deepEqual(session.tasks.map(({ commit }) => commit), [completed.commit]);
+  assert.ok(prompt.includes(`"targetCommits":["${first}","${completed.commit}"]`));
+  assert.ok(prompt.includes(`"fromExclusive":"${value.baseline}"`));
+  assert.ok(prompt.includes(`"throughInclusive":"${completed.commit}"`));
+  await assert.rejects(
+    review.plan(value.workspace, {
+      ...run,
+      batch: { ...run.batch, tasks: [{ ...run.batch.tasks[0], commit: first }] },
+    }),
+    /непроверенные коммиты/u,
+  );
+});
+
+test("implementation review завершает отчёт из двух коммитов с произвольными сообщениями", async (context) => {
+  const value = await fixture(context);
+  const taskService = createChangeTaskExecutionService({ command: value.command, async createAgent() {} });
+  const taskPlan = await taskService.plan(value.workspace, value.run);
+  await commitTask(value);
+  const completedTask = await verifyCompletedTask(
+    value.command, value.workspace, value.workspace, taskPlan.session, new AbortController().signal,
+  );
+  const run = collectImplementationTask(value.run, {
+    taskId: completedTask.taskId,
+    taskNumber: completedTask.taskNumber,
+    commit: completedTask.commit,
+  });
+  const reportPath = join(value.workspace, "openspec", "changes", changeId, "implementation-review.md");
+  let toolResult;
+  const review = createImplementationReviewService({
+    command: value.command,
+    async createAgent(options) {
+      const [{ url }] = Object.values(options.config.mcpServers);
+      return {
+        id: "implementation-review-agent",
+        async commands() { return { commands: [{ name: "openspec-review-implementation" }], error: null }; },
+        async send() {
+          await writeFile(reportPath, "# Review\n\nПервый проход.\n");
+          await execFileAsync("git", ["add", "openspec"], { cwd: value.workspace });
+          await execFileAsync("git", ["commit", "-m", "Первый проход review"], { cwd: value.workspace });
+          await writeFile(reportPath, "# Review\n\nЗавершено.\n");
+          await execFileAsync("git", ["add", "openspec"], { cwd: value.workspace });
+          await execFileAsync("git", ["commit", "-m", "Дополнительный проход review"], { cwd: value.workspace });
+          const client = await connectClient(url);
+          try {
+            toolResult = await client.callTool({ name: "complete_implementation_review", arguments: {} });
+          } finally {
+            await client.close();
+          }
+        },
+        async waitForFinish() { return { status: "idle" }; },
+      };
+    },
+    updateNotificationLabel: async () => {},
+    logger: { error() {}, warn() {} },
+  });
+  const session = await review.plan(value.workspace, run);
+  const result = await review.run({
+    workspaceDirectory: value.workspace,
+    profile: highProfile(),
+    run,
+    session,
+    signal: new AbortController().signal,
+    onAgentCreated() {},
+    async onReviewCompleted() {},
+  });
+  assert.equal(toolResult.isError, undefined);
+  assert.equal(result.reviewCommit, (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: value.workspace })).stdout.trim());
+  assert.equal((await execFileAsync("git", ["rev-list", "--count", `${completedTask.commit}..HEAD`], { cwd: value.workspace })).stdout.trim(), "2");
 });
 
 test("recovery prompt не повторяет apply и запрещает GitHub-операции", () => {

@@ -9,7 +9,6 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import {
   changeFindingResolutionPrompt,
   createChangeFindingResolutionService,
-  findingResolutionCommitSubject,
 } from "../server/change-finding-resolution.ts";
 import {
   reviewPullRequestBody,
@@ -21,6 +20,7 @@ const execFileAsync = promisify(execFile);
 const changeId = "resolve-review-findings";
 const parentBranch = `change/${changeId}`;
 const branch = parentBranch;
+const findingSubject = "Resolve review finding";
 const publishInput = {
   mode: "publish",
   problem: "Артефакты не фиксировали обязательное поведение.",
@@ -220,7 +220,7 @@ function createCommand(fixture) {
 async function commitResolution(fixture, {
   findingIds = ["F3"],
   acceptedRisks = [],
-  subject = findingResolutionCommitSubject("F1"),
+  subject = findingSubject,
   extraPath,
   push = false,
 } = {}) {
@@ -345,7 +345,7 @@ test("High ждёт scoped MCP, а оркестратор публикует п�
   assert.match(firstText(result), /незакоммиченные или неотслеживаемые/);
 
   await execFileAsync("git", ["add", "openspec"], { cwd: fixture.workspace });
-  await execFileAsync("git", ["commit", "-m", findingResolutionCommitSubject("F1")], {
+  await execFileAsync("git", ["commit", "-m", findingSubject], {
     cwd: fixture.workspace,
   });
   result = await client.callTool({ name: "complete_review_finding", arguments: publishInput });
@@ -415,7 +415,7 @@ test("accepted risk удаляет finding из активного списка"
   assert.match(fixture.pullRequest.body, /\*\*Итог:\*\* Риск принят:/);
 });
 
-async function rejectedCommitResult(context, kind) {
+async function commitScenarioResult(context, kind) {
   const fixture = await createRepository(context, ["F1"]);
   const { command } = createCommand(fixture);
   const controller = new AbortController();
@@ -449,13 +449,13 @@ async function rejectedCommitResult(context, kind) {
     findingIds: [],
     subject: kind === "wrong-subject"
       ? "docs(openspec): use wrong finding subject"
-      : findingResolutionCommitSubject("F1"),
+      : findingSubject,
     extraPath: kind === "outside" ? "outside.md" : undefined,
   });
   if (kind === "multiple") {
     await writeFile(join(fixture.changeRoot, "design.md"), "# Дизайн\n");
     await execFileAsync("git", ["add", "openspec"], { cwd: fixture.workspace });
-    await execFileAsync("git", ["commit", "-m", findingResolutionCommitSubject("F1")], {
+    await execFileAsync("git", ["commit", "-m", findingSubject], {
       cwd: fixture.workspace,
     });
   }
@@ -468,23 +468,25 @@ async function rejectedCommitResult(context, kind) {
     arguments: publishInput,
   });
   await client.close();
-  controller.abort();
-  await assert.rejects(running, /Операция отменена/);
+  if (result.isError) {
+    controller.abort();
+    await assert.rejects(running, /Операция отменена/);
+  } else {
+    await running;
+  }
   return result;
 }
 
-test("completion tool отклоняет внешний путь, несколько коммитов и неверный subject", async (context) => {
-  const outside = await rejectedCommitResult(context, "outside");
+test("completion tool сохраняет границу change и принимает несколько коммитов с любыми subject", async (context) => {
+  const outside = await commitScenarioResult(context, "outside");
   assert.equal(outside.isError, true);
   assert.match(firstText(outside), /только файлы выбранного change/);
 
-  const multiple = await rejectedCommitResult(context, "multiple");
-  assert.equal(multiple.isError, true);
-  assert.match(firstText(multiple), /ровно один отдельный Git-коммит/);
+  const multiple = await commitScenarioResult(context, "multiple");
+  assert.equal(multiple.isError, undefined);
 
-  const wrongSubject = await rejectedCommitResult(context, "wrong-subject");
-  assert.equal(wrongSubject.isError, true);
-  assert.match(firstText(wrongSubject), /docs\(openspec\): resolve F1 review finding/);
+  const wrongSubject = await commitScenarioResult(context, "wrong-subject");
+  assert.equal(wrongSubject.isError, undefined);
 });
 
 test("ошибка checkpoint восстанавливает ntfy и повторный вызов идемпотентен", async (context) => {

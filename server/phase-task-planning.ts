@@ -24,7 +24,6 @@ import {
   readCurrentTaskBranch,
   readTaskChangedPaths,
   readTaskCommitCount,
-  readTaskCommitSubject,
   readTaskGitRoot,
   readTaskHeadCommit,
 } from "./change-task-gateway.ts";
@@ -49,8 +48,6 @@ export type PhasePlanningPaseoAgentCreator = (
 ) => Promise<PaseoAgent>;
 
 const MAX_PATH_LENGTH = 8_192;
-const CONVENTIONAL_COMMIT_SUBJECT =
-  /^(?:feat|fix|refactor|test|docs|chore|build|ci|perf|style)(?:\([^\p{Cc}\p{Cf}\r\n()]{1,64}\))?!?: .+/u;
 
 export const pendingPhaseTaskPlanningSessionSchema = z
   .object({
@@ -211,7 +208,7 @@ export function createPhaseTaskPlanningService(
       });
       const scope = await agentSession.openScope(() => host.expose({
         complete_phase_task_planning: defineMcpTool({
-          description: "Проверить commit с задачами ровно одной фазы",
+          description: "Проверить коммиты с задачами ровно одной фазы",
           inputSchema: z.object({}).strict(),
           outputSchema: z.object({
             branch: planningBranchSchema,
@@ -293,11 +290,11 @@ export function phaseTaskPlanningPrompt(
   alreadyCommitted: boolean,
 ): string {
   const action = alreadyCommitted
-    ? "This is a recovery session. The expected planning commit already exists. Do not invoke the skill, edit files, or amend/create a commit. Call the completion tool."
+    ? "This is a recovery session. The expected planning commits already exist. Do not invoke the skill, edit files, or amend/create a commit. Call the completion tool."
     : `Invoke the openspec-update-change skill for change \`${session.changeId}\` and plan tasks exclusively for Phase ${session.phaseNumber}. Do not inspect the command catalog first. Follow every interactive confirmation the skill requires. Preserve all existing tasks byte-for-byte and in the same order, add at least one incomplete task numbered ${session.phaseNumber}.*, and plan no other phase.`;
   const commitInstruction = alreadyCommitted
     ? ""
-    : "Only the task artifact paths in the workflow data may change: leave plan.md, the other planning artifacts, review reports, code, tests, configuration, and documentation untouched. Existing task IDs, numbers, descriptions, order, and completion states stay as they are, and every new task starts incomplete. Then stage only those task files and create exactly one Conventional Commit with a subject shorter than 72 characters; never amend or add a second commit.";
+    : "Only the task artifact paths in the workflow data may change: leave plan.md, the other planning artifacts, review reports, code, tests, configuration, and documentation untouched. Existing task IDs, numbers, descriptions, order, and completion states stay as they are, and every new task starts incomplete. Commit the task files in at least one commit.";
 
   return buildAgentPrompt({
     role: "You own task planning for exactly one phase of an existing OpenSpec change.",
@@ -320,7 +317,7 @@ export function phaseTaskPlanningPrompt(
     body: [action, commitInstruction],
     completion: completionInstruction({
       tool: "complete_phase_task_planning",
-      retryScope: "the planning commit",
+      retryScope: "the planning commits",
       afterSuccess: "After it succeeds, end the turn silently.",
     }),
   });
@@ -359,17 +356,13 @@ async function verifyPhasePlanning(
     "Planning commit больше не продолжает baseline",
     signal,
   );
-  if (await readTaskCommitCount(command, gitRoot, session.baselineCommit, head, signal) !== 1) {
-    throw new PhaseTaskPlanningError("Для task planning требуется ровно один commit");
+  if (await readTaskCommitCount(command, gitRoot, session.baselineCommit, head, signal) < 1) {
+    throw new PhaseTaskPlanningError("Для task planning требуется хотя бы один новый commit");
   }
   const changed = await readTaskChangedPaths(command, gitRoot, session.baselineCommit, head, signal);
   const allowed = new Set(session.taskPaths);
   if (changed.length === 0 || changed.some((path) => !allowed.has(path))) {
     throw new PhaseTaskPlanningError("Planning commit может изменять только task-артефакты");
-  }
-  const subject = await readTaskCommitSubject(command, gitRoot, head, signal);
-  if (subject.length > 71 || !CONVENTIONAL_COMMIT_SUBJECT.test(subject)) {
-    throw new PhaseTaskPlanningError("Planning commit должен быть Conventional Commit короче 72 символов");
   }
   const decision = await phaseWork.inspect(
     workspaceDirectory,

@@ -3,7 +3,6 @@ import { openSpecChangeIdSchema } from "./openspec-change.ts";
 
 const MAX_IDENTIFIER_LENGTH = 128;
 const MAX_PATH_LENGTH = 8_192;
-const FALLBACK_COMMIT_SUBJECT = "docs(openspec): add planning artifact";
 
 export const openSpecArtifactIdSchema = z
   .string()
@@ -73,9 +72,4 @@ export function parseChangeId(changeId: string): string {
     throw new ChangeArtifactCreationError("Change ID должен быть в kebab-case");
   }
   return parsed.data;
-}
-
-export function artifactCommitSubject(artifactId: string): string {
-  const detailed = `docs(openspec): add ${artifactId} artifact`;
-  return detailed.length <= 71 ? detailed : FALLBACK_COMMIT_SUBJECT;
 }

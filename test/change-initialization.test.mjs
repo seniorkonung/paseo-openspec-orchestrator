@@ -276,6 +276,23 @@ test("повтор после сбоя push согласует scaffold без �
   assert.equal(fixture.newCalls, 1);
 });
 
+test("восстановление scaffold публикует дополнительный коммит с произвольным сообщением", async (context) => {
+  const fixture = await repository(context);
+  const service = createChangeInitializationService({ command: commandFor(fixture) });
+  const session = await service.prepare(fixture.workspace, changeId, changeBranch);
+  fixture.pushFailures = 1;
+  await assert.rejects(service.initialize(fixture.workspace, session), /Не удалось опубликовать ветку/u);
+  await writeFile(join(fixture.changeRoot, "proposal.md"), "# Дополнение\n");
+  await git(fixture.workspace, ["add", "openspec"]);
+  await git(fixture.workspace, ["commit", "-m", "Дополнение scaffold"]);
+  const head = await git(fixture.workspace, ["rev-parse", "HEAD"]);
+  const initialized = await service.initialize(fixture.workspace, session);
+  assert.equal(initialized.pullRequest.number, 41);
+  assert.equal(await git(fixture.workspace, ["rev-list", "--count", `${fixture.baselineCommit}..HEAD`]), "2");
+  assert.equal(await git(fixture.workspace, ["rev-parse", "HEAD"]), head);
+  assert.equal(fixture.newCalls, 1);
+});
+
 test("повтор после сбоя ответа GitHub переиспользует созданный Draft PR", async (context) => {
   const fixture = await repository(context);
   const service = createChangeInitializationService({ command: commandFor(fixture) });

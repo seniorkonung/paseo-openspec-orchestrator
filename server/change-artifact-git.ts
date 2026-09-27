@@ -3,7 +3,6 @@ import { z } from "zod";
 import type { BoundedCommandRunner } from "./bounded-command.ts";
 import {
   ChangeArtifactCreationError,
-  artifactCommitSubject,
   commitHashSchema,
   type PendingArtifactSession,
 } from "./change-artifact-model.ts";
@@ -43,9 +42,9 @@ export async function verifyArtifactCommit(
     if (signal.aborted) throw error;
     throw new ChangeArtifactCreationError("Не удалось проверить историю Git артефакта");
   }
-  if (commitCount !== 1) {
+  if (commitCount < 1) {
     throw new ChangeArtifactCreationError(
-      "Для текущего артефакта требуется ровно один отдельный Git-коммит",
+      "Для текущего артефакта требуется хотя бы один новый Git-коммит",
     );
   }
 
@@ -82,22 +81,6 @@ export async function verifyArtifactCommit(
       "Git-коммит должен содержать только файлы ожидаемого OpenSpec-артефакта",
     );
   }
-
-  const expectedSubject = artifactCommitSubject(session.artifactId);
-  try {
-    const result = await command("git", ["log", "-1", "--format=%s", head], {
-      cwd: status.gitRoot,
-      signal,
-    });
-    if (result.stdout.trim() !== expectedSubject) {
-      throw new ChangeArtifactCreationError(
-        `Git-коммит должен иметь сообщение «${expectedSubject}»`,
-      );
-    }
-  } catch (error) {
-    if (error instanceof ChangeArtifactCreationError || signal.aborted) throw error;
-    throw new ChangeArtifactCreationError("Не удалось проверить сообщение Git-коммита");
-  }
 }
 
 export async function assertRecoverableCommitRange(
@@ -108,24 +91,6 @@ export async function assertRecoverableCommitRange(
 ): Promise<void> {
   const head = await readHeadCommit(command, gitRoot, signal);
   await assertDescendsFromBaseline(command, gitRoot, baselineCommit, head, signal);
-  try {
-    const result = await command(
-      "git",
-      ["rev-list", "--count", `${baselineCommit}..${head}`],
-      { cwd: gitRoot, signal },
-    );
-    const count = z.coerce.number().int().nonnegative().parse(result.stdout.trim());
-    if (count > 1) {
-      throw new ChangeArtifactCreationError(
-        "После начала создания артефакта появилось больше одного Git-коммита",
-      );
-    }
-  } catch (error) {
-    if (error instanceof ChangeArtifactCreationError || signal?.aborted) throw error;
-    throw new ChangeArtifactCreationError(
-      "Не удалось восстановить Git-состояние незавершённого артефакта",
-    );
-  }
 }
 
 export async function assertCleanWorktree(

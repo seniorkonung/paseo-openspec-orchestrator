@@ -11,7 +11,6 @@ import {
   type PlanningBranch,
 } from "./change-branch.ts";
 
-const FALLBACK_COMMIT_SUBJECT = "docs(openspec): add change review";
 
 export const pendingReviewSessionSchema = reviewPublicationTargetSchema
   .safeExtend({
@@ -57,11 +56,6 @@ export class ChangeReviewError extends Error {
     super(message);
     this.name = "ChangeReviewError";
   }
-}
-
-export function reviewCommitSubject(changeId: string): string {
-  const detailed = `docs(openspec): add ${parseReviewChangeId(changeId)} review`;
-  return detailed.length <= 71 ? detailed : FALLBACK_COMMIT_SUBJECT;
 }
 
 export function reviewPublicationTarget(

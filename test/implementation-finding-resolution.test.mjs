@@ -8,7 +8,6 @@ import { promisify } from "node:util";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import {
   createImplementationFindingResolutionService,
-  implementationFindingResolutionCommitSubject,
   implementationFindingResolutionPrompt,
 } from "../server/implementation-finding-resolution.ts";
 
@@ -16,6 +15,7 @@ const execFileAsync = promisify(execFile);
 const changeId = "resolve-implementation-findings";
 const parentBranch = `change/${changeId}`;
 const branch = parentBranch;
+const findingSubject = "Resolve implementation finding";
 const reviewedBase = "a".repeat(40);
 const reviewedHead = "b".repeat(40);
 const publishInput = {
@@ -251,7 +251,7 @@ function createCommand(fixture) {
 async function commitResolution(fixture, {
   findingIds = ["F3"],
   acceptedRisks = [],
-  subject = implementationFindingResolutionCommitSubject("F1"),
+  subject = findingSubject,
   extraPath,
   push = false,
 } = {}) {
@@ -367,7 +367,7 @@ test("High завершает implementation finding, а оркестратор 
   assert.match(firstText(result), /незакоммиченные или неотслеживаемые/);
 
   await execFileAsync("git", ["add", "openspec"], { cwd: fixture.workspace });
-  await execFileAsync("git", ["commit", "-m", implementationFindingResolutionCommitSubject("F1")], {
+  await execFileAsync("git", ["commit", "-m", findingSubject], {
     cwd: fixture.workspace,
   });
   result = await client.callTool({
@@ -441,7 +441,7 @@ test("explicit accepted risk удаляет implementation finding из акти
   );
 });
 
-async function rejectedCommitResult(context, kind) {
+async function commitScenarioResult(context, kind) {
   const fixture = await createRepository(context, ["F1"]);
   const { command } = createCommand(fixture);
   const controller = new AbortController();
@@ -474,7 +474,7 @@ async function rejectedCommitResult(context, kind) {
   if (kind === "deleted-report") {
     await rm(fixture.reviewPath);
     await execFileAsync("git", ["add", "openspec"], { cwd: fixture.workspace });
-    await execFileAsync("git", ["commit", "-m", implementationFindingResolutionCommitSubject("F1")], {
+    await execFileAsync("git", ["commit", "-m", findingSubject], {
       cwd: fixture.workspace,
     });
   } else {
@@ -482,14 +482,14 @@ async function rejectedCommitResult(context, kind) {
       findingIds: [],
       subject: kind === "wrong-subject"
         ? "docs(openspec): use wrong implementation subject"
-        : implementationFindingResolutionCommitSubject("F1"),
+        : findingSubject,
       extraPath: kind === "outside" ? "outside.md" : undefined,
     });
   }
   if (kind === "multiple") {
     await writeFile(join(fixture.changeRoot, "design.md"), "# Дизайн\n");
     await execFileAsync("git", ["add", "openspec"], { cwd: fixture.workspace });
-    await execFileAsync("git", ["commit", "-m", implementationFindingResolutionCommitSubject("F1")], {
+    await execFileAsync("git", ["commit", "-m", findingSubject], {
       cwd: fixture.workspace,
     });
   }
@@ -502,27 +502,29 @@ async function rejectedCommitResult(context, kind) {
     arguments: publishInput,
   });
   await client.close();
-  controller.abort();
-  await assert.rejects(running, /Операция отменена/);
+  if (result.isError) {
+    controller.abort();
+    await assert.rejects(running, /Операция отменена/);
+  } else {
+    await running;
+  }
   return result;
 }
 
-test("completion tool отклоняет удалённый отчёт, внешний путь, несколько коммитов и неверный subject", async (context) => {
-  const deleted = await rejectedCommitResult(context, "deleted-report");
+test("completion tool сохраняет отчёт и границу change при нескольких коммитах с любыми subject", async (context) => {
+  const deleted = await commitScenarioResult(context, "deleted-report");
   assert.equal(deleted.isError, true);
   assert.match(firstText(deleted), /implementation-review\.md/);
 
-  const outside = await rejectedCommitResult(context, "outside");
+  const outside = await commitScenarioResult(context, "outside");
   assert.equal(outside.isError, true);
   assert.match(firstText(outside), /только файлы выбранного change/);
 
-  const multiple = await rejectedCommitResult(context, "multiple");
-  assert.equal(multiple.isError, true);
-  assert.match(firstText(multiple), /ровно один отдельный Git-коммит/);
+  const multiple = await commitScenarioResult(context, "multiple");
+  assert.equal(multiple.isError, undefined);
 
-  const wrongSubject = await rejectedCommitResult(context, "wrong-subject");
-  assert.equal(wrongSubject.isError, true);
-  assert.match(firstText(wrongSubject), /implementation finding/);
+  const wrongSubject = await commitScenarioResult(context, "wrong-subject");
+  assert.equal(wrongSubject.isError, undefined);
 });
 
 test("ошибка checkpoint восстанавливает ntfy и recovery не повторяет skill", async (context) => {
@@ -602,11 +604,6 @@ test("prompt требует одно решение, сохраняет зада
   assert.match(prompt, /complete_implementation_review_finding/);
   assert.match(prompt, /"mode":"publish"/);
   assert.doesNotMatch(prompt, /gh pr/);
-  assert.equal(
-    implementationFindingResolutionCommitSubject(`F${"1".repeat(31)}`),
-    "docs(openspec): resolve implementation review finding",
-  );
-
   const recoveredPrompt = implementationFindingResolutionPrompt({
     changeId,
     findingId: "F42",

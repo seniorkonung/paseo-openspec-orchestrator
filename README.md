@@ -14,7 +14,7 @@ the only branch used by the workflow. The orchestrator creates or reuses one
 root pull request from that branch to `main`. It remains Draft while work is
 in progress. Planning artifacts, phase tasks, implementation, review reports,
 and finding resolutions are committed to the same branch. The orchestrator
-publishes each verified commit without force pushing or automatically merging
+publishes each verified commit range without force pushing or automatically merging
 the pull request.
 
 ```text
@@ -25,7 +25,7 @@ change/<id>
   | scaffold and planning artifact commits
   | initial OpenSpec review and finding resolutions
   | for each phase: task planning, task commits, bounded reviews, resolutions
-  | final spec synchronization and archive commit
+  | final spec synchronization and archive commits
 ```
 
 The workflow stops at the final root PR until the user merges it and presses
@@ -77,8 +77,8 @@ plugin before upgrading, or restart them manually.
 
 The root PR service validates repository identity, branch, base, head, Draft
 state, and final merge state. `server/root-branch-delivery.ts` publishes a
-stage's verified commit only when the remote head is the saved baseline or
-the already published commit, and the exact root PR is still open and Draft.
+stage's verified commit range only when the remote head is the saved baseline or
+the already published head, and the exact root PR is still open and Draft.
 Unexpected branch movement halts the workflow. The GitHub REST mutation
 gateway owns PR title and body updates. The generated summary and finding
 outcomes occupy managed body sections so later updates preserve other text.
@@ -97,20 +97,20 @@ The workflow checks the required Paseo profiles, the exact
 toolchain. The change ID comes from the branch, not from an agent or the UI.
 Initialization uses `mise exec --no-deps -- openspec` with machine-readable
 `list --json`, `new change <id> --json`, and `status --change <id> --json`.
-A missing scaffold receives one bounded commit and push, followed by a Draft
+A missing scaffold receives a bounded commit and push, followed by a Draft
 root PR to `main`. An existing matching root PR is reused.
 
 ### Planning and reviews
 
-Planning artifacts are created in OpenSpec dependency order, one approved
-commit per agent session. A publication agent reads the finished artifacts and
+Planning artifacts are created in OpenSpec dependency order, with at least one
+approved commit per agent session. A publication agent reads the finished artifacts and
 drafts a Russian root PR title and description. The orchestrator verifies and
 pushes the commits, then updates the managed summary section without changing
 Draft/Ready state.
 
-An OpenSpec review agent creates one review commit. Findings from `review.md`
+An OpenSpec review agent commits its report. Findings from `review.md`
 are resolved one at a time after an explicit user decision. The orchestrator
-verifies and pushes each commit and records its outcome in the managed findings
+verifies and pushes each commit range and records its outcome in the managed findings
 section of the same root PR.
 
 The phase inspector reads bounded `plan.md` headings and OpenSpec task
@@ -122,24 +122,26 @@ history. The next phase decision is made directly on the root branch.
 ### Implementation
 
 Each implementation run covers one phase. Tasks execute sequentially with one
-High agent and one Conventional Commit per task. A nonempty batch of task
-commits is reviewed over its exact saved commit range. The report is a separate
-commit in `implementation-review.md`. Both review reports are checked for
+High agent and at least one commit per task. A nonempty batch of task
+commits is reviewed over its exact saved commit range, including every commit
+of each task. The report is committed separately in `implementation-review.md`.
+Both review reports are checked for
 findings; remediation may add new incomplete tasks, which form another
 independently reviewed batch.
 
 Agents do not push task, review, or finding commits themselves. Their scoped
 MCP completion tools verify the stage contract, then the orchestrator
-publishes the commit to `change/<id>`. Recovery accepts a verified local
-commit before push and an already published commit before checkpoint, without
+publishes the commits to `change/<id>`. A stage needs at least one new commit;
+additional commits and their messages do not gate completion. Recovery accepts a verified
+local commit range before push and an already published range before checkpoint, without
 repeating the agent's work. The existing root PR is the only pull request
 associated with every stage.
 
 After all phases and review findings are complete, one High agent invokes the
 `openspec-archive-change` skill. It synchronizes every delta spec with the main
 specs, moves the unchanged change directory into the dated archive, and creates
-one verified commit on the root branch. Incomplete artifacts or tasks and a
-failed spec sync stop this stage. The orchestrator publishes the archive commit
+one or more verified commits on the root branch. Incomplete artifacts or tasks and a
+failed spec sync stop this stage. The orchestrator publishes the archive commits
 to the Draft root PR and can recover after an interrupted move, commit, or push.
 
 ### Final root PR gate
@@ -156,7 +158,7 @@ changed retroactively.
 ## Recovery and development
 
 Stages that create commits save a pending session before agent work.
-Recovery verifies files, commits, refs, pushes, PR identity, and managed PR
+Recovery verifies files, commit ranges, refs, pushes, PR identity, and managed PR
 body entries. It never force pushes, resets, reopens a closed PR, or silently
 switches branches. Ending an agent turn does not end its stage; the scoped MCP
 completion tool must succeed or the run must be cancelled.

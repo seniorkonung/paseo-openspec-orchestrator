@@ -506,7 +506,7 @@ test("отсутствие continue skill останавливает сесси�
   assert.equal(await fileExists(fixture.riskPath), false);
 });
 
-test("после рестарта с готовым коммитом агент продолжает тот же артефакт без skill", async (context) => {
+test("после рестарта с несколькими коммитами агент продолжает тот же артефакт без skill", async (context) => {
   const fixture = await createRepository(context);
   const { command } = createCommand(fixture);
   let prompt;
@@ -557,6 +557,13 @@ test("после рестарта с готовым коммитом агент 
     ["commit", "-m", "docs(openspec): add risk-map artifact"],
     { cwd: fixture.workspace },
   );
+  await writeFile(fixture.riskPath, "# Карта рисков\n\nУточнение.\n");
+  await execFileAsync("git", ["add", "openspec/changes/custom-change/risk-map.md"], {
+    cwd: fixture.workspace,
+  });
+  await execFileAsync("git", ["commit", "-m", "Дополнительное уточнение"], {
+    cwd: fixture.workspace,
+  });
 
   await service.create({
     workspaceDirectory: fixture.workspace,
@@ -572,7 +579,7 @@ test("после рестарта с готовым коммитом агент 
   assert.match(prompt, /Do not invoke the continue skill again/);
 });
 
-async function runRejectedCommitScenario(context, kind) {
+async function runCommitScenario(context, kind) {
   const fixture = await createRepository(context);
   const { command } = createCommand(fixture);
   const controller = new AbortController();
@@ -608,8 +615,8 @@ async function runRejectedCommitScenario(context, kind) {
               { cwd: fixture.workspace },
             );
             if (kind === "multiple") {
-              await writeFile(unrelatedPath, "второй коммит\n");
-              await execFileAsync("git", ["add", "unrelated.txt"], {
+              await writeFile(fixture.riskPath, "# Карта рисков\n\nДополнение.\n");
+              await execFileAsync("git", ["add", "openspec"], {
                 cwd: fixture.workspace,
               });
               await execFileAsync("git", ["commit", "-m", "docs: add unrelated file"], {
@@ -624,7 +631,7 @@ async function runRejectedCommitScenario(context, kind) {
               });
             } finally {
               await client.close();
-              controller.abort();
+              if (toolResult?.isError) controller.abort();
             }
           })();
         },
@@ -638,8 +645,7 @@ async function runRejectedCommitScenario(context, kind) {
     logger: { error() {}, warn() {} },
   });
   const session = await service.prepare(fixture.workspace, "custom-change");
-  await assert.rejects(
-    service.create({
+  const running = service.create({
       workspaceDirectory: fixture.workspace,
       changeId: "custom-change",
       profile: ultraProfile(),
@@ -647,26 +653,24 @@ async function runRejectedCommitScenario(context, kind) {
       signal: controller.signal,
       onAgentCreated() {},
       async onArtifactCompleted() {},
-    }),
-    /отменена/,
-  );
+    });
+  if (kind === "unrelated") await assert.rejects(running, /отменена/);
+  else await running;
   return toolResult;
 }
 
 test("complete_artifact отклоняет посторонний файл в единственном коммите", async (context) => {
-  const result = await runRejectedCommitScenario(context, "unrelated");
+  const result = await runCommitScenario(context, "unrelated");
   assert.equal(result.isError, true);
   assert.match(firstText(result), /только файлы ожидаемого/);
 });
 
-test("complete_artifact отклоняет несколько коммитов после baseline", async (context) => {
-  const result = await runRejectedCommitScenario(context, "multiple");
-  assert.equal(result.isError, true);
-  assert.match(firstText(result), /ровно один отдельный Git-коммит/);
+test("complete_artifact принимает несколько коммитов после baseline", async (context) => {
+  const result = await runCommitScenario(context, "multiple");
+  assert.equal(result.isError, undefined);
 });
 
-test("complete_artifact проверяет subject отдельного коммита", async (context) => {
-  const result = await runRejectedCommitScenario(context, "wrong-subject");
-  assert.equal(result.isError, true);
-  assert.match(firstText(result), /docs\(openspec\): add risk-map artifact/);
+test("complete_artifact принимает произвольный subject", async (context) => {
+  const result = await runCommitScenario(context, "wrong-subject");
+  assert.equal(result.isError, undefined);
 });

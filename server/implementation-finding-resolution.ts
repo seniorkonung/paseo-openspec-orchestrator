@@ -6,7 +6,6 @@ import {
 } from "./implementation-review-report.ts";
 import {
   reviewFindingIdSchema,
-  type ReviewFindingId,
 } from "./change-review-report.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import { implementationBranchSchema, planningBranchSchema } from "./change-branch.ts";
@@ -24,9 +23,6 @@ import {
 } from "./review-finding-resolution.ts";
 
 const IMPLEMENTATION_REVIEW_FILE_NAME = "implementation-review.md";
-const MAX_COMMIT_SUBJECT_LENGTH = 72;
-const FALLBACK_COMMIT_SUBJECT =
-  "docs(openspec): resolve implementation review finding";
 
 export interface PendingImplementationFindingResolutionSession
   extends ReviewFindingResolutionSession {}
@@ -87,20 +83,8 @@ export function createImplementationFindingResolutionService(
     },
     publication: {
       kind: "implementation-review",
-      commitSubject: implementationFindingResolutionCommitSubject,
     },
   });
-}
-
-export function implementationFindingResolutionCommitSubject(
-  findingId: ReviewFindingId,
-): string {
-  const normalizedFindingId = reviewFindingIdSchema.parse(findingId);
-  const subject =
-    `docs(openspec): resolve ${normalizedFindingId} implementation finding`;
-  return subject.length <= MAX_COMMIT_SUBJECT_LENGTH
-    ? subject
-    : FALLBACK_COMMIT_SUBJECT;
 }
 
 export function implementationFindingResolutionPrompt(
@@ -111,7 +95,6 @@ export function implementationFindingResolutionPrompt(
       reviewName: "an OpenSpec implementation review",
       skill: "openspec-review-implementation",
       toolName: "complete_implementation_review_finding",
-      commitSubject: implementationFindingResolutionCommitSubject,
     },
     input,
   );

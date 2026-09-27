@@ -211,24 +211,6 @@ export async function readTaskChangedPaths(
   }
 }
 
-export async function readTaskCommitSubject(
-  command: BoundedCommandRunner,
-  gitRoot: string,
-  head: string,
-  signal: AbortSignal,
-): Promise<string> {
-  try {
-    const result = await command("git", ["log", "-1", "--format=%s", head], {
-      cwd: gitRoot,
-      signal,
-    });
-    return result.stdout.trim();
-  } catch (error) {
-    if (signal.aborted) throw error;
-    throw new ChangeTaskExecutionError("Не удалось проверить subject task-коммита");
-  }
-}
-
 export async function assertTaskCommitDescendsFrom(
   command: BoundedCommandRunner,
   gitRoot: string,

@@ -6,7 +6,6 @@ import { commitHashSchema } from "./change-artifact-model.ts";
 import {
   ChangeReviewError,
   parseReviewChangeId,
-  reviewCommitSubject,
   reviewPublicationTarget,
   type CompletedChangeReview,
   type PendingReviewSession,
@@ -184,8 +183,8 @@ export function createChangeReviewVerification(
       head,
       signal,
     );
-    if (commitCount !== 1) {
-      throw new ChangeReviewError("Для review требуется ровно один отдельный Git-коммит");
+    if (commitCount < 1) {
+      throw new ChangeReviewError("Для review требуется хотя бы один новый Git-коммит");
     }
 
     const [changedPaths, addedPaths] = await Promise.all([
@@ -219,13 +218,6 @@ export function createChangeReviewVerification(
       );
     }
 
-    const subject = await readCommitSubject(command, context.gitRoot, head, signal);
-    const expectedSubject = reviewCommitSubject(context.changeId);
-    if (subject !== expectedSubject) {
-      throw new ChangeReviewError(
-        `Git-коммит review должен иметь сообщение «${expectedSubject}»`,
-      );
-    }
     return head;
   };
 
@@ -404,24 +396,6 @@ async function readDiffPaths(
   } catch (error) {
     if (signal.aborted) throw error;
     throw new ChangeReviewError("Не удалось проверить состав Git-коммита review");
-  }
-}
-
-async function readCommitSubject(
-  command: BoundedCommandRunner,
-  gitRoot: string,
-  head: string,
-  signal: AbortSignal,
-): Promise<string> {
-  try {
-    const result = await command("git", ["log", "-1", "--format=%s", head], {
-      cwd: gitRoot,
-      signal,
-    });
-    return result.stdout.trim();
-  } catch (error) {
-    if (signal.aborted) throw error;
-    throw new ChangeReviewError("Не удалось проверить сообщение Git-коммита review");
   }
 }
 

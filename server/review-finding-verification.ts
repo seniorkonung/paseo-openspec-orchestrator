@@ -113,9 +113,9 @@ async function verifyLocalResolution<Session extends ReviewFindingResolutionSess
     head,
     signal,
   );
-  if (commitCount !== 1) {
+  if (commitCount < 1) {
     throw new ReviewFindingResolutionError(
-      `Для finding «${session.findingId}» требуется ровно один отдельный Git-коммит`,
+      `Для finding «${session.findingId}» требуется хотя бы один новый Git-коммит`,
     );
   }
 
@@ -134,14 +134,6 @@ async function verifyLocalResolution<Session extends ReviewFindingResolutionSess
   ) {
     throw new ReviewFindingResolutionError(
       `Finding-коммит должен изменять ${behavior.report.fileName} и только файлы выбранного change`,
-    );
-  }
-
-  const subject = await readCommitSubject(command, context.gitRoot, head, signal);
-  const expectedSubject = behavior.publication.commitSubject(session.findingId);
-  if (subject !== expectedSubject) {
-    throw new ReviewFindingResolutionError(
-      `Git-коммит finding должен иметь сообщение «${expectedSubject}»`,
     );
   }
 
@@ -300,26 +292,6 @@ async function readDiffPaths(
     if (signal.aborted) throw error;
     throw new ReviewFindingResolutionError(
       "Не удалось проверить состав Git-коммита finding",
-    );
-  }
-}
-
-async function readCommitSubject(
-  command: BoundedCommandRunner,
-  gitRoot: string,
-  head: string,
-  signal: AbortSignal,
-): Promise<string> {
-  try {
-    const result = await command("git", ["log", "-1", "--format=%s", head], {
-      cwd: gitRoot,
-      signal,
-    });
-    return result.stdout.trim();
-  } catch (error) {
-    if (signal.aborted) throw error;
-    throw new ReviewFindingResolutionError(
-      "Не удалось проверить сообщение Git-коммита finding",
     );
   }
 }

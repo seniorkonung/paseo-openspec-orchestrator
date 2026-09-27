@@ -20,7 +20,6 @@ import {
 import {
   ChangeReviewError,
   pendingReviewSessionSchema,
-  reviewCommitSubject,
   reviewPublicationTarget,
   type CompletedChangeReview,
   type PendingReviewSession,
@@ -50,7 +49,6 @@ import {
 export {
   ChangeReviewError,
   pendingReviewSessionSchema,
-  reviewCommitSubject,
 } from "./change-review-model.ts";
 export type {
   CompletedChangeReview,
@@ -308,7 +306,6 @@ export function changeReviewPrompt(input: {
   readonly alreadyCommitted: boolean;
 }): string {
   const phaseNumber = input.phaseNumber;
-  const subject = reviewCommitSubject(input.changeId);
   const reviewInstruction = input.alreadyCommitted
     ? "This is a recovery session: the finished review is already committed. Do not invoke the review skill again and do not create or amend a commit; complete the stage."
     : phaseNumber === null
@@ -327,7 +324,6 @@ export function changeReviewPrompt(input: {
       repository: input.repository,
       remote: "origin",
       reviewPath: input.reviewRepositoryPath,
-      commitSubject: subject,
       alreadyCommitted: input.alreadyCommitted,
     },
     rules: [
@@ -340,12 +336,12 @@ export function changeReviewPrompt(input: {
       "The root change branch is already published. Verify that it still descends from the saved baseline.",
       reviewInstruction,
       "Findings do not block this stage: never fix findings, implementation code, or existing planning artifacts, because a later stage owns them. If the review cannot be finished or needs user input, say what is missing and keep the conversation in this session instead of completing the stage.",
-      `Keep \`review.md\` and any other file the skill creates inside the change root, materially update an existing \`review.md\`, stage only those files, and create exactly one commit with subject \`${subject}\`. Leave every other pre-existing file, including the planning artifacts, untouched, and do not amend or delete files.`,
-      "Do not push or create a pull request. The orchestrator verifies and publishes the review commit to the existing Draft root pull request.",
+      `Keep \`review.md\` and any other file the skill creates inside the change root, materially update an existing \`review.md\`, and commit only those files in at least one commit. Leave every other pre-existing file, including the planning artifacts, untouched, and do not change or delete those files.`,
+      "Do not push or create a pull request. The orchestrator verifies and publishes the review commits to the existing Draft root pull request.",
     ],
     completion: completionInstruction({
       tool: "complete_change_review",
-      retryScope: "the review commit or its publication state",
+      retryScope: "the review commits or their publication state",
     }),
   });
 }
