@@ -1,10 +1,8 @@
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { runBoundedCommand, type BoundedCommandRunner } from "../../bounded-command.ts";
 import {
   assertCleanTaskWorktree,
   assertTaskCommitDescendsFrom,
   readCurrentTaskBranch,
-  readTaskChangedPaths,
   readTaskGitRoot,
   readTaskHeadCommit,
 } from "../../change-task-gateway.ts";
@@ -65,20 +63,6 @@ async function validatePhasePlanningStep(
       planningRun.baselineProgress,
       planningRun.phaseNumber,
     );
-    const changeRoot = dirname(decision.snapshot.planPath);
-    const allowedPaths = [
-      ...decision.snapshot.taskArtifactPaths,
-      resolve(changeRoot, "review.md"),
-      resolve(changeRoot, "implementation-review.md"),
-    ].map((path) => repositoryPath(gitRoot, path));
-    const changedPaths = await readTaskChangedPaths(
-      command,
-      gitRoot,
-      planningRun.rootBaselineCommit,
-      head,
-      context.signal,
-    );
-    assertPhasePlanningChangedPaths(changedPaths, allowedPaths);
     return {
       kind: "continue",
       next: "inspect-phase-work",
@@ -95,27 +79,6 @@ async function validatePhasePlanningStep(
       : "Не удалось проверить задачи после review";
     return { kind: "halt", summary, message: `${summary}; исправьте состояние и нажмите «Повторить»` };
   }
-}
-
-export function assertPhasePlanningChangedPaths(
-  changedPaths: readonly string[],
-  allowedPaths: readonly string[],
-): void {
-  const allowed = new Set(allowedPaths);
-  const unexpected = changedPaths.find((path) => !allowed.has(path));
-  if (unexpected) {
-    throw new PhaseTaskPlanningError(
-      `Phase planning изменил недопустимый файл «${unexpected}»`,
-    );
-  }
-}
-
-function repositoryPath(gitRoot: string, candidate: string): string {
-  const path = relative(gitRoot, candidate);
-  if (!path || isAbsolute(path) || path === ".." || path.startsWith(`..${sep}`)) {
-    throw new PhaseTaskPlanningError("Артефакт phase planning находится вне Git-репозитория");
-  }
-  return path.split(sep).join("/");
 }
 
 export function createValidatePhasePlanningStep(

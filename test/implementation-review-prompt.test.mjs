@@ -44,7 +44,8 @@ test("ревью имплементации допускает субагент�
   assert.match(result, /Do not push or create a pull request/u);
   assert.match(result, /never create or archive workspaces or changes, and never invoke another workflow/u);
   assert.doesNotMatch(result, /never spawn or archive agents/u);
-  assert.match(result, /never fix findings or implementation and never change task state/u);
+  assert.match(result, /Follow the review skill/u);
+  assert.doesNotMatch(result, /Modify only|never fix findings|never change task state|commit only the report/u);
 });
 
 test("восстановление ревью имплементации не запускает повторный анализ", () => {

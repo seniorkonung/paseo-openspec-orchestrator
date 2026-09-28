@@ -187,35 +187,11 @@ export function createChangeReviewVerification(
       throw new ChangeReviewError("Для review требуется хотя бы один новый Git-коммит");
     }
 
-    const [changedPaths, addedPaths] = await Promise.all([
-      readDiffPaths(command, context.gitRoot, session.baselineCommit, head, [], signal),
-      readDiffPaths(
-        command,
-        context.gitRoot,
-        session.baselineCommit,
-        head,
-        ["--diff-filter=A"],
-        signal,
-      ),
-    ]);
-    const addedPathSet = new Set(addedPaths);
-    const allowedPrefix = `${context.changeRepositoryPath}/`;
-    if (
-      !changedPaths.includes(context.reviewRepositoryPath) ||
-      changedPaths.some((path) => !path.startsWith(allowedPrefix))
-    ) {
-      throw new ChangeReviewError(
-        "Review-коммит должен содержать review.md и только новые файлы внутри выбранного change",
-      );
-    }
-    if (
-      changedPaths.some(
-        (path) => path !== context.reviewRepositoryPath && !addedPathSet.has(path),
-      )
-    ) {
-      throw new ChangeReviewError(
-        "Review-коммит не должен изменять существующие planning-артефакты",
-      );
+    const changedPaths = await readDiffPaths(
+      command, context.gitRoot, session.baselineCommit, head, signal,
+    );
+    if (!changedPaths.includes(context.reviewRepositoryPath)) {
+      throw new ChangeReviewError("Review-коммиты должны добавлять или изменять review.md");
     }
 
     return head;
@@ -376,7 +352,6 @@ async function readDiffPaths(
   gitRoot: string,
   baselineCommit: string,
   head: string,
-  extraArguments: readonly string[],
   signal: AbortSignal,
 ): Promise<string[]> {
   try {
@@ -387,7 +362,6 @@ async function readDiffPaths(
         "--name-only",
         "--no-renames",
         "-z",
-        ...extraArguments,
         `${baselineCommit}..${head}`,
       ],
       { cwd: gitRoot, signal },

@@ -11,6 +11,7 @@ import {
 import { combineAbortSignals, throwIfSignalAborted } from "./agent-session-control.ts";
 import { runBoundedCommand, type BoundedCommandRunner } from "./bounded-command.ts";
 import { commitHashSchema } from "./change-artifact-model.ts";
+import { applyInstructionsSchema, type ApplyInstructions } from "./change-task-model.ts";
 import {
   assertCleanTaskWorktree,
   assertTaskCommitDescendsFrom,
@@ -39,6 +40,10 @@ import {
   readImplementationReviewContext,
   type ImplementationReviewContext,
 } from "./implementation-review-context.ts";
+import {
+  ImplementationReviewReportError,
+  readImplementationReviewReport,
+} from "./implementation-review-report.ts";
 import { deliverRootCommit } from "./root-branch-delivery.ts";
 import { createRootPullRequestService } from "./root-pull-request.ts";
 import { readReviewPullRequest } from "./review-publication-gateway.ts";
@@ -46,6 +51,7 @@ import { repositoryArgument } from "./review-publication-model.ts";
 import { createManagedAgentSession } from "./managed-agent-session.ts";
 import { McpToolError, OrchestratorMcpToolHost, defineMcpTool } from "./orchestrator-mcp-tool-host.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
+import { runWorkspaceMiseCommand } from "./mise-toolchain.ts";
 import { updateAgentNotificationLabel, type AgentNotificationLabelUpdater } from "./paseo-agent-labels.ts";
 import { ChangeReviewPublicationError } from "./review-publication-model.ts";
 
@@ -368,13 +374,13 @@ export function implementationReviewPrompt(input: {
   const { session } = input;
   const reviewInstruction = input.alreadyCommitted
     ? "This is a recovery session: the complete report commits already exist. Do not invoke the review skill, edit files, or create or amend a commit."
-    : `Invoke \`openspec-review-implementation\` for the exact immutable range \`${session.baseCommit}..${session.reviewedHead}\` and change \`${session.changeId}\`. Review every target commit and map every task to at least one review unit.`;
+    : `Invoke \`openspec-review-implementation\` for the exact saved range \`${session.baseCommit}..${session.reviewedHead}\` and change \`${session.changeId}\`. Review every target commit and map every task to at least one review unit.`;
   const delegationInstruction = input.alreadyCommitted
     ? ""
-    : `You may spawn review subagents to inspect the exact immutable range \`${session.baseCommit}..${session.reviewedHead}\`. Give them the same stage boundaries and target commits from the workflow data. They may only inspect and report findings. Only you may write the report, create the review commit, and call \`complete_implementation_review\`.`;
+    : `You may spawn review subagents to inspect the exact saved range \`${session.baseCommit}..${session.reviewedHead}\`. Give them the same stage boundaries and target commits from the workflow data. They may only inspect and report findings. Only you may write the report, create the review commit, and call \`complete_implementation_review\`.`;
   const commitInstruction = input.alreadyCommitted
     ? ""
-    : "When the report is complete and format-valid, commit only the report in at least one commit after the reviewed head.";
+    : "When the report is complete and format-valid, commit the report and all stage corrections in at least one new commit after the reviewed head.";
 
   return buildAgentPrompt({
     role: "You own one bounded implementation-review stage.",
@@ -404,13 +410,14 @@ export function implementationReviewPrompt(input: {
     body: [
       reviewInstruction,
       delegationInstruction,
-      `The report needs complete coverage and the exact Base commit, Reviewed head, and ordered Target commits from the workflow data. Modify only \`${input.reviewRepositoryPath}\`: never fix findings or implementation and never change task state.`,
+      `The report at \`${input.reviewRepositoryPath}\` needs complete coverage and the exact Base commit, Reviewed head, and ordered Target commits from the workflow data.`,
+      input.alreadyCommitted ? "" : "Follow the review skill for any corrections to code or artifacts, verify those corrections in this session, and reflect their outcome in the report. Preserve the workflow's recorded task history: task IDs, numbers, descriptions, and order stay the same, completed tasks stay complete, and new tasks start incomplete. Record remaining findings for the later finding-resolution stages.",
       commitInstruction,
       "Do not push or create a pull request. The orchestrator publishes the verified review commit to the root branch.",
     ],
     completion: completionInstruction({
       tool: "complete_implementation_review",
-      retryScope: "the report commits or their push",
+      retryScope: "the review report, stage commits, or their push",
     }),
   });
 }
@@ -437,6 +444,14 @@ async function inspectExistingReviewCommit(
     }
     return false;
   }
+  await assertTaskCommitDescendsFrom(
+    command, context.gitRoot, session.reviewedHead, head,
+    "Implementation review commit не продолжает reviewed head", signal,
+  );
+  const changedPaths = await readTaskChangedPaths(
+    command, context.gitRoot, session.reviewedHead, head, signal,
+  );
+  if (!changedPaths.includes(context.reviewRepositoryPath)) return false;
   await verifyCompletedReview(command, context, session, signal);
   return true;
 }
@@ -477,11 +492,33 @@ async function verifyCompletedReview(
     head,
     signal,
   );
-  if (!sameStrings(changedPaths, [context.reviewRepositoryPath])) {
+  if (!changedPaths.includes(context.reviewRepositoryPath)) {
     throw new ImplementationReviewError(
-      "Implementation review commit должен изменять только implementation-review.md",
+      "Review-коммиты должны добавлять или изменять implementation-review.md",
     );
   }
+  try {
+    await command("git", ["cat-file", "-e", `${head}:${context.reviewRepositoryPath}`], {
+      cwd: context.gitRoot, signal,
+    });
+  } catch (error) {
+    if (signal.aborted) throw error;
+    throw new ImplementationReviewError("implementation-review.md не добавлен в текущий Git HEAD");
+  }
+  try {
+    await readImplementationReviewReport({
+      reviewPath: context.reviewPath,
+      changeRoot: context.changeRoot,
+      expectedChangeId: session.changeId,
+    });
+  } catch (error) {
+    if (signal.aborted) throw error;
+    if (error instanceof ImplementationReviewReportError) {
+      throw new ImplementationReviewError(error.message);
+    }
+    throw error;
+  }
+  await assertReviewedTasksComplete(command, context.gitRoot, session, signal);
   const remoteHead = await readRemoteTaskBranchCommit(
     command,
     context.gitRoot,
@@ -500,6 +537,43 @@ async function verifyCompletedReview(
     reviewedHead: session.reviewedHead,
     reviewCommit: head,
   };
+}
+
+async function assertReviewedTasksComplete(
+  command: BoundedCommandRunner,
+  gitRoot: string,
+  session: PendingImplementationReviewSession,
+  signal: AbortSignal,
+): Promise<void> {
+  let instructions: ApplyInstructions;
+  try {
+    const { stdout } = await runWorkspaceMiseCommand(
+      command,
+      gitRoot,
+      "openspec",
+      ["instructions", "apply", "--change", session.changeId, "--json"],
+      signal,
+    );
+    instructions = applyInstructionsSchema.parse(JSON.parse(stdout) as unknown);
+  } catch (error) {
+    if (signal.aborted) throw error;
+    throw new ImplementationReviewError("Не удалось проверить выполненные OpenSpec-задачи пакета");
+  }
+  if (instructions.changeName !== session.changeId) {
+    throw new ImplementationReviewError("OpenSpec вернул задачи другого change");
+  }
+  const tasksById = new Map(instructions.tasks.map((task) => [task.id, task]));
+  if (tasksById.size !== instructions.tasks.length) {
+    throw new ImplementationReviewError("OpenSpec вернул повторяющиеся ID задач");
+  }
+  for (const reviewed of session.tasks) {
+    const task = tasksById.get(reviewed.taskId);
+    if (!task?.done || task.description.split(/\s/u, 1)[0] !== reviewed.taskNumber) {
+      throw new ImplementationReviewError(
+        `Выполненная задача ${reviewed.taskNumber} удалена, перенумерована или снова открыта во время review`,
+      );
+    }
+  }
 }
 
 async function assertImplementationState(

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -45,7 +45,7 @@ function highProfile() {
   };
 }
 
-async function fixture(context) {
+async function fixture(context, { existingReview = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "implementation-task-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const workspace = join(root, "workspace");
@@ -57,6 +57,10 @@ async function fixture(context) {
   await execFileAsync("git", ["config", "user.email", "openspec@example.test"], { cwd: workspace });
   const tasksPath = join(workspace, "openspec", "changes", changeId, "tasks.md");
   await writeFile(tasksPath, "## 1. Реализация\n- [ ] 1.1 Первая задача\n- [ ] 1.2 Вторая задача\n");
+  await writeFile(join(workspace, "openspec", "changes", changeId, "proposal.md"), "# Предложение\n");
+  if (existingReview) {
+    await writeFile(join(workspace, "openspec", "changes", changeId, "implementation-review.md"), "# Предыдущий review\n");
+  }
   await execFileAsync("git", ["add", "."], { cwd: workspace });
   await execFileAsync("git", ["commit", "-m", "docs(openspec): add tasks"], { cwd: workspace });
   const baseline = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim();
@@ -80,7 +84,9 @@ async function fixture(context) {
       instruction: "Выполнить задачи",
     };
   };
+  const calls = [];
   const command = async (executable, arguments_, options) => {
+    calls.push(`${executable} ${arguments_.join(" ")}`);
     if (executable === "mise") {
       if (arguments_.includes("status")) {
         return {
@@ -132,7 +138,7 @@ async function fixture(context) {
     publication: { kind: "unreviewed" },
     batch: { kind: "empty", baseCommit: baseline },
   };
-  return { workspace, remote, tasksPath, baseline, command, run };
+  return { workspace, remote, tasksPath, baseline, command, run, calls };
 }
 
 async function commitTask(value, { markSecond = false } = {}) {
@@ -149,6 +155,51 @@ async function commitTaskFollowup(value) {
   await writeFile(join(value.workspace, "followup.ts"), "export const followup = true;\n");
   await execFileAsync("git", ["add", "followup.ts"], { cwd: value.workspace });
   await execFileAsync("git", ["commit", "-m", "Additional work for the same task"], { cwd: value.workspace });
+}
+
+async function reviewFixture(context, options) {
+  const value = await fixture(context, options);
+  const taskService = createChangeTaskExecutionService({ command: value.command, async createAgent() {} });
+  const taskPlan = await taskService.plan(value.workspace, value.run);
+  await commitTask(value);
+  const completedTask = await verifyCompletedTask(
+    value.command, value.workspace, value.workspace, taskPlan.session, new AbortController().signal,
+  );
+  const run = collectImplementationTask(value.run, {
+    taskId: completedTask.taskId, taskNumber: completedTask.taskNumber, commit: completedTask.commit,
+  });
+  const review = createImplementationReviewService({ command: value.command, async createAgent() {} });
+  const session = await review.plan(value.workspace, run);
+  value.calls.length = 0;
+  return {
+    ...value, run, session,
+    reportPath: join(value.workspace, "openspec", "changes", changeId, "implementation-review.md"),
+    git: async (...args) => (await execFileAsync("git", args, { cwd: value.workspace })).stdout.trim(),
+  };
+}
+
+async function runReview(value, action) {
+  const review = createImplementationReviewService({
+    command: value.command,
+    async createAgent(options) {
+      const [{ url }] = Object.values(options.config.mcpServers);
+      return {
+        id: "implementation-review-agent",
+        async commands() { return { commands: [{ name: "openspec-review-implementation" }], error: null }; },
+        async send(prompt) {
+          const client = await connectClient(url);
+          try { await action(client, prompt); } finally { await client.close(); }
+        },
+        async waitForFinish() { return { status: "idle" }; },
+      };
+    },
+    updateNotificationLabel: async () => {},
+    logger: { error() {}, warn() {} },
+  });
+  return review.run({
+    workspaceDirectory: value.workspace, profile: highProfile(), run: value.run, session: value.session,
+    signal: new AbortController().signal, onAgentCreated() {}, async onReviewCompleted() {},
+  });
 }
 
 test("plan выбирает первую задачу и сохраняет общий implementation baseline", async (context) => {
@@ -353,7 +404,7 @@ test("implementation review получает все коммиты задачи 
   );
 });
 
-test("implementation review завершает отчёт из двух коммитов с произвольными сообщениями", async (context) => {
+test("implementation review публикует правки кода и артефактов вместе с отчётом из двух коммитов", async (context) => {
   const value = await fixture(context);
   const taskService = createChangeTaskExecutionService({ command: value.command, async createAgent() {} });
   const taskPlan = await taskService.plan(value.workspace, value.run);
@@ -377,7 +428,9 @@ test("implementation review завершает отчёт из двух комм
         async commands() { return { commands: [{ name: "openspec-review-implementation" }], error: null }; },
         async send() {
           await writeFile(reportPath, "# Review\n\nПервый проход.\n");
-          await execFileAsync("git", ["add", "openspec"], { cwd: value.workspace });
+          await writeFile(join(value.workspace, "implementation.ts"), "export const implemented = 'исправлено';\n");
+          await writeFile(join(value.workspace, "openspec", "changes", changeId, "proposal.md"), "# Уточнённое предложение\n");
+          await execFileAsync("git", ["add", "."], { cwd: value.workspace });
           await execFileAsync("git", ["commit", "-m", "Первый проход review"], { cwd: value.workspace });
           await writeFile(reportPath, "# Review\n\nЗавершено.\n");
           await execFileAsync("git", ["add", "openspec"], { cwd: value.workspace });
@@ -385,6 +438,7 @@ test("implementation review завершает отчёт из двух комм
           const client = await connectClient(url);
           try {
             toolResult = await client.callTool({ name: "complete_implementation_review", arguments: {} });
+            assert.equal(toolResult.isError, undefined);
           } finally {
             await client.close();
           }
@@ -406,8 +460,167 @@ test("implementation review завершает отчёт из двух комм
     async onReviewCompleted() {},
   });
   assert.equal(toolResult.isError, undefined);
+  assert.equal(result.reviewedHead, completedTask.commit);
   assert.equal(result.reviewCommit, (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: value.workspace })).stdout.trim());
   assert.equal((await execFileAsync("git", ["rev-list", "--count", `${completedTask.commit}..HEAD`], { cwd: value.workspace })).stdout.trim(), "2");
+});
+
+test("implementation review продолжает незавершённую сессию после коммита кода без обновлённого отчёта", async (context) => {
+  for (const existingReview of [false, true]) {
+    await context.test(existingReview ? "старый отчёт не изменён" : "отчёт ещё не создан", async (subcontext) => {
+      const value = await reviewFixture(subcontext, { existingReview });
+      await writeFile(join(value.workspace, "implementation.ts"), "export const implemented = 'исправлено';\n");
+      await value.git("add", ".");
+      await value.git("commit", "-m", "fix(review): correct implementation");
+      const result = await runReview(value, async (client, prompt) => {
+        assert.match(prompt, /"alreadyCommitted":false/u);
+        assert.match(prompt, /Invoke `openspec-review-implementation`/u);
+        assert.ok(prompt.includes(`"targetCommits":["${value.session.reviewedHead}"]`));
+        const incomplete = await client.callTool({ name: "complete_implementation_review", arguments: {} });
+        assert.equal(incomplete.isError, true);
+        assert.equal(value.calls.some((call) => call.startsWith("git push ")), false);
+        await writeFile(value.reportPath, "# Review\n\nПравки проверены, нерешённых findings нет.\n");
+        await value.git("add", ".");
+        await value.git("commit", "-m", "docs(review): finish report");
+        const completed = await client.callTool({ name: "complete_implementation_review", arguments: {} });
+        assert.equal(completed.isError, undefined);
+      });
+      assert.equal(result.reviewedHead, value.session.reviewedHead);
+      assert.equal(await value.git("rev-list", "--count", `${value.session.reviewedHead}..HEAD`), "2");
+    });
+  }
+});
+
+test("implementation review восстанавливает отчёт с правками до и после push без повторных коммитов", async (context) => {
+  for (const published of [false, true]) {
+    await context.test(published ? "после push" : "до push", async (subcontext) => {
+      const value = await reviewFixture(subcontext);
+      await writeFile(join(value.workspace, "implementation.ts"), "export const implemented = 'исправлено';\n");
+      await writeFile(value.reportPath, "# Review\n\nПравки проверены.\n");
+      await value.git("add", ".");
+      await value.git("commit", "-m", "fix(review): correct implementation and report");
+      const head = await value.git("rev-parse", "HEAD");
+      if (published) await value.git("push", "origin", implementationBranch);
+      const complete = async (client, prompt) => {
+        assert.match(prompt, /"alreadyCommitted":true/u);
+        assert.match(prompt, /Do not invoke the review skill/u);
+        const result = await client.callTool({ name: "complete_implementation_review", arguments: {} });
+        assert.equal(result.isError, undefined);
+      };
+      const first = await runReview(value, complete);
+      const second = await runReview(value, complete);
+      assert.deepEqual(second, first);
+      assert.equal(first.reviewCommit, head);
+      assert.equal(await value.git("rev-parse", "HEAD"), head);
+      assert.equal(value.calls.filter((call) => call.startsWith("git push ")).length, published ? 0 : 1);
+    });
+  }
+});
+
+test("implementation review сохраняет завершение задач пакета при completion и recovery", async (context) => {
+  for (const recovery of [false, true]) {
+    await context.test(recovery ? "восстановление готового отчёта" : "завершение активного review", async (subcontext) => {
+      const value = await reviewFixture(subcontext);
+      const completedTasks = await readFile(value.tasksPath, "utf8");
+      const reopen = async () => {
+        await writeFile(value.tasksPath, completedTasks.replace("- [x] 1.1", "- [ ] 1.1"));
+        await writeFile(value.reportPath, "# Review\n\nОтчёт с повторно открытой задачей.\n");
+        await value.git("add", ".");
+        await value.git("commit", "-m", "docs(review): update report and task state");
+      };
+      const restore = async () => {
+        await writeFile(value.tasksPath, completedTasks);
+        await value.git("add", ".");
+        await value.git("commit", "-m", "fix(review): preserve completed task");
+      };
+      if (recovery) {
+        await reopen();
+        await assert.rejects(runReview(value, async () => {
+          assert.fail("Review с повторно открытой задачей не должен считаться завершённым");
+        }), /Выполненная задача 1\.1/u);
+        assert.equal(value.calls.some((call) => call.startsWith("git push ")), false);
+        await restore();
+      }
+      await runReview(value, async (client) => {
+        if (!recovery) {
+          await reopen();
+          const rejected = await client.callTool({ name: "complete_implementation_review", arguments: {} });
+          assert.equal(rejected.isError, true);
+          assert.match(rejected.content[0].text, /Выполненная задача 1\.1/u);
+          assert.equal(value.calls.some((call) => call.startsWith("git push ")), false);
+          await restore();
+        }
+        const completed = await client.callTool({ name: "complete_implementation_review", arguments: {} });
+        assert.equal(completed.isError, undefined);
+      });
+    });
+  }
+});
+
+test("implementation review отклоняет задачи другого change и повторяющиеся ID до публикации", async (context) => {
+  for (const response of ["другой change", "повторяющиеся ID"]) {
+    await context.test(response, async (subcontext) => {
+      const value = await reviewFixture(subcontext);
+      const command = value.command;
+      let invalid = true;
+      value.command = async (executable, args, options) => {
+        const result = await command(executable, args, options);
+        if (invalid && executable === "mise" && args.includes("apply")) {
+          const instructions = JSON.parse(result.stdout);
+          if (response === "другой change") instructions.changeName = "other-change";
+          else {
+            instructions.tasks[1] = { ...instructions.tasks[0] };
+            instructions.progress = { total: 2, complete: 2, remaining: 0 };
+            instructions.state = "all_done";
+          }
+          return { stdout: JSON.stringify(instructions), stderr: "" };
+        }
+        return result;
+      };
+      await runReview(value, async (client) => {
+        await writeFile(value.reportPath, "# Review\n\nПравки проверены.\n");
+        await value.git("add", ".");
+        await value.git("commit", "-m", "docs(review): complete report");
+        const rejected = await client.callTool({ name: "complete_implementation_review", arguments: {} });
+        assert.equal(rejected.isError, true);
+        assert.match(rejected.content[0].text, response === "другой change" ? /другого change/u : /повторяющиеся ID/u);
+        assert.equal(value.calls.some((call) => call.startsWith("git push ")), false);
+        invalid = false;
+        const completed = await client.callTool({ name: "complete_implementation_review", arguments: {} });
+        assert.equal(completed.isError, undefined);
+      });
+    });
+  }
+});
+
+test("implementation review не публикует правки без обновлённого и безопасного отчёта в Git", async (context) => {
+  for (const report of ["отсутствует", "не изменён", "удалён", "символьная ссылка", "неверный UTF-8", "не добавлен в Git"]) {
+    await context.test(report, async (subcontext) => {
+      const value = await reviewFixture(subcontext, { existingReview: report !== "отсутствует" });
+      await runReview(value, async (client) => {
+        await writeFile(join(value.workspace, "implementation.ts"), "export const implemented = 'исправлено';\n");
+        if (["удалён", "символьная ссылка", "не добавлен в Git"].includes(report)) await rm(value.reportPath);
+        if (report === "символьная ссылка") await symlink(join(value.workspace, "implementation.ts"), value.reportPath);
+        if (report === "неверный UTF-8") await writeFile(value.reportPath, Buffer.from([0xff]));
+        if (report === "не добавлен в Git") {
+          await writeFile(join(value.workspace, ".gitignore"), "implementation-review.md\n");
+        }
+        await value.git("add", ".");
+        await value.git("commit", "-m", "fix(review): incomplete report");
+        if (report === "не добавлен в Git") await writeFile(value.reportPath, "# Незакоммиченный отчёт\n");
+        const incomplete = await client.callTool({ name: "complete_implementation_review", arguments: {} });
+        assert.equal(incomplete.isError, true);
+        assert.match(incomplete.content[0].text, /implementation-review\.md/u);
+        assert.equal(value.calls.some((call) => call.startsWith("git push ")), false);
+        await rm(value.reportPath, { force: true });
+        await writeFile(value.reportPath, "# Review\n\nПравки проверены.\n");
+        await value.git("add", "-f", value.reportPath);
+        await value.git("commit", "-m", "docs(review): finish report");
+        const completed = await client.callTool({ name: "complete_implementation_review", arguments: {} });
+        assert.equal(completed.isError, undefined);
+      });
+    });
+  }
 });
 
 test("recovery prompt не повторяет apply и запрещает GitHub-операции", () => {

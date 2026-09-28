@@ -15,7 +15,7 @@ const branch = `change/${changeId}`;
 const repositoryUrl = "https://github.com/example/project";
 const reviewSubject = "Review report";
 
-async function fixture(context) {
+async function fixture(context, { existingReview = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "openspec-review-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const workspace = join(root, "workspace");
@@ -27,6 +27,8 @@ async function fixture(context) {
   await git("config", "user.email", "openspec@example.test");
   await writeFile(join(changeRoot, ".openspec.yaml"), "schema: spec-driven\n");
   await writeFile(join(changeRoot, "proposal.md"), "# Предложение\n");
+  await writeFile(join(workspace, "implementation.ts"), "export const implemented = false;\n");
+  if (existingReview) await writeFile(join(changeRoot, "review.md"), "# Предыдущий review\n");
   await git("add", ".");
   await git("commit", "-m", "docs(openspec): add change");
   const baseline = await git("rev-parse", "HEAD");
@@ -51,6 +53,7 @@ async function fixture(context) {
     if (executable === "gh" && args[0] === "pr" && ["list", "view"].includes(args[1])) {
       const remote = await git("ls-remote", "--heads", "origin", `refs/heads/${branch}`);
       const pr = { number: 41, url: `${repositoryUrl}/pull/41`, state: prState,
+        mergeCommit: prState === "MERGED" ? { oid: baseline } : null,
         isDraft: true, isCrossRepository: false, baseRefName: "main", headRefName: branch,
         headRefOid: remote.split(/\s/u)[0], title: "Change", body: "Описание" };
       return { stdout: JSON.stringify(args[1] === "list" ? [pr] : pr), stderr: "" };
@@ -64,23 +67,27 @@ async function fixture(context) {
     merge: () => { prState = "MERGED"; } };
 }
 
-test("review-коммит публикуется в корневой Draft PR и восстанавливается после push", async (context) => {
+test("review публикует отчёт с правками артефактов и кода и восстанавливается после push", async (context) => {
   const value = await fixture(context);
   const target = await prepareReviewPublication(value.workspace, changeId, branch, branch, undefined, value.command);
   assert.equal(target.parentBaselineCommit, value.baseline);
   assert.equal(target.baselineCommit, value.baseline);
   await writeFile(join(value.changeRoot, "review.md"), "# Review\n\nПроблем не найдено.\n");
+  await writeFile(join(value.changeRoot, "proposal.md"), "# Уточнённое предложение\n");
+  await writeFile(join(value.workspace, "implementation.ts"), "export const implemented = true;\n");
   await value.git("add", ".");
   await value.git("commit", "-m", reviewSubject);
   const verification = createChangeReviewVerification({ command: value.command });
   const reviewContext = await verification.readContext(value.workspace, changeId);
   const session = { ...target, changeId, phaseNumber: null };
+  assert.equal(await verification.isLocalCommitReady(reviewContext, session, new AbortController().signal), true);
   const first = await verification.verifyCompleted(reviewContext, session, new AbortController().signal);
   const second = await verification.verifyCompleted(reviewContext, session, new AbortController().signal);
   assert.equal(first.pullRequest.number, 41);
   assert.deepEqual(second, first);
   assert.equal(value.calls.filter((call) => call.startsWith("git push ")).length, 1);
   assert.equal(value.calls.some((call) => call.includes("gh pr create") || call.includes("git switch -c")), false);
+  assert.equal(await value.git("show", "HEAD:implementation.ts"), "export const implemented = true;");
 });
 
 test("review публикует несколько коммитов с произвольными сообщениями", async (context) => {
@@ -105,7 +112,7 @@ test("review публикует несколько коммитов с прои�
   assert.equal(value.calls.filter((call) => call.startsWith("git push ")).length, 1);
 });
 
-test("review отклоняет незапланированное изменение и преждевременный merge", async (context) => {
+test("review с правками отклоняет преждевременный merge", async (context) => {
   const value = await fixture(context);
   const target = await prepareReviewPublication(value.workspace, changeId, branch, branch, undefined, value.command);
   value.merge();
@@ -118,23 +125,49 @@ test("review отклоняет незапланированное измене�
   const reviewContext = await verification.readContext(value.workspace, changeId);
   await assert.rejects(
     verification.verifyCompleted(reviewContext, { ...target, changeId, phaseNumber: null }, new AbortController().signal),
-    /только|недопуст|proposal|измен/u,
+    /Корневой PR/u,
   );
+  assert.equal(value.calls.some((call) => call.startsWith("git push ")), false);
 });
 
-test("review prompt запрещает агенту ветки, PR и push", () => {
+test("review требует обновлённый отчёт даже при закоммиченных правках кода", async (context) => {
+  for (const report of ["отсутствует", "не изменён", "удалён"]) {
+    await context.test(report, async (subcontext) => {
+      const value = await fixture(subcontext, { existingReview: report !== "отсутствует" });
+      const target = await prepareReviewPublication(value.workspace, changeId, branch, branch, undefined, value.command);
+      await writeFile(join(value.workspace, "implementation.ts"), "export const implemented = true;\n");
+      if (report === "удалён") await rm(join(value.changeRoot, "review.md"));
+      await value.git("add", ".");
+      await value.git("commit", "-m", "fix(review): correct implementation");
+      const verification = createChangeReviewVerification({ command: value.command });
+      const reviewContext = await verification.readContext(value.workspace, changeId);
+      const session = { ...target, changeId, phaseNumber: null };
+      const signal = new AbortController().signal;
+      assert.equal(await verification.isLocalCommitReady(reviewContext, session, signal), false);
+      await assert.rejects(verification.verifyCompleted(reviewContext, session, signal), /review\.md/u);
+      assert.equal(value.calls.some((call) => call.startsWith("git push ")), false);
+    });
+  }
+});
+
+test("review prompt разрешает правки и сохраняет запрет на ветки, PR и push", () => {
   const session = {
     changeId, phaseNumber: null, parentBranch: branch, reviewBranch: branch,
     parentBaselineCommit: "a".repeat(40), baselineCommit: "a".repeat(40),
     repositoryHost: "github.com", repositoryNameWithOwner: "example/project",
     repositoryUrl, parentPullRequestNumber: 41,
   };
-  const prompt = changeReviewPrompt({
-    ...session, repository: "example/project",
-    reviewRepositoryPath: `openspec/changes/${changeId}/review.md`,
-    alreadyCommitted: false,
-  });
-  assert.match(prompt, /Never invoke `gh`/u);
-  assert.match(prompt, /Do not push/u);
-  assert.match(prompt, /change\/complete-review-workflow/u);
+  for (const phaseNumber of [null, 2]) {
+    const prompt = changeReviewPrompt({
+      ...session, phaseNumber, repository: "example/project",
+      reviewRepositoryPath: `openspec/changes/${changeId}/review.md`,
+      alreadyCommitted: false,
+    });
+    assert.match(prompt, /Never invoke `gh`/u);
+    assert.match(prompt, /Do not push/u);
+    assert.match(prompt, /change\/complete-review-workflow/u);
+    assert.match(prompt, /Follow the review skill/u);
+    assert.doesNotMatch(prompt, /never fix findings|Leave every other pre-existing file|commit only those files/u);
+    if (phaseNumber !== null) assert.match(prompt, /Phase 2/u);
+  }
 });

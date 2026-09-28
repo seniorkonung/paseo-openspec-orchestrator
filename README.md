@@ -108,34 +108,42 @@ drafts a Russian root PR title and description. The orchestrator verifies and
 pushes the commits, then updates the managed summary section without changing
 Draft/Ready state.
 
-An OpenSpec review agent commits its report. Findings from `review.md`
-are resolved one at a time after an explicit user decision. The orchestrator
-verifies and pushes each commit range and records its outcome in the managed findings
-section of the same root PR.
+An OpenSpec review agent may correct code and artifacts according to its review
+skill, then commits the added or updated `review.md` together with all stage
+changes. Remaining findings are resolved one at a time after an explicit user
+decision. The orchestrator verifies and pushes each commit range and records
+finding outcomes in the managed findings section of the same root PR.
 
 The phase inspector reads bounded `plan.md` headings and OpenSpec task
 snapshots. A phase without tasks enters focused task planning. Its agent adds
 only incomplete tasks for that phase, followed by publication, OpenSpec review,
-finding resolution, and validation of changed paths and preserved task
-history. The next phase decision is made directly on the root branch.
+finding resolution, and validation of preserved task history. The task-planning
+agent itself may change only task artifacts; its subsequent review may also
+correct code and other artifacts. The next phase decision is made directly on
+the root branch.
 
 ### Implementation
 
 Each implementation run covers one phase. Tasks execute sequentially with one
 High agent and at least one commit per task. A nonempty batch of task
 commits is reviewed over its exact saved commit range, including every commit
-of each task. The report is committed separately in `implementation-review.md`.
-Both review reports are checked for
-findings; remediation may add new incomplete tasks, which form another
-independently reviewed batch.
+of each task. The review agent may correct code and artifacts, verifies those
+corrections in the same session, and commits them with the added or updated
+`implementation-review.md`. The saved review range stays fixed. Both review
+reports are checked for remaining findings; remediation may add new incomplete
+tasks, which form another independently reviewed batch. Review preserves known
+task IDs, numbers, descriptions, and order; completed tasks stay complete and
+new tasks start incomplete.
 
 Agents do not push task, review, or finding commits themselves. Their scoped
 MCP completion tools verify the stage contract, then the orchestrator
 publishes the commits to `change/<id>`. A stage needs at least one new commit;
 additional commits and their messages do not gate completion. Recovery accepts a verified
 local commit range before push and an already published range before checkpoint, without
-repeating the agent's work. The existing root PR is the only pull request
-associated with every stage.
+repeating the agent's work. An interrupted implementation review with correction
+commits but no added or updated report resumes its review work; a verified report
+with corrections is reused before or after push. The existing root PR is the
+only pull request associated with every stage.
 
 After all phases and review findings are complete, one High agent invokes the
 `openspec-archive-change` skill. It synchronizes every delta spec with the main

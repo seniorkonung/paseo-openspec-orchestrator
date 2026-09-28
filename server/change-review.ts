@@ -335,8 +335,8 @@ export function changeReviewPrompt(input: {
     body: [
       "The root change branch is already published. Verify that it still descends from the saved baseline.",
       reviewInstruction,
-      "Findings do not block this stage: never fix findings, implementation code, or existing planning artifacts, because a later stage owns them. If the review cannot be finished or needs user input, say what is missing and keep the conversation in this session instead of completing the stage.",
-      `Keep \`review.md\` and any other file the skill creates inside the change root, materially update an existing \`review.md\`, and commit only those files in at least one commit. Leave every other pre-existing file, including the planning artifacts, untouched, and do not change or delete those files.`,
+      input.alreadyCommitted ? "" : "Follow the review skill for any corrections to code or artifacts. Preserve the workflow's recorded task history: task IDs, numbers, descriptions, and order stay the same, completed tasks stay complete, and new tasks start incomplete. Remaining findings do not block this stage: record them for the later finding-resolution stages. If the review cannot be finished or needs user input, say what is missing and keep the conversation in this session instead of completing the stage.",
+      input.alreadyCommitted ? "" : `Keep \`review.md\` at \`${input.reviewRepositoryPath}\`, materially update an existing report, and commit the report and all stage corrections in at least one new commit.`,
       "Do not push or create a pull request. The orchestrator verifies and publishes the review commits to the existing Draft root pull request.",
     ],
     completion: completionInstruction({
