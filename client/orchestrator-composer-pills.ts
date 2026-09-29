@@ -3,17 +3,17 @@ import { createOrchestratorComposerPillRegistry } from "./orchestrator-composer-
 import { openSpecAvailability } from "../shared/openspec-availability";
 
 const AGENT_PAGE_SIZE = 200;
-const AGENT_SUBSCRIPTION_ID = "openspec-orchestrator-composer-pills";
 
-type AgentSnapshot = Awaited<
-  ReturnType<PluginClientContext["paseo"]["agents"]["list"]>
->["entries"][number]["agent"];
+type AgentListResult = Awaited<ReturnType<PluginClientContext["paseo"]["agents"]["list"]>>;
+type AgentSnapshot = AgentListResult["entries"][number]["agent"];
+type AgentSubscription = NonNullable<AgentListResult["subscription"]>;
 type AgentUpdateHandler = Parameters<PluginClientContext["paseo"]["agents"]["subscribe"]>[0];
 type AgentUpdate = Parameters<AgentUpdateHandler>[0];
 
 export function registerOrchestratorComposerPills(client: PluginClientContext): () => void {
   let stopped = false;
   let loadingInitialSnapshot = true;
+  let agentSubscription: AgentSubscription | null = null;
   const bufferedUpdates: AgentUpdate[] = [];
   const availabilityRequests = new Map<string, Promise<void>>();
   const registry = createOrchestratorComposerPillRegistry(({ agentId, workspaceId }) =>
@@ -83,18 +83,41 @@ export function registerOrchestratorComposerPills(client: PluginClientContext): 
     return request;
   }
 
+  function adoptAgentSubscription(subscription: AgentSubscription): void {
+    if (stopped) {
+      releaseAgentSubscription(subscription);
+      return;
+    }
+    agentSubscription = subscription;
+    // После переподключения хост заново запрашивает подписку и присылает свежий снимок:
+    // агенты, созданные за время обрыва связи, получают шильдик без перезапуска клиента.
+    subscription.subscribe({
+      snapshot(snapshot) {
+        for (const { agent } of snapshot.entries) upsertAgent(agent);
+      },
+      update() {},
+    });
+  }
+
+  function releaseAgentSubscription(subscription: AgentSubscription): void {
+    subscription.release().catch((error: unknown) => {
+      console.warn("[OpenSpec] Не удалось освободить подписку на агентов", error);
+    });
+  }
+
   async function loadInitialAgents(): Promise<void> {
     let cursor: string | undefined;
     const seenCursors = new Set<string>();
     try {
       do {
+        // Идентификатор подписки назначает хост: Paseo 0.10+ отклоняет
+        // запрос с явным subscriptionId, а 0.8 генерирует его сам.
         const page = await client.paseo.agents.list({
           scope: "active",
           page: cursor ? { limit: AGENT_PAGE_SIZE, cursor } : { limit: AGENT_PAGE_SIZE },
-          ...(cursor
-            ? {}
-            : { subscribe: { subscriptionId: AGENT_SUBSCRIPTION_ID } }),
+          ...(cursor ? {} : { subscribe: {} }),
         });
+        if (page.subscription) adoptAgentSubscription(page.subscription);
         if (stopped) return;
         for (const { agent } of page.entries) upsertAgent(agent);
 
@@ -118,6 +141,8 @@ export function registerOrchestratorComposerPills(client: PluginClientContext): 
   return () => {
     stopped = true;
     unsubscribeAgents();
+    if (agentSubscription) releaseAgentSubscription(agentSubscription);
+    agentSubscription = null;
     bufferedUpdates.length = 0;
     registry.clear();
   };
