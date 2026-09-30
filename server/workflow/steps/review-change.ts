@@ -5,7 +5,14 @@ import {
 } from "../../agent-profiles.ts";
 import { ChangeReviewError, type ChangeReviewService } from "../../change-review.ts";
 import { ChangeReviewPublicationError } from "../../change-review-publication.ts";
+import {
+  PhaseWorkError,
+  type PhaseTaskScope,
+  type PhaseWorkService,
+} from "../../phase-work.ts";
+import { ensureInitialPlannedPhases, workflowTaskScope } from "../task-scope.ts";
 import type {
+  WorkflowState,
   WorkflowStepContext,
   WorkflowStepDefinition,
   WorkflowStepResult,
@@ -15,6 +22,7 @@ export interface ReviewChangeDependencies {
   readonly workspaceDirectory: string;
   readonly readAgentProfiles: AgentProfileReader;
   readonly changeReview: Pick<ChangeReviewService, "plan" | "run">;
+  readonly phaseWork: Pick<PhaseWorkService, "inspect">;
 }
 
 async function reviewChangeStep(
@@ -37,7 +45,21 @@ async function reviewChangeStep(
     };
   }
 
-  let session = context.state.pendingReviewSession;
+  let state: WorkflowState;
+  let taskScope: PhaseTaskScope;
+  try {
+    state = await ensureInitialPlannedPhases(
+      dependencies.phaseWork,
+      dependencies.workspaceDirectory,
+      change.id,
+      context,
+    );
+    taskScope = workflowTaskScope(state);
+  } catch (error) {
+    return reviewFailure(context, error, "Не удалось определить фазы с задачами перед review");
+  }
+
+  let session = state.pendingReviewSession;
   if (!session) {
     try {
       session = await dependencies.changeReview.plan(
@@ -45,11 +67,11 @@ async function reviewChangeStep(
         change.id,
         changeBranch,
         activeBranch,
-        context.state.planningRun?.phaseNumber ?? null,
+        state.planningRun?.phaseNumber ?? null,
         context.signal,
       );
       await context.checkpointState({
-        ...context.state,
+        ...state,
         pendingReviewSession: session,
       });
     } catch (error) {
@@ -88,6 +110,7 @@ async function reviewChangeStep(
       workspaceDirectory: dependencies.workspaceDirectory,
       profile: resolution.profile,
       session,
+      taskScope,
       signal: context.signal,
       onAgentCreated: (agentId) => {
         context.updateActionLinks([
@@ -121,7 +144,8 @@ function reviewFailure(
   });
   const summary =
     error instanceof ChangeReviewError ||
-    error instanceof ChangeReviewPublicationError
+    error instanceof ChangeReviewPublicationError ||
+    error instanceof PhaseWorkError
       ? error.message
       : fallback;
   return {

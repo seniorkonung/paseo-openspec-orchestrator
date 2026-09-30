@@ -7,13 +7,15 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { prepareReviewPublication } from "../server/change-review-publication.ts";
 import { createChangeReviewVerification } from "../server/change-review-verification.ts";
-import { changeReviewPrompt } from "../server/change-review.ts";
+import { ChangeReviewError, changeReviewPrompt } from "../server/change-review.ts";
 
 const execFileAsync = promisify(execFile);
 const changeId = "complete-review-workflow";
 const branch = `change/${changeId}`;
 const repositoryUrl = "https://github.com/example/project";
 const reviewSubject = "Review report";
+// Область задач review проверяется отдельно; здесь её нарушений нет.
+const withinTaskScope = async () => {};
 
 async function fixture(context, { existingReview = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "openspec-review-"));
@@ -80,9 +82,9 @@ test("review публикует отчёт с правками артефакт�
   const verification = createChangeReviewVerification({ command: value.command });
   const reviewContext = await verification.readContext(value.workspace, changeId);
   const session = { ...target, changeId, phaseNumber: null };
-  assert.equal(await verification.isLocalCommitReady(reviewContext, session, new AbortController().signal), true);
-  const first = await verification.verifyCompleted(reviewContext, session, new AbortController().signal);
-  const second = await verification.verifyCompleted(reviewContext, session, new AbortController().signal);
+  assert.equal(await verification.isLocalCommitReady(reviewContext, session, withinTaskScope, new AbortController().signal), true);
+  const first = await verification.verifyCompleted(reviewContext, session, withinTaskScope, new AbortController().signal);
+  const second = await verification.verifyCompleted(reviewContext, session, withinTaskScope, new AbortController().signal);
   assert.equal(first.pullRequest.number, 41);
   assert.deepEqual(second, first);
   assert.equal(value.calls.filter((call) => call.startsWith("git push ")).length, 1);
@@ -102,7 +104,7 @@ test("review публикует несколько коммитов с прои�
   const verification = createChangeReviewVerification({ command: value.command });
   const reviewContext = await verification.readContext(value.workspace, changeId);
   const session = { ...target, changeId, phaseNumber: null };
-  const result = await verification.verifyCompleted(reviewContext, session, new AbortController().signal);
+  const result = await verification.verifyCompleted(reviewContext, session, withinTaskScope, new AbortController().signal);
   assert.equal(result.pullRequest.number, 41);
   assert.match(
     await value.git("ls-remote", "--heads", "origin", `refs/heads/${branch}`),
@@ -124,7 +126,7 @@ test("review с правками отклоняет преждевременны
   const verification = createChangeReviewVerification({ command: value.command });
   const reviewContext = await verification.readContext(value.workspace, changeId);
   await assert.rejects(
-    verification.verifyCompleted(reviewContext, { ...target, changeId, phaseNumber: null }, new AbortController().signal),
+    verification.verifyCompleted(reviewContext, { ...target, changeId, phaseNumber: null }, withinTaskScope, new AbortController().signal),
     /Корневой PR/u,
   );
   assert.equal(value.calls.some((call) => call.startsWith("git push ")), false);
@@ -143,8 +145,8 @@ test("review требует обновлённый отчёт даже при з
       const reviewContext = await verification.readContext(value.workspace, changeId);
       const session = { ...target, changeId, phaseNumber: null };
       const signal = new AbortController().signal;
-      assert.equal(await verification.isLocalCommitReady(reviewContext, session, signal), false);
-      await assert.rejects(verification.verifyCompleted(reviewContext, session, signal), /review\.md/u);
+      assert.equal(await verification.isLocalCommitReady(reviewContext, session, withinTaskScope, signal), false);
+      await assert.rejects(verification.verifyCompleted(reviewContext, session, withinTaskScope, signal), /review\.md/u);
       assert.equal(value.calls.some((call) => call.startsWith("git push ")), false);
     });
   }
@@ -162,6 +164,9 @@ test("review prompt разрешает правки и сохраняет зап
       ...session, phaseNumber, repository: "example/project",
       reviewRepositoryPath: `openspec/changes/${changeId}/review.md`,
       alreadyCommitted: false,
+      taskScope: phaseNumber === null
+        ? { kind: "initial-planning", plannedPhases: [1] }
+        : { kind: "phase-planning", phaseNumber },
     });
     assert.match(prompt, /Never invoke `gh`/u);
     assert.match(prompt, /Do not push/u);
@@ -169,5 +174,37 @@ test("review prompt разрешает правки и сохраняет зап
     assert.match(prompt, /Follow the review skill/u);
     assert.doesNotMatch(prompt, /never fix findings|Leave every other pre-existing file|commit only those files/u);
     if (phaseNumber !== null) assert.match(prompt, /Phase 2/u);
+    assert.match(
+      prompt,
+      phaseNumber === null
+        ? /Add new tasks only to phases that already have tasks: Phase 1\./u
+        : /Add new tasks only to Phase 2\./u,
+    );
+    assert.match(prompt, /The orchestrator plans every phase that has no tasks/u);
   }
+});
+
+test("review не публикует коммит, который наполняет задачами фазу оркестратора", async (context) => {
+  const value = await fixture(context);
+  const target = await prepareReviewPublication(value.workspace, changeId, branch, branch, undefined, value.command);
+  await writeFile(join(value.changeRoot, "review.md"), "# Review\n\nДобавлена задача следующей фазы.\n");
+  await value.git("add", ".");
+  await value.git("commit", "-m", reviewSubject);
+  const verification = createChangeReviewVerification({ command: value.command });
+  const reviewContext = await verification.readContext(value.workspace, changeId);
+  const session = { ...target, changeId, phaseNumber: null };
+  const signal = new AbortController().signal;
+  const scopeChecks = [];
+  const violatesTaskScope = async (checkSignal) => {
+    scopeChecks.push(checkSignal);
+    throw new ChangeReviewError("Задачи 2.1 нарушают это правило");
+  };
+
+  assert.equal(await verification.isLocalCommitReady(reviewContext, session, violatesTaskScope, signal), false);
+  await assert.rejects(
+    verification.verifyCompleted(reviewContext, session, violatesTaskScope, signal),
+    /Задачи 2\.1 нарушают это правило/u,
+  );
+  assert.deepEqual(scopeChecks, [signal, signal]);
+  assert.equal(value.calls.some((call) => call.startsWith("git push ")), false);
 });

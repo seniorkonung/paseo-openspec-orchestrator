@@ -122,6 +122,15 @@ agent itself may change only task artifacts; its subsequent review may also
 correct code and other artifacts. The next phase decision is made directly on
 the root branch.
 
+Only focused task planning fills a phase that has no tasks. Every review and
+finding-resolution agent is told which phases it may extend, and its
+completion tool rejects other task additions before any commit is published.
+Before the initial OpenSpec review, the orchestrator records which phases
+already have tasks. Until the first phase inspection, reviews and findings may
+add tasks only to those phases. During task planning of a phase, they may add
+tasks only to that phase. Work that belongs to a phase without tasks is
+described in that phase of `plan.md`.
+
 ### Implementation
 
 Each implementation run covers one phase. Tasks execute sequentially with one
@@ -134,6 +143,14 @@ reports are checked for remaining findings; remediation may add new incomplete
 tasks, which form another independently reviewed batch. Review preserves known
 task IDs, numbers, descriptions, and order; completed tasks stay complete and
 new tasks start incomplete.
+
+New tasks belong to the run's phase. When follow-up work needs its own phase,
+the agent inserts a new phase right after the current one in `plan.md`, gives
+it a number greater than every existing phase number, and fills it with tasks.
+The orchestrator runs that phase after the current one. Implementation reviews
+and findings never add tasks to other existing phases, so a phase without
+tasks is still planned by the orchestrator. The orchestrator checks this rule
+again before it saves the run's task progress.
 
 Agents do not push task, review, or finding commits themselves. Their scoped
 MCP completion tools verify the stage contract, then the orchestrator

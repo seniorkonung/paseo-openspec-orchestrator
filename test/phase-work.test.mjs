@@ -5,11 +5,15 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   PhaseWorkError,
+  assertPhaseTaskScope,
   classifyPhaseWork,
   createPhaseWorkService,
+  createTaskScopeCheck,
+  inspectWithinTaskScope,
   phaseProgressSchema,
   phaseTaskFingerprint,
   parsePhasedPlan,
+  plannedPhaseNumbers,
 } from "../server/phase-work.ts";
 
 const changeId = "phase-change";
@@ -264,4 +268,172 @@ test("сервис читает русский plan.md и отклоняет с�
     },
   });
   await assert.rejects(escapingService.inspect(gitRoot, changeId, null), /за пределами/u);
+});
+
+function phaseDecision(phaseNumbers, tasks, previous = null) {
+  return classifyPhaseWork(snapshot(parsePhasedPlan(plan(...phaseNumbers)), tasks), previous);
+}
+
+test("implementation run принимает задачи текущей фазы и новой фазы после неё", () => {
+  const baseline = phaseDecision([1, 2], [task("1.1")]).progress;
+  const scope = { kind: "implementation", phaseNumber: 1, baseline };
+
+  assert.doesNotThrow(() =>
+    assertPhaseTaskScope(phaseDecision([1, 2], [task("1.1"), task("1.2")], baseline), scope)
+  );
+  // Новая фаза агента получает свободный номер и стоит в plan.md сразу после Phase 1.
+  const separated = phaseDecision([1, 3, 2], [task("1.1"), task("1.2"), task("3.1")], baseline);
+  assert.doesNotThrow(() => assertPhaseTaskScope(separated, scope));
+  assert.deepEqual(plannedPhaseNumbers(separated), [1, 3]);
+});
+
+test("implementation run не наполняет задачами фазы, которые планирует оркестратор", () => {
+  const baseline = phaseDecision([1, 2], [task("1.1")]).progress;
+  const scope = { kind: "implementation", phaseNumber: 1, baseline };
+
+  // Найденный дефект: remediation-задача в ещё не распланированной Phase 2.
+  assert.throws(
+    () => assertPhaseTaskScope(phaseDecision([1, 2], [task("1.1"), task("2.1")], baseline), scope),
+    /Во время implementation run Phase 1 новые задачи допускаются только в Phase 1 или в новой фазе, вставленной в plan\.md после неё с номером больше всех прежних\. Задачи 2\.1 нарушают это правило: фазы без задач планирует оркестратор/u,
+  );
+  // Новая фаза заняла номер 2, а прежняя Phase 2 перенумерована: номер фазы уже был в плане.
+  assert.throws(
+    () => assertPhaseTaskScope(phaseDecision([1, 2, 3], [task("1.1"), task("2.1")], baseline), scope),
+    /Задачи 2\.1 нарушают это правило/u,
+  );
+  const many = Array.from({ length: 12 }, (_, index) => task(`2.${index + 1}`));
+  assert.throws(
+    () => assertPhaseTaskScope(phaseDecision([1, 2], [task("1.1"), ...many], baseline), scope),
+    /Задачи 2\.1, 2\.2, 2\.3, 2\.4, 2\.5, 2\.6, 2\.7, 2\.8, 2\.9, 2\.10 и ещё 2 нарушают/u,
+  );
+
+  const preplanned = phaseDecision([1, 2, 3], [task("1.1"), task("2.1")]).progress;
+  assert.throws(
+    () => assertPhaseTaskScope(
+      phaseDecision([1, 2, 3], [task("1.1"), task("2.1"), task("2.2")], preplanned),
+      { kind: "implementation", phaseNumber: 1, baseline: preplanned },
+    ),
+    /Задачи 2\.2 нарушают это правило/u,
+  );
+
+  const secondRun = phaseDecision([1, 2, 3], [task("1.1", true), task("2.1")]).progress;
+  assert.throws(
+    () => assertPhaseTaskScope(
+      phaseDecision([1, 4, 2, 3], [task("1.1", true), task("2.1"), task("4.1")], secondRun),
+      { kind: "implementation", phaseNumber: 2, baseline: secondRun },
+    ),
+    /Задачи 4\.1 нарушают это правило/u,
+  );
+});
+
+test("планирование фазы добавляет задачи только в целевую фазу", () => {
+  const baseline = phaseDecision([1, 2, 3], [task("1.1", true)]).progress;
+  const scope = { kind: "phase-planning", phaseNumber: 2, baseline };
+
+  assert.doesNotThrow(() =>
+    assertPhaseTaskScope(
+      phaseDecision([1, 2, 3], [task("1.1", true), task("2.1"), task("2.2")], baseline),
+      scope,
+    )
+  );
+  assert.throws(
+    () => assertPhaseTaskScope(
+      phaseDecision([1, 2, 3], [task("1.1", true), task("2.1"), task("3.1")], baseline),
+      scope,
+    ),
+    /При планировании Phase 2 новые задачи допускаются только в ней\. Задачи 3\.1 относятся к другим фазам/u,
+  );
+  assert.throws(
+    () => assertPhaseTaskScope(
+      phaseDecision([1, 2, 4, 3], [task("1.1", true), task("2.1"), task("4.1")], baseline),
+      scope,
+    ),
+    /Задачи 4\.1 относятся к другим фазам/u,
+  );
+});
+
+test("начальное планирование пополняет задачами только уже распланированные фазы", () => {
+  const initial = phaseDecision([1, 2], [task("1.1")]);
+  const scope = { kind: "initial-planning", plannedPhases: plannedPhaseNumbers(initial) };
+  assert.deepEqual(scope.plannedPhases, [1]);
+
+  // До первой проверки фаз история задач не фиксируется: review может переписать задачи Phase 1.
+  assert.doesNotThrow(() =>
+    assertPhaseTaskScope(phaseDecision([1, 2], [task("1.1", false, "task-new"), task("1.2")]), scope)
+  );
+  assert.throws(
+    () => assertPhaseTaskScope(phaseDecision([1, 2], [task("1.1"), task("2.1")]), scope),
+    /До первой проверки фаз задачи можно добавлять только в фазы, где они уже были: Phase 1\. Задачи 2\.1 нарушают это правило/u,
+  );
+  assert.throws(
+    () => assertPhaseTaskScope(
+      phaseDecision([1, 2], [task("1.1")]),
+      { kind: "initial-planning", plannedPhases: [] },
+    ),
+    /До начального review задач не было ни в одной фазе.*Задачи 1\.1 нарушают это правило/u,
+  );
+});
+
+test("список распланированных фаз следует порядку plan.md и пропускает фазы без задач", () => {
+  assert.deepEqual(plannedPhaseNumbers(phaseDecision([3, 1, 2], [task("1.1"), task("3.1")])), [3, 1]);
+  assert.deepEqual(plannedPhaseNumbers(phaseDecision([1, 2], [])), []);
+});
+
+test("проверка области передаёт inspect baseline области и отклоняет нарушение", async () => {
+  const baseline = phaseDecision([1, 2], [task("1.1")]).progress;
+  const previousValues = [];
+  let tasks = [task("1.1"), task("1.2")];
+  const phaseWork = {
+    async inspect(workspace, inspectedChangeId, previous) {
+      assert.equal(workspace, "/repo");
+      assert.equal(inspectedChangeId, changeId);
+      previousValues.push(previous);
+      return phaseDecision([1, 2], tasks, previous);
+    },
+  };
+  const implementation = { kind: "implementation", phaseNumber: 1, baseline };
+
+  const decision = await inspectWithinTaskScope(phaseWork, "/repo", changeId, implementation);
+  assert.equal(decision.kind, "implementation-required");
+  await inspectWithinTaskScope(phaseWork, "/repo", changeId, {
+    kind: "initial-planning",
+    plannedPhases: [1],
+  });
+  assert.deepEqual(previousValues, [baseline, null]);
+
+  tasks = [task("1.1"), task("2.1")];
+  await assert.rejects(
+    inspectWithinTaskScope(phaseWork, "/repo", changeId, implementation),
+    (error) => error instanceof PhaseWorkError && /Задачи 2\.1/u.test(error.message),
+  );
+});
+
+test("нарушение области задач становится ошибкой этапа, а сбой OpenSpec передаётся как есть", async () => {
+  class StageError extends Error {}
+  const baseline = phaseDecision([1, 2], [task("1.1")]).progress;
+  const scope = { kind: "implementation", phaseNumber: 1, baseline };
+  const signal = new AbortController().signal;
+  const violating = createTaskScopeCheck(
+    { async inspect(_workspace, _changeId, previous) {
+      return phaseDecision([1, 2], [task("1.1"), task("2.1")], previous);
+    } },
+    "/repo",
+    changeId,
+    scope,
+    (message) => new StageError(message),
+  );
+  await assert.rejects(
+    violating(signal),
+    (error) => error instanceof StageError && /Задачи 2\.1 нарушают/u.test(error.message),
+  );
+
+  const failure = new Error("OpenSpec недоступен");
+  const broken = createTaskScopeCheck(
+    { async inspect() { throw failure; } },
+    "/repo",
+    changeId,
+    scope,
+    (message) => new StageError(message),
+  );
+  await assert.rejects(broken(signal), (error) => error === failure);
 });

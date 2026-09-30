@@ -37,6 +37,39 @@ export const GITHUB_CLI_RULE =
 export const STAGE_SCOPE_RULE =
   "Stay inside this stage: never spawn or archive agents, workspaces, or changes, and never invoke another workflow.";
 
+/** Фазы, которые этап может пополнять задачами; структурно совместимо с PhaseTaskScope. */
+export type TaskScopePromptInput =
+  | { readonly kind: "initial-planning"; readonly plannedPhases: readonly number[] }
+  | { readonly kind: "phase-planning" | "implementation"; readonly phaseNumber: number };
+
+const UNPLANNED_PHASE_RULE =
+  "The orchestrator plans every phase that has no tasks: never add tasks to such a phase, and capture work that belongs there in that phase of plan.md instead.";
+
+/** Правило добавления задач: фазы без задач планирует только оркестратор. */
+export function taskScopeRule(scope: TaskScopePromptInput): string {
+  switch (scope.kind) {
+    case "initial-planning":
+      return scope.plannedPhases.length === 0
+        ? `No phase has tasks yet, so do not add tasks. ${UNPLANNED_PHASE_RULE}`
+        : `Add new tasks only to phases that already have tasks: ${scope.plannedPhases.map((phase) => `Phase ${phase}`).join(", ")}. ${UNPLANNED_PHASE_RULE}`;
+    case "phase-planning":
+      return `Add new tasks only to Phase ${scope.phaseNumber}. ${UNPLANNED_PHASE_RULE}`;
+    case "implementation": {
+      const phase = scope.phaseNumber;
+      return `Add new tasks only to Phase ${phase} or to a new phase of your own, and append every new task after all existing tasks. Number new Phase ${phase} tasks as ${phase}.<next free number>. Never add tasks to another existing phase. ${UNPLANNED_PHASE_RULE} When the agreed follow-up needs a phase of its own, insert its heading in plan.md right after Phase ${phase} with a number greater than every existing phase number, keep every existing phase number unchanged, and number its tasks with that new phase number.`;
+    }
+  }
+}
+
+/** Данные области задач для workflow data промпта. */
+export function taskScopeWorkflowData(
+  scope: TaskScopePromptInput,
+): Readonly<Record<string, unknown>> {
+  return scope.kind === "initial-planning"
+    ? { plannedPhases: scope.plannedPhases }
+    : { phaseNumber: scope.phaseNumber };
+}
+
 export interface AgentPromptSpec {
   /** Одно предложение о зоне ответственности агента. */
   readonly role: string;

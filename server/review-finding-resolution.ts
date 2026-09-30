@@ -33,6 +33,11 @@ import {
 } from "./orchestrator-mcp-tool-host.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import {
+  createTaskScopeCheck,
+  type PhaseTaskScope,
+  type PhaseWorkService,
+} from "./phase-work.ts";
+import {
   updateAgentNotificationLabel,
   type AgentNotificationLabelUpdater,
 } from "./paseo-agent-labels.ts";
@@ -99,6 +104,8 @@ export interface ReviewFindingResolutionRequest<
   readonly branch: string;
   readonly profile: CompleteRequiredAgentProfile;
   readonly session: Session;
+  /** Фазы, в которые устранение finding может добавлять задачи. */
+  readonly taskScope: PhaseTaskScope;
   readonly signal: AbortSignal;
   readonly onAgentCreated: (agentId: string) => void;
   readonly onFindingResolved: (
@@ -126,6 +133,7 @@ interface McpHostFactory {
 
 export interface ReviewFindingResolutionServiceOptions {
   readonly createAgent: ReviewFindingResolutionPaseoAgentCreator;
+  readonly phaseWork: Pick<PhaseWorkService, "inspect">;
   readonly command?: BoundedCommandRunner;
   readonly resolveRealPath?: ReviewFindingContextReaderOptions<ReviewFindingResolutionSession>["resolveRealPath"];
   readonly inspectPath?: ReviewFindingContextReaderOptions<ReviewFindingResolutionSession>["inspectPath"];
@@ -238,6 +246,13 @@ export function createReviewFindingResolutionService<
         changeId,
         request.signal,
       );
+      const assertTaskScope = createTaskScopeCheck(
+        options.phaseWork,
+        request.workspaceDirectory,
+        changeId,
+        request.taskScope,
+        (message) => new ReviewFindingResolutionError(message),
+      );
       await assertCurrentBranch(command, context.gitRoot, branch, request.signal);
       await assertDescendsFromBaseline(
         command,
@@ -252,6 +267,7 @@ export function createReviewFindingResolutionService<
         session,
         behavior,
         contextReader.readReport,
+        assertTaskScope,
         request.signal,
       );
       if (existingLocalResolution) {
@@ -347,6 +363,7 @@ export function createReviewFindingResolutionService<
                   session,
                   behavior,
                   contextReader.readReport,
+                  assertTaskScope,
                   signal,
                 );
               } catch (error) {
@@ -464,6 +481,7 @@ export function createReviewFindingResolutionService<
                 reviewRepositoryPath: context.reviewRepositoryPath,
                 alreadyCommitted: existingLocalResolution !== null,
                 publicationAlreadyCompleted,
+                taskScope: request.taskScope,
               }),
               labels: { ntfy: "true" },
             }),

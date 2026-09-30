@@ -156,8 +156,11 @@ export class OrchestratorController {
       workspace.agents.create(options);
     const phaseWork = createPhaseWorkService();
     const rootPullRequest = createRootPullRequestService();
-    const changeFindingResolution = createChangeFindingResolutionService({ createAgent });
-    const implementationFindingResolution = createImplementationFindingResolutionService({ createAgent });
+    const changeFindingResolution = createChangeFindingResolutionService({ createAgent, phaseWork });
+    const implementationFindingResolution = createImplementationFindingResolutionService({
+      createAgent,
+      phaseWork,
+    });
     const workflow = createOpenSpecWorkflow({
       workspaceDirectory,
       readAgentProfiles,
@@ -167,12 +170,12 @@ export class OrchestratorController {
       changeInitialization: createChangeInitializationService(),
       planningBranch: createPlanningBranchService(),
       implementationBranch: createImplementationBranchService(),
-      implementationReview: createImplementationReviewService({ createAgent }),
+      implementationReview: createImplementationReviewService({ createAgent, phaseWork }),
       implementationRunVerification: createImplementationRunVerifier(),
       verifyChange: verifyOpenSpecChange,
       changeArtifacts: createChangeArtifactCreationService({ createAgent }),
       changePublication: createChangePublicationService({ createAgent }),
-      changeReview: createChangeReviewService({ createAgent }),
+      changeReview: createChangeReviewService({ createAgent, phaseWork }),
       changeFindingResolution,
       implementationFindingResolution,
       changeTaskExecution: createChangeTaskExecutionService({ createAgent }),

@@ -42,7 +42,11 @@ import {
   type ImplementationRun,
 } from "../implementation-run-model.ts";
 import { planningRunSchema, type PlanningRun } from "../planning-run-model.ts";
-import { phaseProgressSchema, type PhaseProgress } from "../phase-work.ts";
+import {
+  phaseProgressSchema,
+  plannedPhasesSchema,
+  type PhaseProgress,
+} from "../phase-work.ts";
 import {
   pendingPhaseTaskPlanningSessionSchema,
   type PendingPhaseTaskPlanningSession,
@@ -80,6 +84,11 @@ export interface WorkflowState {
   readonly implementationRun: ImplementationRun | null;
   readonly planningRun: PlanningRun | null;
   readonly phaseProgress: PhaseProgress | null;
+  /**
+   * Фазы с задачами на момент начального OpenSpec review. До первой проверки
+   * фаз review и findings добавляют задачи только в них.
+   */
+  readonly initialPlannedPhases: readonly number[] | null;
   readonly rootPullRequest: RootPullRequestIdentity | null;
   readonly pendingArchiveSession: PendingArchiveSession | null;
   readonly archivedChange: ArchivedChange | null;
@@ -118,6 +127,7 @@ export const workflowStateSchema = z
     implementationRun: implementationRunSchema.nullable().default(null),
     planningRun: planningRunSchema.nullable().default(null),
     phaseProgress: phaseProgressSchema.nullable().default(null),
+    initialPlannedPhases: plannedPhasesSchema.nullable().default(null),
     rootPullRequest: rootPullRequestIdentitySchema.nullable().default(null),
     pendingArchiveSession: pendingArchiveSessionSchema.nullable().default(null),
     archivedChange: archivedChangeSchema.nullable().default(null),
@@ -228,6 +238,16 @@ export const workflowStateSchema = z
       pendingSessions > 0
     )) {
       context.addIssue({ code: "custom", path: ["archivedChange"], message: "Архив не соответствует завершённому change" });
+    }
+    if (
+      state.initialPlannedPhases &&
+      (state.planningRun || state.implementationRun || state.phaseTarget)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["initialPlannedPhases"],
+        message: "Фазы начального планирования сохраняются только до первой проверки фаз",
+      });
     }
     if (state.phaseTarget && (!state.phaseProgress || state.activeBranch !== state.changeBranch)) {
       context.addIssue({
@@ -510,6 +530,7 @@ export function createInitialWorkflowState(): WorkflowState {
     implementationRun: null,
     planningRun: null,
     phaseProgress: null,
+    initialPlannedPhases: null,
     rootPullRequest: null,
     pendingArchiveSession: null,
     archivedChange: null,

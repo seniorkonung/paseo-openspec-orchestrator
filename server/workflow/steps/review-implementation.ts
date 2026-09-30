@@ -24,6 +24,14 @@ async function runStep(
   if (!run || run.batch.kind !== "collecting") {
     return { kind: "halt", summary: "Нет непустого implementation-пакета", message: "Implementation review требует выполненные task-коммиты" };
   }
+  const taskBaseline = context.state.phaseProgress;
+  if (!taskBaseline) {
+    return {
+      kind: "halt",
+      summary: "Не сохранён baseline задач implementation-run",
+      message: "Implementation review требует сохранённый progress задач; запустите workflow заново",
+    };
+  }
   let session = context.state.pendingImplementationReviewSession;
   try {
     if (!session) {
@@ -45,6 +53,7 @@ async function runStep(
       profile: resolution.profile,
       run,
       session,
+      taskBaseline,
       signal: context.signal,
       onAgentCreated: (agentId) => context.updateActionLinks([{ kind: "agent", agentId, label: "Implementation review" }]),
       onReviewCompleted: async (review) => {

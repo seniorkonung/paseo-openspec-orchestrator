@@ -10,6 +10,7 @@ import {
   changeFindingResolutionPrompt,
   createChangeFindingResolutionService,
 } from "../server/change-finding-resolution.ts";
+import { classifyPhaseWork, phaseTaskFingerprint } from "../server/phase-work.ts";
 import {
   reviewPullRequestBody,
   reviewPullRequestTitle,
@@ -38,6 +39,50 @@ function highProfile() {
     featureValues: { web: false },
   };
 }
+
+function phaseTask(number, done = false) {
+  const id = `task-${number}`;
+  const description = `${number} Задача ${number}`;
+  return {
+    id,
+    number,
+    description,
+    done,
+    phaseNumber: Number(number.split(".")[0]),
+    fingerprint: phaseTaskFingerprint(id, number, description),
+  };
+}
+
+function phaseDecision(tasks, previous) {
+  return classifyPhaseWork({
+    phases: [{ number: 1 }, { number: 2 }],
+    tasks,
+    schemaName: "spec-driven",
+    planPath: `/repo/openspec/changes/${changeId}/plan.md`,
+    taskArtifactPaths: [`/repo/openspec/changes/${changeId}/tasks.md`],
+  }, previous);
+}
+
+// Снимок OpenSpec: у Phase 1 есть задачи, Phase 2 ждёт планирования оркестратором.
+function stubPhaseWork(tasks = () => [phaseTask("1.1")]) {
+  return {
+    async inspect(_workspace, inspectedChangeId, previous) {
+      assert.equal(inspectedChangeId, changeId);
+      return phaseDecision(tasks(), previous);
+    },
+  };
+}
+
+async function remoteHead(fixture) {
+  const { stdout } = await execFileAsync(
+    "git",
+    ["ls-remote", "--heads", fixture.remote, `refs/heads/${branch}`],
+    { encoding: "utf8" },
+  );
+  return String(stdout).trim().split(/\s+/u)[0];
+}
+
+const initialScope = { kind: "initial-planning", plannedPhases: [1] };
 
 function finding(id) {
   return `### ${id} · High — Проблема ${id}
@@ -235,7 +280,7 @@ async function commitResolution(fixture, {
 test("plan выбирает первую finding в порядке review и завершает чистый отчёт", async (context) => {
   const fixture = await createRepository(context, ["F7", "F2"]);
   const { command } = createCommand(fixture);
-  const service = createChangeFindingResolutionService({ command, async createAgent() {} });
+  const service = createChangeFindingResolutionService({ command, phaseWork: stubPhaseWork(), async createAgent() {} });
 
   assert.deepEqual(await service.plan(fixture.workspace, changeId, branch), {
     kind: "finding-required",
@@ -270,6 +315,7 @@ test("High ждёт scoped MCP, а оркестратор публикует п�
   const agentCreated = new Promise((resolve) => { resolveCreated = resolve; });
   const service = createChangeFindingResolutionService({
     command,
+    phaseWork: stubPhaseWork(),
     async createAgent(options) {
       created.push(options);
       createdOptions = options;
@@ -293,6 +339,7 @@ test("High ждёт scoped MCP, а оркестратор публикует п�
     branch,
     profile: highProfile(),
     session: plan.session,
+    taskScope: initialScope,
     signal: new AbortController().signal,
     onAgentCreated() {},
     async onFindingResolved(result) { completed.push(result); },
@@ -373,6 +420,7 @@ test("accepted risk удаляет finding из активного списка"
   let runTool;
   const service = createChangeFindingResolutionService({
     command,
+    phaseWork: stubPhaseWork(),
     async createAgent(options) {
       createdOptions = options;
       runTool = (async () => {
@@ -403,6 +451,7 @@ test("accepted risk удаляет finding из активного списка"
     branch,
     profile: highProfile(),
     session: plan.session,
+    taskScope: initialScope,
     signal: new AbortController().signal,
     onAgentCreated() {},
     async onFindingResolved() {},
@@ -415,6 +464,62 @@ test("accepted risk удаляет finding из активного списка"
   assert.match(fixture.pullRequest.body, /\*\*Итог:\*\* Риск принят:/);
 });
 
+test("устранение review finding в начальном планировании не добавляет задачи в фазу без задач", async (context) => {
+  const fixture = await createRepository(context, ["F1"]);
+  const { command } = createCommand(fixture);
+  let tasks = [phaseTask("1.1"), phaseTask("2.1")];
+  let runTool;
+  const service = createChangeFindingResolutionService({
+    command,
+    phaseWork: stubPhaseWork(() => tasks),
+    async createAgent(options) {
+      runTool = (async () => {
+        await commitResolution(fixture, { findingIds: [] });
+        const [{ url }] = Object.values(options.config.mcpServers);
+        const client = await connectClient(url);
+        try {
+          const rejected = await client.callTool({ name: "complete_review_finding", arguments: publishInput });
+          const remoteAfterRejection = await remoteHead(fixture);
+          const bodyAfterRejection = fixture.pullRequest.body;
+          tasks = [phaseTask("1.1"), phaseTask("1.2")];
+          const accepted = await client.callTool({ name: "complete_review_finding", arguments: publishInput });
+          return { rejected, remoteAfterRejection, bodyAfterRejection, accepted };
+        } finally {
+          await client.close();
+        }
+      })();
+      return { id: "agent-task-scope", async waitForFinish() { await runTool; } };
+    },
+    updateNotificationLabel: async () => {},
+    logger: { error() {}, warn() {} },
+  });
+  const plan = await service.plan(fixture.workspace, changeId, branch);
+  const result = await service.run({
+    workspaceDirectory: fixture.workspace,
+    changeId,
+    branch,
+    profile: highProfile(),
+    session: plan.session,
+    taskScope: initialScope,
+    signal: new AbortController().signal,
+    onAgentCreated() {},
+    async onFindingResolved() {},
+  });
+  const { rejected, remoteAfterRejection, bodyAfterRejection, accepted } = await runTool;
+
+  assert.equal(rejected.isError, true);
+  assert.match(
+    firstText(rejected),
+    /До первой проверки фаз задачи можно добавлять только в фазы, где они уже были: Phase 1\. Задачи 2\.1 нарушают это правило/u,
+  );
+  assert.equal(remoteAfterRejection, fixture.baselineCommit);
+  assert.doesNotMatch(bodyAfterRejection, /`F1`/u);
+  assert.equal(accepted.isError, undefined);
+  assert.equal(result.findingId, "F1");
+  assert.equal(await remoteHead(fixture), result.commit);
+  assert.match(fixture.pullRequest.body, /`F1` — исправлено/u);
+});
+
 async function commitScenarioResult(context, kind) {
   const fixture = await createRepository(context, ["F1"]);
   const { command } = createCommand(fixture);
@@ -424,6 +529,7 @@ async function commitScenarioResult(context, kind) {
   const created = new Promise((resolve) => { resolveCreated = resolve; });
   const service = createChangeFindingResolutionService({
     command,
+    phaseWork: stubPhaseWork(),
     async createAgent(value) {
       options = value;
       resolveCreated();
@@ -439,6 +545,7 @@ async function commitScenarioResult(context, kind) {
     branch,
     profile: highProfile(),
     session: plan.session,
+    taskScope: initialScope,
     signal: controller.signal,
     onAgentCreated() {},
     async onFindingResolved() {},
@@ -499,6 +606,7 @@ test("ошибка checkpoint восстанавливает ntfy и повто�
   let attempts = 0;
   const service = createChangeFindingResolutionService({
     command,
+    phaseWork: stubPhaseWork(),
     async createAgent(value) {
       options = value;
       resolveCreated();
@@ -515,6 +623,7 @@ test("ошибка checkpoint восстанавливает ntfy и повто�
     branch,
     profile: highProfile(),
     session: plan.session,
+    taskScope: initialScope,
     signal: new AbortController().signal,
     onAgentCreated() {},
     async onFindingResolved() {
@@ -555,6 +664,7 @@ test("полный restart подтверждает уже проверенну�
   let toolResult;
   const service = createChangeFindingResolutionService({
     command,
+    phaseWork: stubPhaseWork(),
     async createAgent(value) {
       options = value;
       toolResult = (async () => {
@@ -604,6 +714,7 @@ test("полный restart подтверждает уже проверенну�
     branch,
     profile: highProfile(),
     session: plan.session,
+    taskScope: initialScope,
     signal: new AbortController().signal,
     onAgentCreated() {},
     async onFindingResolved() {},
@@ -628,12 +739,16 @@ test("prompt требует одно решение, сохраняет зада
     reviewRepositoryPath: `openspec/changes/${changeId}/review.md`,
     alreadyCommitted: false,
     publicationAlreadyCompleted: false,
+    taskScope: initialScope,
   });
   assert.match(prompt, /F42/);
   assert.match(prompt, /one explicit decision/);
   assert.match(prompt, /without asking for another approval/);
   assert.match(prompt, /never reopen a completed task/);
   assert.match(prompt, /append new unfinished tasks/);
+  assert.match(prompt, /Add new tasks only to phases that already have tasks: Phase 1\./u);
+  assert.match(prompt, /The orchestrator plans every phase that has no tasks/u);
+  assert.match(prompt, /"plannedPhases":\[1\]/u);
   assert.doesNotMatch(prompt, /second explicit permission|third permission/);
   assert.match(prompt, /Do not push/u);
   assert.match(prompt, /complete_review_finding/);
@@ -647,9 +762,23 @@ test("prompt требует одно решение, сохраняет зада
     reviewRepositoryPath: `openspec/changes/${changeId}/review.md`,
     alreadyCommitted: true,
     publicationAlreadyCompleted: true,
+    taskScope: initialScope,
   });
   assert.match(recoveredPrompt, /"mode":"acknowledge-existing"/);
   assert.match(recoveredPrompt, /do not invoke the skill, request the user's decision, commit, or push/);
   assert.doesNotMatch(recoveredPrompt, /git push --set-upstream/);
   assert.doesNotMatch(recoveredPrompt, /Invoke the `openspec-review-change` skill/);
+  assert.doesNotMatch(recoveredPrompt, /Add new tasks only/u);
+
+  const planningPrompt = changeFindingResolutionPrompt({
+    changeId,
+    findingId: "F42",
+    branch,
+    reviewRepositoryPath: `openspec/changes/${changeId}/review.md`,
+    alreadyCommitted: false,
+    publicationAlreadyCompleted: false,
+    taskScope: { kind: "phase-planning", phaseNumber: 2 },
+  });
+  assert.match(planningPrompt, /Add new tasks only to Phase 2\./u);
+  assert.match(planningPrompt, /"phaseNumber":2/u);
 });

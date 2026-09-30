@@ -32,6 +32,7 @@ import { McpToolError, OrchestratorMcpToolHost, defineMcpTool } from "./orchestr
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import {
   PhaseWorkError,
+  assertPhaseTaskScope,
   phaseProgressSchema,
   type PhaseProgress,
   type PhaseWorkDecision,
@@ -383,6 +384,11 @@ export function assertPhasePlanningDecision(
   baselineProgress: PhaseProgress,
   phaseNumber: number,
 ): asserts decision is Extract<PhaseWorkDecision, { kind: "implementation-required" }> {
+  assertPhaseTaskScope(decision, {
+    kind: "phase-planning",
+    phaseNumber,
+    baseline: baselineProgress,
+  });
   if (decision.kind !== "implementation-required" || decision.phaseNumber !== phaseNumber) {
     throw new PhaseTaskPlanningError(
       `Planning должен добавить незавершённые задачи только Phase ${phaseNumber}`,
@@ -395,10 +401,7 @@ export function assertPhasePlanningDecision(
     );
   }
   const added = decision.snapshot.tasks.slice(baselineProgress.tasks.length);
-  if (
-    added.length === 0 ||
-    added.some((task) => task.phaseNumber !== phaseNumber || task.done)
-  ) {
+  if (added.length === 0 || added.some((task) => task.done)) {
     throw new PhaseTaskPlanningError(
       `Planning должен добавить хотя бы одну незавершённую задачу ${phaseNumber}.*`,
     );

@@ -14,6 +14,7 @@ import {
 import { planningBranchSchema } from "./change-branch.ts";
 import { verifyReviewPullRequest } from "./change-review-publication.ts";
 import { runWorkspaceMiseCommand } from "./mise-toolchain.ts";
+import type { TaskScopeCheck } from "./phase-work.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import { resolveRepoLocalChangePaths } from "./repo-local-change.ts";
 
@@ -42,11 +43,13 @@ export interface ChangeReviewVerification {
   isLocalCommitReady(
     context: ReviewContext,
     session: PendingReviewSession,
+    assertTaskScope: TaskScopeCheck,
     signal: AbortSignal,
   ): Promise<boolean>;
   verifyCompleted(
     context: ReviewContext,
     session: PendingReviewSession,
+    assertTaskScope: TaskScopeCheck,
     signal: AbortSignal,
   ): Promise<CompletedChangeReview>;
 }
@@ -160,6 +163,7 @@ export function createChangeReviewVerification(
   const verifyLocalReviewCommit = async (
     context: ReviewContext,
     session: PendingReviewSession,
+    assertTaskScope: TaskScopeCheck,
     signal: AbortSignal,
   ): Promise<string> => {
     await assertCurrentBranch(command, context.gitRoot, session.reviewBranch, signal);
@@ -193,6 +197,9 @@ export function createChangeReviewVerification(
     if (!changedPaths.includes(context.reviewRepositoryPath)) {
       throw new ChangeReviewError("Review-коммиты должны добавлять или изменять review.md");
     }
+    // Проверка до публикации: задача в фазе, которую планирует оркестратор,
+    // отменила бы её фокусное планирование.
+    await assertTaskScope(signal);
 
     return head;
   };
@@ -200,9 +207,9 @@ export function createChangeReviewVerification(
   return {
     readContext,
 
-    async isLocalCommitReady(context, session, signal) {
+    async isLocalCommitReady(context, session, assertTaskScope, signal) {
       try {
-        await verifyLocalReviewCommit(context, session, signal);
+        await verifyLocalReviewCommit(context, session, assertTaskScope, signal);
         return true;
       } catch (error) {
         if (signal.aborted) throw error;
@@ -210,8 +217,8 @@ export function createChangeReviewVerification(
       }
     },
 
-    async verifyCompleted(context, session, signal) {
-      const head = await verifyLocalReviewCommit(context, session, signal);
+    async verifyCompleted(context, session, assertTaskScope, signal) {
+      const head = await verifyLocalReviewCommit(context, session, assertTaskScope, signal);
       const pullRequest = await verifyReviewPullRequest(
         context.gitRoot,
         reviewPublicationTarget(session),

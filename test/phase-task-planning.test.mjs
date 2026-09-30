@@ -105,6 +105,14 @@ test("planning result сохраняет completion state старых зада�
       session.baselineProgress,
       2,
     ),
+    /При планировании Phase 2 новые задачи допускаются только в ней\. Задачи 1\.2 относятся к другим фазам/u,
+  );
+  assert.throws(
+    () => assertPhasePlanningDecision(
+      { ...decision, snapshot: { tasks: [preserved] } },
+      session.baselineProgress,
+      2,
+    ),
     /незавершённую задачу 2\.\*/u,
   );
 });

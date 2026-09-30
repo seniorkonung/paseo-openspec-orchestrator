@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { BoundedCommandRunner } from "./bounded-command.ts";
 import { commitHashSchema } from "./change-artifact-model.ts";
+import type { TaskScopeCheck } from "./phase-work.ts";
 import type { ReviewFindingOutcome } from "./review-finding-publication.ts";
 import { deliverRootCommit } from "./root-branch-delivery.ts";
 import {
@@ -28,6 +29,7 @@ export async function readLocalResolutionIfReady<
   session: Session,
   behavior: ReviewFindingResolutionBehavior<Session>,
   readReport: ReportReader,
+  assertTaskScope: TaskScopeCheck,
   signal: AbortSignal,
 ): Promise<VerifiedReviewFindingResolution | null> {
   try {
@@ -37,6 +39,7 @@ export async function readLocalResolutionIfReady<
       session,
       behavior,
       readReport,
+      assertTaskScope,
       signal,
     );
   } catch (error) {
@@ -53,6 +56,7 @@ export async function verifyCompletedResolution<
   session: Session,
   behavior: ReviewFindingResolutionBehavior<Session>,
   readReport: ReportReader,
+  assertTaskScope: TaskScopeCheck,
   signal: AbortSignal,
 ): Promise<VerifiedReviewFindingResolution> {
   const resolution = await verifyLocalResolution(
@@ -61,6 +65,7 @@ export async function verifyCompletedResolution<
     session,
     behavior,
     readReport,
+    assertTaskScope,
     signal,
   );
   await deliverRootCommit(
@@ -87,6 +92,7 @@ async function verifyLocalResolution<Session extends ReviewFindingResolutionSess
   session: Session,
   behavior: ReviewFindingResolutionBehavior<Session>,
   readReport: ReportReader,
+  assertTaskScope: TaskScopeCheck,
   signal: AbortSignal,
 ): Promise<VerifiedReviewFindingResolution> {
   await assertCurrentBranch(command, context.gitRoot, session.branch, signal);
@@ -136,6 +142,9 @@ async function verifyLocalResolution<Session extends ReviewFindingResolutionSess
       `Finding-коммит должен изменять ${behavior.report.fileName} и только файлы выбранного change`,
     );
   }
+  // Проверка до публикации: задача в фазе, которую планирует оркестратор,
+  // отменила бы её фокусное планирование.
+  await assertTaskScope(signal);
 
   const outcome: ReviewFindingOutcome = report.acceptedRisks.some(
     ({ originatingFindingId }) => originatingFindingId === session.findingId,

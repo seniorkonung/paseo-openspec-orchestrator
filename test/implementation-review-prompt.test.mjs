@@ -26,6 +26,7 @@ const session = pendingImplementationReviewSessionSchema.parse({
 function prompt(alreadyCommitted) {
   return implementationReviewPrompt({
     session,
+    phaseNumber: 2,
     reviewRepositoryPath: reviewPath,
     alreadyCommitted,
     targetCommits: [reviewedHead],
@@ -46,6 +47,21 @@ test("ревью имплементации допускает субагент�
   assert.doesNotMatch(result, /never spawn or archive agents/u);
   assert.match(result, /Follow the review skill/u);
   assert.doesNotMatch(result, /Modify only|never fix findings|never change task state|commit only the report/u);
+});
+
+test("ревью имплементации добавляет задачи только в текущую фазу или в новую фазу после неё", () => {
+  const result = prompt(false);
+
+  assert.match(result, /"phaseNumber":2/u);
+  assert.match(result, /Add new tasks only to Phase 2 or to a new phase of your own/u);
+  assert.match(result, /Number new Phase 2 tasks as 2\.<next free number>/u);
+  assert.match(result, /Never add tasks to another existing phase/u);
+  assert.match(result, /The orchestrator plans every phase that has no tasks/u);
+  assert.match(
+    result,
+    /insert its heading in plan\.md right after Phase 2 with a number greater than every existing phase number, keep every existing phase number unchanged/u,
+  );
+  assert.doesNotMatch(prompt(true), /Add new tasks only/u);
 });
 
 test("восстановление ревью имплементации не запускает повторный анализ", () => {

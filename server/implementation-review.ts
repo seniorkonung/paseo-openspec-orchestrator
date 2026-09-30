@@ -7,6 +7,8 @@ import {
   OPENSPEC_CLI_RULE,
   buildAgentPrompt,
   completionInstruction,
+  taskScopeRule,
+  taskScopeWorkflowData,
 } from "./agent-prompt.ts";
 import { combineAbortSignals, throwIfSignalAborted } from "./agent-session-control.ts";
 import { runBoundedCommand, type BoundedCommandRunner } from "./bounded-command.ts";
@@ -52,6 +54,13 @@ import { createManagedAgentSession } from "./managed-agent-session.ts";
 import { McpToolError, OrchestratorMcpToolHost, defineMcpTool } from "./orchestrator-mcp-tool-host.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import { runWorkspaceMiseCommand } from "./mise-toolchain.ts";
+import {
+  createTaskScopeCheck,
+  phaseProgressSchema,
+  type PhaseProgress,
+  type PhaseWorkService,
+  type TaskScopeCheck,
+} from "./phase-work.ts";
 import { updateAgentNotificationLabel, type AgentNotificationLabelUpdater } from "./paseo-agent-labels.ts";
 import { ChangeReviewPublicationError } from "./review-publication-model.ts";
 
@@ -101,6 +110,8 @@ export interface ImplementationReviewService {
     readonly profile: CompleteRequiredAgentProfile;
     readonly run: ImplementationRun;
     readonly session: PendingImplementationReviewSession;
+    /** Известная история задач run: review добавляет задачи только в свою фазу или новую фазу после неё. */
+    readonly taskBaseline: PhaseProgress;
     readonly signal: AbortSignal;
     readonly onAgentCreated: (agentId: string) => void;
     readonly onReviewCompleted: (review: CompletedImplementationReview) => Promise<void>;
@@ -115,6 +126,7 @@ export interface ImplementationReviewServiceOptions {
   readonly createAgent: (
     options: Parameters<PaseoWorkspace["agents"]["create"]>[0],
   ) => Promise<PaseoAgent>;
+  readonly phaseWork: Pick<PhaseWorkService, "inspect">;
   readonly command?: BoundedCommandRunner;
   readonly updateNotificationLabel?: AgentNotificationLabelUpdater;
   readonly mcpHost?: { listen(): Promise<OrchestratorMcpToolHost> };
@@ -188,10 +200,22 @@ export function createImplementationReviewService(
         (message) => new ImplementationReviewError(message),
         request.signal,
       );
+      const assertTaskScope = createTaskScopeCheck(
+        options.phaseWork,
+        request.workspaceDirectory,
+        session.changeId,
+        {
+          kind: "implementation",
+          phaseNumber: run.phaseNumber,
+          baseline: phaseProgressSchema.parse(request.taskBaseline),
+        },
+        (message) => new ImplementationReviewError(message),
+      );
       const alreadyCommitted = await inspectExistingReviewCommit(
         command,
         context,
         session,
+        assertTaskScope,
         request.signal,
       );
       const targetCommits = await readCommitRange(
@@ -245,6 +269,7 @@ export function createImplementationReviewService(
                   command,
                   context,
                   session,
+                  assertTaskScope,
                   combined.signal,
                 );
                 await deliverRootCommit(
@@ -350,6 +375,7 @@ export function createImplementationReviewService(
         }
         await agent.send(implementationReviewPrompt({
           session,
+          phaseNumber: run.phaseNumber,
           reviewRepositoryPath: context.reviewRepositoryPath,
           alreadyCommitted,
           targetCommits,
@@ -367,11 +393,14 @@ export function createImplementationReviewService(
 
 export function implementationReviewPrompt(input: {
   readonly session: PendingImplementationReviewSession;
+  /** Фаза implementation run: review добавляет задачи только в неё или в новую фазу после неё. */
+  readonly phaseNumber: number;
   readonly reviewRepositoryPath: string;
   readonly alreadyCommitted: boolean;
   readonly targetCommits: readonly string[];
 }): string {
   const { session } = input;
+  const taskScope = { kind: "implementation", phaseNumber: input.phaseNumber } as const;
   const reviewInstruction = input.alreadyCommitted
     ? "This is a recovery session: the complete report commits already exist. Do not invoke the review skill, edit files, or create or amend a commit."
     : `Invoke \`openspec-review-implementation\` for the exact saved range \`${session.baseCommit}..${session.reviewedHead}\` and change \`${session.changeId}\`. Review every target commit and map every task to at least one review unit.`;
@@ -400,6 +429,7 @@ export function implementationReviewPrompt(input: {
       })),
       reviewPath: input.reviewRepositoryPath,
       alreadyCommitted: input.alreadyCommitted,
+      ...taskScopeWorkflowData(taskScope),
     },
     rules: [
       OPENSPEC_CLI_RULE,
@@ -411,7 +441,7 @@ export function implementationReviewPrompt(input: {
       reviewInstruction,
       delegationInstruction,
       `The report at \`${input.reviewRepositoryPath}\` needs complete coverage and the exact Base commit, Reviewed head, and ordered Target commits from the workflow data.`,
-      input.alreadyCommitted ? "" : "Follow the review skill for any corrections to code or artifacts, verify those corrections in this session, and reflect their outcome in the report. Preserve the workflow's recorded task history: task IDs, numbers, descriptions, and order stay the same, completed tasks stay complete, and new tasks start incomplete. Record remaining findings for the later finding-resolution stages.",
+      input.alreadyCommitted ? "" : `Follow the review skill for any corrections to code or artifacts, verify those corrections in this session, and reflect their outcome in the report. Preserve the workflow's recorded task history: task IDs, numbers, descriptions, and order stay the same, completed tasks stay complete, and new tasks start incomplete. ${taskScopeRule(taskScope)} Record remaining findings for the later finding-resolution stages.`,
       commitInstruction,
       "Do not push or create a pull request. The orchestrator publishes the verified review commit to the root branch.",
     ],
@@ -426,6 +456,7 @@ async function inspectExistingReviewCommit(
   command: BoundedCommandRunner,
   context: ImplementationReviewContext,
   session: PendingImplementationReviewSession,
+  assertTaskScope: TaskScopeCheck,
   signal: AbortSignal,
 ): Promise<boolean> {
   await assertSessionRepositoryState(command, context.gitRoot, session, signal);
@@ -452,7 +483,7 @@ async function inspectExistingReviewCommit(
     command, context.gitRoot, session.reviewedHead, head, signal,
   );
   if (!changedPaths.includes(context.reviewRepositoryPath)) return false;
-  await verifyCompletedReview(command, context, session, signal);
+  await verifyCompletedReview(command, context, session, assertTaskScope, signal);
   return true;
 }
 
@@ -460,6 +491,7 @@ async function verifyCompletedReview(
   command: BoundedCommandRunner,
   context: ImplementationReviewContext,
   session: PendingImplementationReviewSession,
+  assertTaskScope: TaskScopeCheck,
   signal: AbortSignal,
 ): Promise<Omit<CompletedImplementationReview, "pullRequest">> {
   await assertSessionRepositoryState(command, context.gitRoot, session, signal);
@@ -519,6 +551,9 @@ async function verifyCompletedReview(
     throw error;
   }
   await assertReviewedTasksComplete(command, context.gitRoot, session, signal);
+  // Проверка до публикации: задача в фазе, которую планирует оркестратор,
+  // отменила бы её фокусное планирование.
+  await assertTaskScope(signal);
   const remoteHead = await readRemoteTaskBranchCommit(
     command,
     context.gitRoot,

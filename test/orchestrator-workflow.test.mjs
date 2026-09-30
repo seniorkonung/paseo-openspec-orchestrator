@@ -12,7 +12,7 @@ import { OpenSpecOrchestratorEngine } from "../server/openspec-orchestrator-engi
 import { OrchestratorLedger } from "../server/orchestrator-ledger.ts";
 import { createOpenSpecWorkflow } from "../server/workflow/steps/index.ts";
 import { createInitialWorkflowState, workflowCheckpointSchema } from "../server/workflow/types.ts";
-import { phaseTaskFingerprint } from "../server/phase-work.ts";
+import { classifyPhaseWork, phaseTaskFingerprint } from "../server/phase-work.ts";
 
 const execFileAsync = promisify(execFile);
 const changeId = "selected-change";
@@ -36,17 +36,25 @@ const rootPullRequestIdentity = {
   repositoryUrl: repository.url,
   changeBranch,
 };
-const phaseProgress = {
-  phases: [{ number: 1, fingerprint: "1".repeat(64) }],
-  tasks: [{
-    id: "task-a",
-    number: "1.1",
-    description: "1.1 Реализовать поведение",
-    done: false,
-    fingerprint: phaseTaskFingerprint("task-a", "1.1", "1.1 Реализовать поведение"),
-  }],
-  nextImplementationRun: 1,
-};
+function phaseSnapshot(tasks, twoPhases) {
+  return {
+    phases: twoPhases ? [{ number: 1 }, { number: 2 }] : [{ number: 1 }],
+    tasks: tasks.map(({ id, number, done }) => {
+      const description = `${number} Реализовать поведение`;
+      return {
+        id,
+        number,
+        description,
+        done,
+        phaseNumber: Number(number.split(".")[0]),
+        fingerprint: phaseTaskFingerprint(id, number, description),
+      };
+    }),
+    schemaName: "spec-driven",
+    planPath: `/workspace/project/openspec/changes/${changeId}/plan.md`,
+    taskArtifactPaths: [`/workspace/project/openspec/changes/${changeId}/tasks.md`],
+  };
+}
 
 async function temporaryHome(context, prefix = "openspec-workflow-") {
   const directory = await mkdtemp(join(tmpdir(), prefix));
@@ -80,7 +88,11 @@ function workflowHarness({ feedbackOnce = false, reviewFindings = 0, twoPhases =
   let taskPlans = 0;
   const taskPlansByPhase = new Map();
   let feedbackInspections = 0;
-  let phaseInspections = 0;
+  // Задачи OpenSpec: stub исполнения отмечает выбранную задачу выполненной.
+  const phaseTasks = [
+    { id: "task-a", number: "1.1", done: false },
+    ...(twoPhases ? [{ id: "task-b", number: "2.1", done: false }] : []),
+  ];
   let resolvedReviewFindings = 0;
   let rootReady = false;
   let rootMerged = false;
@@ -184,6 +196,10 @@ function workflowHarness({ feedbackOnce = false, reviewFindings = 0, twoPhases =
         };
       },
       async run(request) {
+        assert.deepEqual(request.taskScope, {
+          kind: "initial-planning",
+          plannedPhases: twoPhases ? [1, 2] : [1],
+        });
         request.onAgentCreated("planning-review-agent");
         return {
           changeId,
@@ -208,6 +224,7 @@ function workflowHarness({ feedbackOnce = false, reviewFindings = 0, twoPhases =
         };
       },
       async run(request) {
+        assert.equal(request.taskScope.kind, "initial-planning");
         calls.push("review-finding.resolve");
         request.onAgentCreated("review-finding-agent");
         resolvedReviewFindings += 1;
@@ -303,6 +320,7 @@ function workflowHarness({ feedbackOnce = false, reviewFindings = 0, twoPhases =
           commit: phaseNumber === 1 ? hashes.e : hashes.h,
           remainingTasks: 0,
         };
+        phaseTasks.find(({ id }) => id === request.session.taskId).done = true;
         await request.onTaskCompleted(result);
         return result;
       },
@@ -322,6 +340,10 @@ function workflowHarness({ feedbackOnce = false, reviewFindings = 0, twoPhases =
       },
       async run(request) {
         assert.equal(request.profile.name, "High");
+        assert.deepEqual(
+          request.taskBaseline.tasks.map(({ number }) => number),
+          twoPhases ? ["1.1", "2.1"] : ["1.1"],
+        );
         request.onAgentCreated("implementation-review-agent");
         const result = {
           changeId,
@@ -402,30 +424,9 @@ function workflowHarness({ feedbackOnce = false, reviewFindings = 0, twoPhases =
       },
     },
     phaseWork: {
-      async inspect() {
-        phaseInspections += 1;
-        const secondTask = { id: "task-b", number: "2.1", description: "2.1 Реализовать поведение",
-          done: phaseInspections > 3, fingerprint: phaseTaskFingerprint("task-b", "2.1", "2.1 Реализовать поведение") };
-        const progress = {
-          ...phaseProgress,
-          phases: twoPhases ? [...phaseProgress.phases, { number: 2, fingerprint: "2".repeat(64) }] : phaseProgress.phases,
-          tasks: [
-            { ...phaseProgress.tasks[0], done: phaseInspections > 1 },
-            ...(twoPhases ? [secondTask] : []),
-          ],
-          nextImplementationRun: phaseInspections > 3 ? 3 : 2,
-        };
-        return phaseInspections === 1
-          ? {
-              kind: "implementation-required",
-              phaseNumber: 1,
-              runNumber: 1,
-              progress,
-              snapshot: {},
-            }
-          : twoPhases && phaseInspections <= 3
-            ? { kind: "implementation-required", phaseNumber: 2, runNumber: 2, progress, snapshot: {} }
-          : { kind: "change-complete", progress, snapshot: {} };
+      async inspect(_workspace, inspectedChangeId, previous) {
+        assert.equal(inspectedChangeId, changeId);
+        return classifyPhaseWork(phaseSnapshot(phaseTasks, twoPhases), previous);
       },
     },
     phaseTaskPlanning: {
@@ -496,6 +497,7 @@ test("workflow выполняет задачи и ревью в одном PR, �
   assert.equal(ledger.getWorkflowCheckpoint("workspace").version, 6);
   assert.equal(ledger.getWorkflowCheckpoint("workspace").nextStepId, "await-root-merge");
   assert.equal(ledger.getWorkflowCheckpoint("workspace").state.archivedChange.commit, hashes.h);
+  assert.equal(ledger.getWorkflowCheckpoint("workspace").state.initialPlannedPhases, null);
   assert.ok(harness.calls.includes("implementation.prepare"));
   assert.equal(harness.calls.filter((call) => call === "tasks.plan").length, 3);
   assert.equal(harness.calls.includes("planning.merge"), false);

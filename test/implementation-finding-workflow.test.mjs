@@ -24,14 +24,14 @@ function task(number, done) {
     number,
     description,
     done,
-    phaseNumber: 1,
+    phaseNumber: Number(number.split(".")[0]),
     fingerprint: phaseTaskFingerprint(id, number, description),
   };
 }
 
-function snapshot(tasks) {
+function snapshot(tasks, phases = [1]) {
   return {
-    phases: [{ number: 1 }],
+    phases: phases.map((number) => ({ number })),
     tasks,
     schemaName: "spec-driven",
     planPath: `/repo/openspec/changes/${changeId}/plan.md`,
@@ -77,6 +77,7 @@ async function runFindingTransition(mode) {
     task("1.2", false),
   ]);
   let phaseInspections = 0;
+  const runRequests = [];
   const step = createResolveImplementationReviewFindingsStep({
     workspaceDirectory: "/repo",
     readAgentProfiles: async () => [{
@@ -98,6 +99,7 @@ async function runFindingTransition(mode) {
             };
       },
       async run(request) {
+        runRequests.push(request);
         await request.onFindingResolved();
         return {
           findingId: "F1",
@@ -145,6 +147,13 @@ async function runFindingTransition(mode) {
   assert.equal(result.kind, "continue");
   assert.equal(result.next, "execute-change-tasks");
   assert.equal(phaseInspections, 1);
+  if (mode === "completed") {
+    assert.deepEqual(runRequests[0].taskScope, {
+      kind: "implementation",
+      phaseNumber: 1,
+      baseline: initialProgress,
+    });
+  }
   assert.deepEqual(
     result.state.phaseProgress.tasks.map(({ number, done }) => ({ number, done })),
     [
@@ -167,4 +176,96 @@ test("последняя implementation finding сохраняет новые з
 
 test("Retry после завершённой finding восстанавливает снимок новых задач", async () => {
   await runFindingTransition("recovered");
+});
+
+async function completeFindingWith(currentSnapshot) {
+  const baseline = classifyPhaseWork(snapshot([task("1.1", false)], [1, 2]), null).progress;
+  const checkpoints = [];
+  const step = createResolveImplementationReviewFindingsStep({
+    workspaceDirectory: "/repo",
+    readAgentProfiles: async () => [{
+      id: "profile-high",
+      name: "High",
+      provider: "codex",
+      model: "gpt-6-astra",
+      modeId: "default",
+      thinkingOptionId: "high",
+    }],
+    findingResolution: {
+      async plan() {
+        return { kind: "finding-required", session: { findingId: "F1" } };
+      },
+      async run(request) {
+        await request.onFindingResolved();
+        return {
+          findingId: "F1",
+          commit: hashes.c,
+          remainingFindingIds: [],
+          pullRequest: { number: 41, url: "https://github.com/example/project/pull/41" },
+        };
+      },
+    },
+    implementationRunVerification: {
+      async assertCurrent() {
+        return hashes.c;
+      },
+    },
+    phaseWork: {
+      async inspect(_workspace, _changeId, previous) {
+        return classifyPhaseWork(currentSnapshot, previous);
+      },
+    },
+  });
+  const result = await step.run({
+    signal: new AbortController().signal,
+    state: {
+      ...createInitialWorkflowState(),
+      change: { id: changeId },
+      changeBranch,
+      activeBranch: implementationBranch,
+      phaseProgress: baseline,
+      implementationRun,
+    },
+    updateActionLinks() {},
+    async checkpointState(state) {
+      checkpoints.push(state);
+    },
+    async notify() {
+      return true;
+    },
+  });
+  return { result, checkpoints };
+}
+
+test("implementation finding не наполняет задачами фазу, которую планирует оркестратор", async () => {
+  const { result, checkpoints } = await completeFindingWith(
+    snapshot([task("1.1", true), task("2.1", false)], [1, 2]),
+  );
+
+  assert.equal(result.kind, "halt");
+  assert.match(
+    result.summary,
+    /Во время implementation run Phase 1 .*Задачи 2\.1 нарушают это правило: фазы без задач планирует оркестратор/u,
+  );
+  assert.equal(
+    checkpoints.some(({ phaseProgress }) => phaseProgress.tasks.length > 1),
+    false,
+  );
+});
+
+test("implementation finding выносит remediation в новую фазу сразу после текущей", async () => {
+  const { result } = await completeFindingWith(
+    snapshot([task("1.1", true), task("3.1", false)], [1, 3, 2]),
+  );
+
+  assert.equal(result.kind, "continue");
+  assert.equal(result.next, "execute-change-tasks");
+  assert.deepEqual(result.state.phaseProgress.phases.map(({ number }) => number), [1, 3, 2]);
+  assert.deepEqual(
+    result.state.phaseProgress.tasks.map(({ number, done }) => ({ number, done })),
+    [
+      { number: "1.1", done: true },
+      { number: "3.1", done: false },
+    ],
+  );
 });

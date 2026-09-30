@@ -6,6 +6,9 @@ import {
   OPENSPEC_CLI_RULE,
   STAGE_SCOPE_RULE,
   buildAgentPrompt,
+  taskScopeRule,
+  taskScopeWorkflowData,
+  type TaskScopePromptInput,
 } from "./agent-prompt.ts";
 import {
   type CompletedFindingPullRequest,
@@ -103,6 +106,8 @@ export interface ReviewFindingPromptInput {
   readonly reviewRepositoryPath: string;
   readonly alreadyCommitted: boolean;
   readonly publicationAlreadyCompleted: boolean;
+  /** Фазы, в которые устранение может добавлять задачи. */
+  readonly taskScope: TaskScopePromptInput;
 }
 
 /** Чем устранение finding одного вида ревью отличается от другого. */
@@ -138,7 +143,7 @@ export function buildFindingResolutionPrompt(
 
 1. Explain the finding in Russian to someone who has never seen it: what is wrong, how it affects the product, and what you recommend. Where the resolution depends on a product, contract, architecture, data, security, privacy, or cost choice, give the real options and trade-offs; for an obvious technical correction, explain why product behavior stays the same.
 2. Get one explicit decision from the user about how to resolve this finding before changing any artifact or accepting residual risk. A recommendation is not a decision, and acceptance is never inferred: on acceptance let the skill record it through its own procedure instead of claiming a fix.
-3. Let the skill implement that decision for only this finding and keep later findings intact unless current evidence changes them. If the chosen resolution cannot be implemented or requires a materially different decision, explain the blocker instead of silently changing course. Preserve the existing task list exactly, including completion marks: never reopen a completed task or rewrite or delete an existing task. If more implementation is needed, append new unfinished tasks. The resolution holds only when the agreed outcome is durably owned by the OpenSpec artifacts, any remaining implementation is tracked work, and the finding heading is gone from Findings.
+3. Let the skill implement that decision for only this finding and keep later findings intact unless current evidence changes them. If the chosen resolution cannot be implemented or requires a materially different decision, explain the blocker instead of silently changing course. Preserve the existing task list exactly, including completion marks: never reopen a completed task or rewrite or delete an existing task. If more implementation is needed, append new unfinished tasks. ${taskScopeRule(input.taskScope)} The resolution holds only when the agreed outcome is durably owned by the OpenSpec artifacts, any remaining implementation is tracked work, and the finding heading is gone from Findings.
 4. Validate the resulting artifact changes and report state. Then commit only files inside the change root in at least one commit without asking for another approval. Report the changes and validation to the user while continuing through publication and completion without pausing for permission.`;
   const completion = input.publicationAlreadyCompleted
     ? `Finish by calling the orchestrator MCP tool \`${variant.toolName}\` with \`{"mode":"acknowledge-existing"}\`. If it reports an error, follow its feedback and retry the same tool.`
@@ -155,6 +160,7 @@ export function buildFindingResolutionPrompt(
       reviewPath: input.reviewRepositoryPath,
       alreadyCommitted: input.alreadyCommitted,
       publicationAlreadyCompleted: input.publicationAlreadyCompleted,
+      ...taskScopeWorkflowData(input.taskScope),
     },
     rules: [
       OPENSPEC_CLI_RULE,

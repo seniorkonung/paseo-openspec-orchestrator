@@ -128,12 +128,14 @@ export function createOpenSpecWorkflow(
         workspaceDirectory: dependencies.workspaceDirectory,
         readAgentProfiles: dependencies.readAgentProfiles,
         changeReview: dependencies.changeReview,
+        phaseWork: dependencies.phaseWork,
       }),
       createResolveReviewFindingsStep({
         workspaceDirectory: dependencies.workspaceDirectory,
         readAgentProfiles: dependencies.readAgentProfiles,
         findingResolution: dependencies.changeFindingResolution,
         implementationRunVerification: dependencies.implementationRunVerification,
+        phaseWork: dependencies.phaseWork,
       }),
       createInspectPhaseWorkStep({
         workspaceDirectory: dependencies.workspaceDirectory,

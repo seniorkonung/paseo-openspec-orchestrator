@@ -90,6 +90,41 @@ test("workflow запрещает дочернюю активную ветку �
   }), /одновременно восстанавливать несколько агентских сессий/u);
 });
 
+test("фазы начального планирования необязательны в checkpoint v6 и не хранятся вместе с run", () => {
+  const changeId = "initial-planned-phases";
+  const parsed = workflowCheckpointSchema.parse({
+    version: 6,
+    nextStepId: "review-change",
+    state: { ...workflowBranches(changeId), change: { id: changeId } },
+  });
+  assert.equal(parsed.state.initialPlannedPhases, null);
+
+  const initial = { ...workflowBranches(changeId), change: { id: changeId } };
+  assert.deepEqual(
+    workflowStateSchema.parse({ ...initial, initialPlannedPhases: [3, 1] }).initialPlannedPhases,
+    [3, 1],
+  );
+  assert.throws(
+    () => workflowStateSchema.parse({ ...initial, initialPlannedPhases: [1, 1] }),
+    /не должны повторяться/u,
+  );
+  assert.throws(
+    () => workflowStateSchema.parse({
+      ...initial,
+      initialPlannedPhases: [1],
+      implementationRun: implementationRun(changeId),
+      phaseTarget: { kind: "implementation", phaseNumber: 1, runNumber: 1 },
+      phaseProgress: {
+        phases: [{ number: 1 }],
+        tasks: [{ id: "task-a", number: "1.1", description: "1.1 Работа", done: false,
+          fingerprint: phaseTaskFingerprint("task-a", "1.1", "1.1 Работа") }],
+        nextImplementationRun: 2,
+      },
+    }),
+    /только до первой проверки фаз/u,
+  );
+});
+
 test("workflow связывает implementation run с корневой веткой", () => {
   const changeId = "durable-implementation";
   const run = implementationRun(changeId);

@@ -21,6 +21,9 @@ const MAX_PLAN_BYTES = 256 * 1024;
 const MAX_PHASES = 256;
 const TASK_NUMBER_PREFIX = /^(\d+(?:\.\d+)+(?:[A-Za-z]+)?)(?=\s|$)/u;
 const PHASE_HEADING = /^\s{0,3}##[ \t]+(?:Phase|Фаза)[ \t]+([1-9][0-9]*)\b/iu;
+const MAX_REPORTED_TASKS = 10;
+const UNPLANNED_PHASE_RULE =
+  "фазы без задач планирует оркестратор, а работу для них нужно описать в соответствующей фазе plan.md";
 
 const fingerprintSchema = z.string().regex(/^[0-9a-f]{64}$/u);
 
@@ -97,6 +100,41 @@ export const phaseProgressSchema = z
   });
 
 export type PhaseProgress = z.infer<typeof phaseProgressSchema>;
+
+/** Номера фаз, у которых были задачи на начало агентского этапа. */
+export const plannedPhasesSchema = z
+  .array(z.number().int().positive().max(Number.MAX_SAFE_INTEGER))
+  .max(MAX_PHASES)
+  .refine(
+    (phases) => new Set(phases).size === phases.length,
+    "Номера распланированных фаз не должны повторяться",
+  );
+
+/**
+ * Фазы, которые агентский этап может пополнять новыми задачами.
+ *
+ * Фазу без задач планирует только оркестратор. Задача, добавленная в неё
+ * другим этапом, сделала бы фазу распланированной и отменила бы её фокусное
+ * планирование.
+ */
+export type PhaseTaskScope =
+  | {
+      /** Начальное планирование: только фазы, у которых были задачи до review. */
+      readonly kind: "initial-planning";
+      readonly plannedPhases: readonly number[];
+    }
+  | {
+      /** Фокусное планирование фазы: только целевая фаза. */
+      readonly kind: "phase-planning";
+      readonly phaseNumber: number;
+      readonly baseline: PhaseProgress;
+    }
+  | {
+      /** Implementation run: текущая фаза или новые фазы этапа после неё. */
+      readonly kind: "implementation";
+      readonly phaseNumber: number;
+      readonly baseline: PhaseProgress;
+    };
 
 export interface ParsedPhase {
   readonly number: number;
@@ -329,6 +367,131 @@ export function classifyPhaseWork(
     return { kind: "planning-required", phaseNumber: missingPhase, progress, snapshot };
   }
   return { kind: "change-complete", progress, snapshot };
+}
+
+/** Номера фаз, у которых есть задачи, в порядке plan.md. */
+export function plannedPhaseNumbers(decision: PhaseWorkDecision): readonly number[] {
+  const withTasks = new Set(decision.snapshot.tasks.map(({ phaseNumber }) => phaseNumber));
+  return Object.freeze(
+    decision.snapshot.phases
+      .map(({ number }) => number)
+      .filter((number) => withTasks.has(number)),
+  );
+}
+
+/**
+ * Проверяет, что этап добавил задачи только в разрешённые ему фазы.
+ *
+ * Для фазовых областей decision должен быть получен inspect с тем же
+ * `scope.baseline`: тогда baseline-задачи образуют точный префикс snapshot.
+ */
+export function assertPhaseTaskScope(
+  decision: PhaseWorkDecision,
+  scope: PhaseTaskScope,
+): void {
+  const { snapshot } = decision;
+  switch (scope.kind) {
+    case "initial-planning": {
+      // До первой проверки фаз история задач не фиксируется, поэтому
+      // проверяются все задачи, а не только добавленные.
+      const planned = new Set(scope.plannedPhases);
+      const foreign = snapshot.tasks.filter(({ phaseNumber }) => !planned.has(phaseNumber));
+      if (foreign.length === 0) return;
+      const allowed = scope.plannedPhases.length === 0
+        ? "До начального review задач не было ни в одной фазе, поэтому review и findings не добавляют задачи"
+        : `До первой проверки фаз задачи можно добавлять только в фазы, где они уже были: ${formatPhases(scope.plannedPhases)}`;
+      throw new PhaseWorkError(
+        `${allowed}. Задачи ${formatTaskNumbers(foreign)} нарушают это правило: ${UNPLANNED_PHASE_RULE}`,
+      );
+    }
+    case "phase-planning": {
+      const foreign = addedTasks(snapshot, scope.baseline).filter(
+        ({ phaseNumber }) => phaseNumber !== scope.phaseNumber,
+      );
+      if (foreign.length === 0) return;
+      throw new PhaseWorkError(
+        `При планировании Phase ${scope.phaseNumber} новые задачи допускаются только в ней. Задачи ${formatTaskNumbers(foreign)} относятся к другим фазам: ${UNPLANNED_PHASE_RULE}`,
+      );
+    }
+    case "implementation": {
+      const knownPhases = new Set(scope.baseline.phases.map(({ number }) => number));
+      const order = new Map(snapshot.phases.map(({ number }, index) => [number, index]));
+      const currentIndex = order.get(scope.phaseNumber);
+      const foreign = addedTasks(snapshot, scope.baseline).filter(({ phaseNumber }) => {
+        if (phaseNumber === scope.phaseNumber) return false;
+        const index = order.get(phaseNumber);
+        // Новая фаза этапа отличается от существующей только номером:
+        // номера фаз в progress являются их единственной идентичностью.
+        return knownPhases.has(phaseNumber) ||
+          currentIndex === undefined ||
+          index === undefined ||
+          index < currentIndex;
+      });
+      if (foreign.length === 0) return;
+      throw new PhaseWorkError(
+        `Во время implementation run Phase ${scope.phaseNumber} новые задачи допускаются только в Phase ${scope.phaseNumber} или в новой фазе, вставленной в plan.md после неё с номером больше всех прежних. Задачи ${formatTaskNumbers(foreign)} нарушают это правило: ${UNPLANNED_PHASE_RULE}; номера существующих фаз менять нельзя`,
+      );
+    }
+  }
+}
+
+/** Проверяет фазы и задачи change и ограничивает их изменения областью этапа. */
+export async function inspectWithinTaskScope(
+  phaseWork: Pick<PhaseWorkService, "inspect">,
+  workspaceDirectory: string,
+  changeId: string,
+  scope: PhaseTaskScope,
+  signal?: AbortSignal,
+): Promise<PhaseWorkDecision> {
+  const decision = await phaseWork.inspect(
+    workspaceDirectory,
+    changeId,
+    scope.kind === "initial-planning" ? null : scope.baseline,
+    signal,
+  );
+  assertPhaseTaskScope(decision, scope);
+  return decision;
+}
+
+/** Проверка области задач одного агентского этапа. */
+export type TaskScopeCheck = (signal: AbortSignal) => Promise<void>;
+
+/**
+ * Связывает проверку области задач с этапом. Нарушение превращается в ошибку
+ * этапа, чтобы MCP-инструмент показал агенту её текст.
+ */
+export function createTaskScopeCheck(
+  phaseWork: Pick<PhaseWorkService, "inspect">,
+  workspaceDirectory: string,
+  changeId: string,
+  scope: PhaseTaskScope,
+  toStageError: (message: string) => Error,
+): TaskScopeCheck {
+  return async (signal) => {
+    try {
+      await inspectWithinTaskScope(phaseWork, workspaceDirectory, changeId, scope, signal);
+    } catch (error) {
+      if (error instanceof PhaseWorkError) throw toStageError(error.message);
+      throw error;
+    }
+  };
+}
+
+function addedTasks(
+  snapshot: PhaseWorkSnapshot,
+  baseline: PhaseProgress,
+): readonly PhaseTaskSnapshot[] {
+  return snapshot.tasks.slice(baseline.tasks.length);
+}
+
+function formatPhases(phases: readonly number[]): string {
+  return phases.map((number) => `Phase ${number}`).join(", ");
+}
+
+function formatTaskNumbers(tasks: readonly PhaseTaskSnapshot[]): string {
+  const shown = tasks.slice(0, MAX_REPORTED_TASKS).map(({ number }) => number).join(", ");
+  const hidden = tasks.length - MAX_REPORTED_TASKS;
+  return hidden > 0 ? `${shown} и ещё ${hidden}` : shown;
 }
 
 function parsePhaseTasks(

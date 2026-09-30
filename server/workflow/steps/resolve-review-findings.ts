@@ -11,7 +11,15 @@ import {
   ImplementationRunVerificationError,
   type ImplementationRunVerifier,
 } from "../../implementation-run-verification.ts";
+import {
+  PhaseWorkError,
+  inspectWithinTaskScope,
+  type PhaseTaskScope,
+  type PhaseWorkService,
+} from "../../phase-work.ts";
+import { ensureInitialPlannedPhases, workflowTaskScope } from "../task-scope.ts";
 import type {
+  WorkflowState,
   WorkflowStepContext,
   WorkflowStepDefinition,
   WorkflowStepResult,
@@ -22,6 +30,7 @@ export interface ResolveReviewFindingsDependencies {
   readonly readAgentProfiles: AgentProfileReader;
   readonly findingResolution: Pick<ChangeFindingResolutionService, "plan" | "run">;
   readonly implementationRunVerification: Pick<ImplementationRunVerifier, "assertCurrent">;
+  readonly phaseWork: Pick<PhaseWorkService, "inspect">;
 }
 
 async function resolveReviewFindingsStep(
@@ -48,13 +57,30 @@ async function resolveReviewFindingsStep(
     };
   }
 
-  let session = context.state.pendingFindingResolutionSession;
+  let state: WorkflowState;
+  let taskScope: PhaseTaskScope;
+  try {
+    // Обычно фазы начального планирования уже сохранил review-change. Если
+    // checkpoint создан до их появления, baseline снимается здесь и уже
+    // включает правки завершённого review.
+    state = await ensureInitialPlannedPhases(
+      dependencies.phaseWork,
+      dependencies.workspaceDirectory,
+      change.id,
+      context,
+    );
+    taskScope = workflowTaskScope(state);
+  } catch (error) {
+    return findingFailure(context, error, "Не удалось определить фазы с задачами для findings");
+  }
+
+  let session = state.pendingFindingResolutionSession;
   if (!session) {
     try {
-      if (context.state.implementationRun) {
+      if (state.implementationRun) {
         await dependencies.implementationRunVerification.assertCurrent(
           dependencies.workspaceDirectory,
-          context.state.implementationRun,
+          state.implementationRun,
           context.signal,
         );
       }
@@ -65,18 +91,17 @@ async function resolveReviewFindingsStep(
         context.signal,
       );
       if (plan.kind === "no-findings") {
-        return {
-          kind: "continue",
-          next: context.state.implementationRun || context.state.planningRun
-            ? "resolve-implementation-review-findings"
-            : "inspect-phase-work",
-          state: { pendingFindingResolutionSession: null },
-          summary: `В review нет нерешённых findings: ${plan.reviewPath}`,
-        };
+        return await continueAfterReviewFindings(
+          dependencies,
+          context,
+          change.id,
+          taskScope,
+          `В review нет нерешённых findings: ${plan.reviewPath}`,
+        );
       }
       session = plan.session;
       await context.checkpointState({
-        ...context.state,
+        ...state,
         pendingFindingResolutionSession: session,
       });
     } catch (error) {
@@ -117,6 +142,7 @@ async function resolveReviewFindingsStep(
       branch: activeBranch,
       profile: resolution.profile,
       session,
+      taskScope,
       signal: context.signal,
       onAgentCreated: (agentId) => {
         context.updateActionLinks([
@@ -128,29 +154,28 @@ async function resolveReviewFindingsStep(
         ]);
       },
       onFindingResolved: async () => {
-        if (context.state.implementationRun) {
+        if (state.implementationRun) {
           await dependencies.implementationRunVerification.assertCurrent(
             dependencies.workspaceDirectory,
-            context.state.implementationRun,
+            state.implementationRun,
             context.signal,
           );
         }
         await context.checkpointState({
-          ...context.state,
+          ...state,
           pendingFindingResolutionSession: null,
         });
       },
     });
 
     if (completed.remainingFindingIds.length === 0) {
-      return {
-        kind: "continue",
-        next: context.state.implementationRun || context.state.planningRun
-          ? "resolve-implementation-review-findings"
-          : "inspect-phase-work",
-        state: { pendingFindingResolutionSession: null },
-        summary: `Обработана последняя finding review ${completed.findingId}; обновлён PR #${completed.pullRequest.number}`,
-      };
+      return await continueAfterReviewFindings(
+        dependencies,
+        context,
+        change.id,
+        taskScope,
+        `Обработана последняя finding review ${completed.findingId}; обновлён PR #${completed.pullRequest.number}`,
+      );
     }
     return {
       kind: "continue",
@@ -161,6 +186,41 @@ async function resolveReviewFindingsStep(
   } catch (error) {
     return findingFailure(context, error, "Не удалось завершить устранение finding");
   }
+}
+
+/**
+ * Внутри run следующий шаг устраняет implementation findings. Начальное
+ * планирование переходит к первой проверке фаз только после финальной проверки,
+ * что review и findings не наполнили фазы, которые планирует оркестратор.
+ */
+async function continueAfterReviewFindings(
+  dependencies: ResolveReviewFindingsDependencies,
+  context: WorkflowStepContext,
+  changeId: string,
+  taskScope: PhaseTaskScope,
+  summary: string,
+): Promise<WorkflowStepResult> {
+  if (taskScope.kind !== "initial-planning") {
+    return {
+      kind: "continue",
+      next: "resolve-implementation-review-findings",
+      state: { pendingFindingResolutionSession: null },
+      summary,
+    };
+  }
+  await inspectWithinTaskScope(
+    dependencies.phaseWork,
+    dependencies.workspaceDirectory,
+    changeId,
+    taskScope,
+    context.signal,
+  );
+  return {
+    kind: "continue",
+    next: "inspect-phase-work",
+    state: { pendingFindingResolutionSession: null, initialPlannedPhases: null },
+    summary,
+  };
 }
 
 function findingFailure(
@@ -174,7 +234,8 @@ function findingFailure(
   });
   const summary =
     error instanceof ChangeFindingResolutionError ||
-      error instanceof ImplementationRunVerificationError
+      error instanceof ImplementationRunVerificationError ||
+      error instanceof PhaseWorkError
       ? error.message
       : fallback;
   return {

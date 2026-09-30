@@ -13,6 +13,7 @@ import {
 import { inspectTaskExecutionRecovery, verifyCompletedTask } from "../server/change-task-publication.ts";
 import { collectImplementationTask } from "../server/implementation-run-model.ts";
 import { createImplementationReviewService, implementationReviewPrompt } from "../server/implementation-review.ts";
+import { classifyPhaseWork, phaseTaskFingerprint } from "../server/phase-work.ts";
 
 const execFileAsync = promisify(execFile);
 const changeId = "selected-change";
@@ -43,6 +44,29 @@ function highProfile() {
     modeId: "default",
     thinkingOptionId: "high",
   };
+}
+
+function phaseTask(number, done = false) {
+  const id = `task-${number}`;
+  const description = `${number} Задача ${number}`;
+  return {
+    id,
+    number,
+    description,
+    done,
+    phaseNumber: Number(number.split(".")[0]),
+    fingerprint: phaseTaskFingerprint(id, number, description),
+  };
+}
+
+function phaseDecision(tasks, previous) {
+  return classifyPhaseWork({
+    phases: [{ number: 1 }, { number: 2 }],
+    tasks,
+    schemaName: "spec-driven",
+    planPath: `/repo/openspec/changes/${changeId}/plan.md`,
+    taskArtifactPaths: [`/repo/openspec/changes/${changeId}/tasks.md`],
+  }, previous);
 }
 
 async function fixture(context, { existingReview = false } = {}) {
@@ -138,7 +162,16 @@ async function fixture(context, { existingReview = false } = {}) {
     publication: { kind: "unreviewed" },
     batch: { kind: "empty", baseCommit: baseline },
   };
-  return { workspace, remote, tasksPath, baseline, command, run, calls };
+  // Снимок OpenSpec для области задач: Phase 1 выполняется, Phase 2 ждёт планирования.
+  const phaseWork = {
+    tasks: [phaseTask("1.1"), phaseTask("1.2")],
+    async inspect(_workspace, inspectedChangeId, previous) {
+      assert.equal(inspectedChangeId, changeId);
+      return phaseDecision(phaseWork.tasks, previous);
+    },
+  };
+  const taskBaseline = phaseDecision(phaseWork.tasks, null).progress;
+  return { workspace, remote, tasksPath, baseline, command, run, calls, phaseWork, taskBaseline };
 }
 
 async function commitTask(value, { markSecond = false } = {}) {
@@ -168,7 +201,7 @@ async function reviewFixture(context, options) {
   const run = collectImplementationTask(value.run, {
     taskId: completedTask.taskId, taskNumber: completedTask.taskNumber, commit: completedTask.commit,
   });
-  const review = createImplementationReviewService({ command: value.command, async createAgent() {} });
+  const review = createImplementationReviewService({ command: value.command, phaseWork: value.phaseWork, async createAgent() {} });
   const session = await review.plan(value.workspace, run);
   value.calls.length = 0;
   return {
@@ -181,6 +214,7 @@ async function reviewFixture(context, options) {
 async function runReview(value, action) {
   const review = createImplementationReviewService({
     command: value.command,
+    phaseWork: value.phaseWork,
     async createAgent(options) {
       const [{ url }] = Object.values(options.config.mcpServers);
       return {
@@ -198,6 +232,7 @@ async function runReview(value, action) {
   });
   return review.run({
     workspaceDirectory: value.workspace, profile: highProfile(), run: value.run, session: value.session,
+    taskBaseline: value.taskBaseline,
     signal: new AbortController().signal, onAgentCreated() {}, async onReviewCompleted() {},
   });
 }
@@ -383,14 +418,17 @@ test("implementation review получает все коммиты задачи 
     taskNumber: completed.taskNumber,
     commit: completed.commit,
   });
-  const review = createImplementationReviewService({ command: value.command, async createAgent() {} });
+  const review = createImplementationReviewService({ command: value.command, phaseWork: value.phaseWork, async createAgent() {} });
   const session = await review.plan(value.workspace, run);
   const prompt = implementationReviewPrompt({
     session,
+    phaseNumber: 1,
     reviewRepositoryPath: `openspec/changes/${changeId}/implementation-review.md`,
     alreadyCommitted: false,
     targetCommits: [first, completed.commit],
   });
+  assert.match(prompt, /Add new tasks only to Phase 1 or to a new phase of your own/u);
+  assert.match(prompt, /"phaseNumber":1/u);
   assert.deepEqual(session.tasks.map(({ commit }) => commit), [completed.commit]);
   assert.ok(prompt.includes(`"targetCommits":["${first}","${completed.commit}"]`));
   assert.ok(prompt.includes(`"fromExclusive":"${value.baseline}"`));
@@ -421,6 +459,7 @@ test("implementation review публикует правки кода и арте
   let toolResult;
   const review = createImplementationReviewService({
     command: value.command,
+    phaseWork: value.phaseWork,
     async createAgent(options) {
       const [{ url }] = Object.values(options.config.mcpServers);
       return {
@@ -455,6 +494,7 @@ test("implementation review публикует правки кода и арте
     profile: highProfile(),
     run,
     session,
+    taskBaseline: value.taskBaseline,
     signal: new AbortController().signal,
     onAgentCreated() {},
     async onReviewCompleted() {},
@@ -591,6 +631,27 @@ test("implementation review отклоняет задачи другого chang
       });
     });
   }
+});
+
+test("implementation review не публикует задачу в фазе, которую планирует оркестратор", async (context) => {
+  const value = await reviewFixture(context);
+  await runReview(value, async (client) => {
+    await writeFile(value.reportPath, "# Review\n\nНужна remediation.\n");
+    await value.git("add", ".");
+    await value.git("commit", "-m", "docs(review): add remediation task");
+    value.phaseWork.tasks = [phaseTask("1.1"), phaseTask("1.2"), phaseTask("2.1")];
+    const rejected = await client.callTool({ name: "complete_implementation_review", arguments: {} });
+    assert.equal(rejected.isError, true);
+    assert.match(
+      rejected.content[0].text,
+      /Во время implementation run Phase 1 новые задачи допускаются только в Phase 1 или в новой фазе.*Задачи 2\.1 нарушают это правило/u,
+    );
+    assert.equal(value.calls.some((call) => call.startsWith("git push ")), false);
+    value.phaseWork.tasks = [phaseTask("1.1"), phaseTask("1.2"), phaseTask("1.3")];
+    const completed = await client.callTool({ name: "complete_implementation_review", arguments: {} });
+    assert.equal(completed.isError, undefined);
+  });
+  assert.equal(value.calls.filter((call) => call.startsWith("git push ")).length, 1);
 });
 
 test("implementation review не публикует правки без обновлённого и безопасного отчёта в Git", async (context) => {

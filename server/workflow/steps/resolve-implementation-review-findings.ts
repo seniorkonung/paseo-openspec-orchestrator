@@ -22,8 +22,11 @@ import {
 } from "../../implementation-run-verification.ts";
 import {
   PhaseWorkError,
+  inspectWithinTaskScope,
+  type PhaseTaskScope,
   type PhaseWorkService,
 } from "../../phase-work.ts";
+import { workflowTaskScope } from "../task-scope.ts";
 
 export interface ResolveImplementationReviewFindingsDependencies {
   readonly workspaceDirectory: string;
@@ -62,6 +65,13 @@ async function resolveImplementationReviewFindingsStep(
     };
   }
 
+  let taskScope: PhaseTaskScope;
+  try {
+    taskScope = workflowTaskScope(context.state);
+  } catch (error) {
+    return findingFailure(context, error, "Не удалось определить фазу для новых задач");
+  }
+
   let session = context.state.pendingImplementationFindingResolutionSession;
   if (!session) {
     try {
@@ -80,7 +90,7 @@ async function resolveImplementationReviewFindingsStep(
       );
       if (plan.kind === "no-findings") {
         if (implementationRun) {
-          return continueImplementationAfterFindings(
+          return await continueImplementationAfterFindings(
             dependencies,
             context,
             implementationRun,
@@ -143,6 +153,7 @@ async function resolveImplementationReviewFindingsStep(
       branch: activeBranch,
       profile: resolution.profile,
       session,
+      taskScope,
       signal: context.signal,
       onAgentCreated: (agentId) => {
         context.updateActionLinks([
@@ -170,7 +181,7 @@ async function resolveImplementationReviewFindingsStep(
 
     if (completed.remainingFindingIds.length === 0) {
       if (implementationRun) {
-        return continueImplementationAfterFindings(
+        return await continueImplementationAfterFindings(
           dependencies,
           context,
           implementationRun,
@@ -236,10 +247,17 @@ async function continueImplementationAfterFindings(
   }
   // Finding может добавить remediation-задачи. Сохраняем их, пока они ещё
   // незавершены, чтобы post-merge защита отличала их от внешней подмены задач.
-  const decision = await dependencies.phaseWork.inspect(
+  // Перед сохранением ещё раз проверяем, что review и findings не наполнили
+  // фазы, которые планирует оркестратор.
+  const decision = await inspectWithinTaskScope(
+    dependencies.phaseWork,
     dependencies.workspaceDirectory,
     implementationRun.changeId,
-    previous,
+    {
+      kind: "implementation",
+      phaseNumber: implementationRun.phaseNumber,
+      baseline: previous,
+    },
     context.signal,
   );
   return {

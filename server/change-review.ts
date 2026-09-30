@@ -8,6 +8,9 @@ import {
   STAGE_SCOPE_RULE,
   buildAgentPrompt,
   completionInstruction,
+  taskScopeRule,
+  taskScopeWorkflowData,
+  type TaskScopePromptInput,
 } from "./agent-prompt.ts";
 import {
   combineAbortSignals,
@@ -42,6 +45,11 @@ import {
 } from "./orchestrator-mcp-tool-host.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import {
+  createTaskScopeCheck,
+  type PhaseTaskScope,
+  type PhaseWorkService,
+} from "./phase-work.ts";
+import {
   updateAgentNotificationLabel,
   type AgentNotificationLabelUpdater,
 } from "./paseo-agent-labels.ts";
@@ -70,6 +78,8 @@ export interface ChangeReviewRequest {
   readonly workspaceDirectory: string;
   readonly profile: CompleteRequiredAgentProfile;
   readonly session: PendingReviewSession;
+  /** Фазы, в которые review может добавлять задачи. */
+  readonly taskScope: PhaseTaskScope;
   readonly signal: AbortSignal;
   readonly onAgentCreated: (agentId: string) => void;
 }
@@ -92,6 +102,7 @@ interface McpHostFactory {
 
 export interface ChangeReviewServiceOptions {
   readonly createAgent: ReviewPaseoAgentCreator;
+  readonly phaseWork: Pick<PhaseWorkService, "inspect">;
   readonly command?: BoundedCommandRunner;
   readonly resolveRealPath?: ChangeReviewVerificationOptions["resolveRealPath"];
   readonly inspectPath?: ChangeReviewVerificationOptions["inspectPath"];
@@ -146,6 +157,21 @@ export function createChangeReviewService(
       const session = pendingReviewSessionSchema.parse(request.session);
       const changeId = session.changeId;
       const publicationTarget = reviewPublicationTarget(session);
+      const { taskScope } = request;
+      if (
+        session.phaseNumber === null
+          ? taskScope.kind !== "initial-planning"
+          : taskScope.kind !== "phase-planning" || taskScope.phaseNumber !== session.phaseNumber
+      ) {
+        throw new ChangeReviewError("Область задач review не соответствует сохранённой сессии");
+      }
+      const assertTaskScope = createTaskScopeCheck(
+        options.phaseWork,
+        request.workspaceDirectory,
+        changeId,
+        taskScope,
+        (message) => new ChangeReviewError(message),
+      );
 
       const context = await verification.readContext(
         request.workspaceDirectory,
@@ -163,6 +189,7 @@ export function createChangeReviewService(
       const reviewAlreadyCommitted = await verification.isLocalCommitReady(
         context,
         session,
+        assertTaskScope,
         request.signal,
       );
       const host = await mcpHost.listen();
@@ -208,6 +235,7 @@ export function createChangeReviewService(
                   verified = await verification.verifyCompleted(
                     context,
                     session,
+                    assertTaskScope,
                     signal,
                   );
                 } catch (error) {
@@ -275,6 +303,7 @@ export function createChangeReviewService(
                     : `${session.repositoryHost}/${session.repositoryNameWithOwner}`,
                 reviewRepositoryPath: context.reviewRepositoryPath,
                 alreadyCommitted: reviewAlreadyCommitted,
+                taskScope,
               }),
               labels: { ntfy: "true" },
             }),
@@ -304,6 +333,7 @@ export function changeReviewPrompt(input: {
   readonly repository: string;
   readonly reviewRepositoryPath: string;
   readonly alreadyCommitted: boolean;
+  readonly taskScope: TaskScopePromptInput;
 }): string {
   const phaseNumber = input.phaseNumber;
   const reviewInstruction = input.alreadyCommitted
@@ -325,6 +355,7 @@ export function changeReviewPrompt(input: {
       remote: "origin",
       reviewPath: input.reviewRepositoryPath,
       alreadyCommitted: input.alreadyCommitted,
+      ...taskScopeWorkflowData(input.taskScope),
     },
     rules: [
       OPENSPEC_CLI_RULE,
@@ -335,7 +366,7 @@ export function changeReviewPrompt(input: {
     body: [
       "The root change branch is already published. Verify that it still descends from the saved baseline.",
       reviewInstruction,
-      input.alreadyCommitted ? "" : "Follow the review skill for any corrections to code or artifacts. Preserve the workflow's recorded task history: task IDs, numbers, descriptions, and order stay the same, completed tasks stay complete, and new tasks start incomplete. Remaining findings do not block this stage: record them for the later finding-resolution stages. If the review cannot be finished or needs user input, say what is missing and keep the conversation in this session instead of completing the stage.",
+      input.alreadyCommitted ? "" : `Follow the review skill for any corrections to code or artifacts. Preserve the workflow's recorded task history: task IDs, numbers, descriptions, and order stay the same, completed tasks stay complete, and new tasks start incomplete. ${taskScopeRule(input.taskScope)} Remaining findings do not block this stage: record them for the later finding-resolution stages. If the review cannot be finished or needs user input, say what is missing and keep the conversation in this session instead of completing the stage.`,
       input.alreadyCommitted ? "" : `Keep \`review.md\` at \`${input.reviewRepositoryPath}\`, materially update an existing report, and commit the report and all stage corrections in at least one new commit.`,
       "Do not push or create a pull request. The orchestrator verifies and publishes the review commits to the existing Draft root pull request.",
     ],
