@@ -389,3 +389,67 @@ test("engine уведомляет о необходимости retry при hal
   engine.dispose();
   await ledger.close();
 });
+
+test("engine уведомляет о паузе только после завершения текущего шага", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const ledger = new OrchestratorLedger({ paseoHome: directory });
+  const workspaceId = "workspace-pause-notification";
+  await ledger.open(workspaceId);
+  const events = [];
+  let startLongStep;
+  let finishLongStep;
+  const longStepStarted = new Promise((resolve) => {
+    startLongStep = resolve;
+  });
+  const longStepFinished = new Promise((resolve) => {
+    finishLongStep = resolve;
+  });
+  const engine = new OpenSpecOrchestratorEngine(ledger, {
+    notifications: {
+      async notify(notifiedWorkspaceId, notification) {
+        events.push({ workspaceId: notifiedWorkspaceId, ...notification });
+        return true;
+      },
+    },
+    steps: [
+      {
+        id: "long",
+        label: "Длинный шаг",
+        async run() {
+          startLongStep();
+          await longStepFinished;
+          return { kind: "continue", next: "next" };
+        },
+      },
+      {
+        id: "next",
+        label: "Следующий шаг",
+        async run() {
+          return { kind: "complete" };
+        },
+      },
+    ],
+  });
+  engine.initialize(workspaceId, engineContext());
+  engine.command(workspaceId, "start");
+  await longStepStarted;
+
+  engine.command(workspaceId, "pause");
+  assert.equal(ledger.get(workspaceId).lifecycle.status, "pausing");
+  assert.deepEqual(events, []);
+
+  finishLongStep();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  assert.equal(ledger.get(workspaceId).lifecycle.status, "paused");
+  assert.deepEqual(events, [
+    {
+      workspaceId,
+      kind: "paused",
+      message: "Workflow остановлен на безопасной точке; нажмите «Продолжить»",
+    },
+  ]);
+
+  engine.dispose();
+  await ledger.close();
+});

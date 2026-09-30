@@ -162,7 +162,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       case "pause":
         runtime.pauseRequested = true;
         reporter.setLifecycle({ status: "pausing", availableCommand: null });
-        if (!runtime.active) this.#reachPause(reporter, runtime);
+        if (!runtime.active) this.#reachPause(workspaceId, reporter, runtime);
         break;
       case "resume":
         runtime.pauseRequested = false;
@@ -293,7 +293,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
   ): Promise<void> {
     while (!this.#disposed && runtime.generation === generation) {
       if (runtime.pauseRequested) {
-        this.#reachPause(reporter, runtime);
+        this.#reachPause(workspaceId, reporter, runtime);
         return;
       }
 
@@ -402,7 +402,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
             handle.succeed();
             runtime.currentHandle = null;
             if (runtime.pauseRequested) {
-              this.#reachPause(reporter, runtime);
+              this.#reachPause(workspaceId, reporter, runtime);
               return;
             }
             break;
@@ -467,10 +467,24 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
     this.#notify(workspaceId, { kind: "retry", message }, runtime);
   }
 
-  #reachPause(reporter: OrchestratorReporter, runtime: WorkspaceRuntime): void {
+  #reachPause(
+    workspaceId: string,
+    reporter: OrchestratorReporter,
+    runtime: WorkspaceRuntime,
+  ): void {
     runtime.active = false;
     runtime.abortController = null;
     reporter.setLifecycle({ status: "paused", availableCommand: "resume" });
+    // Пауза достигается только после завершения текущего шага и сохранения
+    // checkpoint, поэтому уведомление означает, что вмешиваться безопасно.
+    this.#notify(
+      workspaceId,
+      {
+        kind: "paused",
+        message: "Workflow остановлен на безопасной точке; нажмите «Продолжить»",
+      },
+      runtime,
+    );
   }
 
   #clear(workspaceId: string, runtime: WorkspaceRuntime): void {

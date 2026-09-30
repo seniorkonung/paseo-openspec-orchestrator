@@ -8,6 +8,7 @@ const boundedNotificationText = (maximum: number) =>
 export const ORCHESTRATOR_NOTIFICATION_KINDS = [
   "retry",
   "completed",
+  "paused",
   "manual",
   "progress",
 ] as const;
@@ -134,6 +135,7 @@ export const orchestratorNotificationKindLabels: Record<
 > = {
   retry: "Требуется повтор",
   completed: "Workflow завершён",
+  paused: "Workflow приостановлен",
   manual: "Уведомление оркестратора",
   progress: "Workflow в работе",
 };
