@@ -12,6 +12,7 @@ import {
   readTaskHeadCommit as readHeadCommit,
   resolveTaskRepository as resolveRepository,
 } from "./change-task-gateway.ts";
+import { isCommitAncestor } from "./git-ancestry.ts";
 import { deliverRootCommit } from "./root-branch-delivery.ts";
 import {
   ChangeTaskExecutionError,
@@ -32,9 +33,22 @@ import { runWorkspaceMiseCommand } from "./mise-toolchain.ts";
 
 const TASK_NUMBER_PREFIX = /^(\d+(?:\.\d+)+(?:[A-Za-z]+)?)(?=\s|$)/u;
 
-export interface TaskExecutionRecoveryState {
-  readonly alreadyCommitted: boolean;
-}
+/**
+ * Состояние сохранённой task-сессии относительно репозитория.
+ *
+ * - `fresh` — работа над задачей ещё не начата;
+ * - `committed` — задача реализована и закоммичена, осталось подтвердить её;
+ * - `stale` — репозиторий противоречит сессии: её нельзя ни начать, ни
+ *   подтвердить, и задачу нужно выбрать заново.
+ */
+export type TaskSessionRecovery =
+  | { readonly kind: "fresh" }
+  | { readonly kind: "committed" }
+  | { readonly kind: "stale"; readonly reason: string };
+
+type LocalTaskCommit =
+  | { readonly kind: "verified"; readonly head: string }
+  | { readonly kind: "rejected"; readonly reason: string };
 
 export async function planChangeTaskExecution(
   command: BoundedCommandRunner,
@@ -66,15 +80,23 @@ export async function planChangeTaskExecution(
       `Текущей должна быть корневая ветка «${run.implementationBranch}»`,
     );
   }
-  const expectedHead = run.batch.kind === "empty"
-    ? run.batch.baseCommit
-    : run.batch.kind === "collecting"
+  if (run.batch.kind === "empty") {
+    // Baseline пустого пакета — нижняя граница будущего review: коммиты,
+    // появившиеся после него вне task-сессий, войдут в диапазон пакета.
+    if (!(await isCommitAncestor(command, gitRoot, run.batch.baseCommit, baselineCommit, signal))) {
+      throw new ChangeTaskExecutionError(
+        "Git HEAD не продолжает baseline пакета implementation-run",
+      );
+    }
+  } else {
+    const expectedHead = run.batch.kind === "collecting"
       ? run.batch.headCommit
       : run.batch.reviewCommit;
-  if (baselineCommit !== expectedHead) {
-    throw new ChangeTaskExecutionError(
-      "Git HEAD не совпадает с сохранённым implementation-run",
-    );
+    if (baselineCommit !== expectedHead) {
+      throw new ChangeTaskExecutionError(
+        "Git HEAD не совпадает с сохранённым implementation-run",
+      );
+    }
   }
   await assertImplementationRunState(command, gitRoot, run, baselineCommit, signal);
   const numberedTasks = numberTasks(instructions.tasks);
@@ -124,40 +146,51 @@ export async function planChangeTaskExecution(
   };
 }
 
+/**
+ * Сверяет сохранённую task-сессию с репозиторием. Противоречие репозитория и
+ * сессии возвращается как `stale`; исключение означает, что окружение не
+ * готово либо факты не удалось прочитать.
+ */
 export async function inspectTaskExecutionRecovery(
   command: BoundedCommandRunner,
   workspaceDirectory: string,
   gitRoot: string,
   sessionInput: PendingTaskExecutionSession,
   signal: AbortSignal,
-): Promise<TaskExecutionRecoveryState> {
+): Promise<TaskSessionRecovery> {
   const session = pendingTaskExecutionSessionSchema.parse(sessionInput);
   await assertCleanWorktree(command, gitRoot, signal);
-  await assertTaskSessionState(command, gitRoot, session, signal);
+  const outdated = await inspectTaskSessionState(command, gitRoot, session, signal);
+  if (outdated !== null) return { kind: "stale", reason: outdated };
   const instructions = await readApplyInstructions(
     command,
     workspaceDirectory,
     session.changeId,
     signal,
   );
-  assertSessionSchema(instructions, session);
+  const mismatch = describeSessionTaskMismatch(instructions, session);
+  if (mismatch !== null) return { kind: "stale", reason: mismatch };
   const digest = taskListDigest(instructions.tasks);
   if (digest === session.tasksAfterDigest) {
-    await verifyLocalTaskCommit(command, gitRoot, session, instructions, signal);
-    return { alreadyCommitted: true };
+    const local = await inspectLocalTaskCommit(command, gitRoot, session, instructions, signal);
+    return local.kind === "verified"
+      ? { kind: "committed" }
+      : { kind: "stale", reason: local.reason };
   }
   if (digest !== session.tasksBeforeDigest) {
-    throw new ChangeTaskExecutionError(
-      "Список OpenSpec-задач изменился после сохранения checkpoint",
-    );
+    return {
+      kind: "stale",
+      reason: "Список OpenSpec-задач изменился после сохранения checkpoint",
+    };
   }
   const head = await readHeadCommit(command, gitRoot, signal);
   if (head !== session.baselineCommit) {
-    throw new ChangeTaskExecutionError(
-      "Implementation-ветка содержит commit, но выбранная задача не отмечена выполненной",
-    );
+    return {
+      kind: "stale",
+      reason: "Implementation-ветка содержит commit, но выбранная задача не отмечена выполненной",
+    };
   }
-  return { alreadyCommitted: false };
+  return { kind: "fresh" };
 }
 
 export async function verifyCompletedTask(
@@ -169,7 +202,8 @@ export async function verifyCompletedTask(
 ): Promise<CompletedChangeTask> {
   const session = pendingTaskExecutionSessionSchema.parse(sessionInput);
   await assertCleanWorktree(command, gitRoot, signal);
-  await assertTaskSessionState(command, gitRoot, session, signal);
+  const outdated = await inspectTaskSessionState(command, gitRoot, session, signal);
+  if (outdated !== null) throw new ChangeTaskExecutionError(outdated);
   const instructions = await readApplyInstructions(
     command,
     workspaceDirectory,
@@ -329,9 +363,27 @@ async function verifyLocalTaskCommit(
   instructions: ApplyInstructions,
   signal: AbortSignal,
 ): Promise<string> {
-  assertSessionSchema(instructions, session);
+  const local = await inspectLocalTaskCommit(command, gitRoot, session, instructions, signal);
+  if (local.kind === "rejected") throw new ChangeTaskExecutionError(local.reason);
+  return local.head;
+}
+
+/**
+ * Проверяет контракт одной задачи: выбранная задача отмечена выполненной, это
+ * единственное изменение task-state, а после baseline есть коммит с правками.
+ */
+async function inspectLocalTaskCommit(
+  command: BoundedCommandRunner,
+  gitRoot: string,
+  session: PendingTaskExecutionSession,
+  instructions: ApplyInstructions,
+  signal: AbortSignal,
+): Promise<LocalTaskCommit> {
+  const rejected = (reason: string): LocalTaskCommit => ({ kind: "rejected", reason });
+  const mismatch = describeSessionTaskMismatch(instructions, session);
+  if (mismatch !== null) return rejected(mismatch);
   if (taskListDigest(instructions.tasks) !== session.tasksAfterDigest) {
-    throw new ChangeTaskExecutionError(
+    return rejected(
       `Выбранная задача ${session.taskNumber} не является единственным изменением task-state`,
     );
   }
@@ -342,7 +394,7 @@ async function verifyLocalTaskCommit(
       session.progressTotal - session.progressComplete - 1 ||
     instructions.state === "blocked"
   ) {
-    throw new ChangeTaskExecutionError(
+    return rejected(
       `Progress OpenSpec не подтверждает завершение только задачи ${session.taskNumber}`,
     );
   }
@@ -353,19 +405,12 @@ async function verifyLocalTaskCommit(
     );
   }
   const head = await readHeadCommit(command, gitRoot, signal);
-  await assertDescendsFrom(
-    command,
-    gitRoot,
-    session.baselineCommit,
-    head,
-    "Текущий Git HEAD больше не продолжает baseline task-сессии",
-    signal,
-  );
+  if (!(await isCommitAncestor(command, gitRoot, session.baselineCommit, head, signal))) {
+    return rejected("Текущий Git HEAD больше не продолжает baseline task-сессии");
+  }
   const commitCount = await readCommitCount(command, gitRoot, session.baselineCommit, head, signal);
   if (commitCount < 1) {
-    throw new ChangeTaskExecutionError(
-      `Для задачи ${session.taskNumber} требуется хотя бы один новый Git-коммит`,
-    );
+    return rejected(`Для задачи ${session.taskNumber} требуется хотя бы один новый Git-коммит`);
   }
   const changedPaths = await readChangedPaths(
     command,
@@ -375,26 +420,24 @@ async function verifyLocalTaskCommit(
     signal,
   );
   if (changedPaths.length === 0) {
-    throw new ChangeTaskExecutionError("Диапазон коммитов задачи не содержит изменений");
+    return rejected("Диапазон коммитов задачи не содержит изменений");
   }
-  return head;
+  return { kind: "verified", head };
 }
 
-function assertSessionSchema(
+/** Описывает, чем OpenSpec больше не соответствует выбранной задаче сессии. */
+function describeSessionTaskMismatch(
   instructions: ApplyInstructions,
   session: PendingTaskExecutionSession,
-): void {
+): string | null {
   if (instructions.schemaName !== session.schemaName) {
-    throw new ChangeTaskExecutionError(
-      "Schema OpenSpec change изменилась после сохранения task checkpoint",
-    );
+    return "Schema OpenSpec change изменилась после сохранения task checkpoint";
   }
   const selected = instructions.tasks.find(({ id }) => id === session.taskId);
   if (!selected || selected.description !== session.taskDescription) {
-    throw new ChangeTaskExecutionError(
-      `OpenSpec больше не возвращает сохранённую задачу ${session.taskNumber}`,
-    );
+    return `OpenSpec больше не возвращает сохранённую задачу ${session.taskNumber}`;
   }
+  return null;
 }
 
 async function assertImplementationRunState(
@@ -433,12 +476,18 @@ async function assertImplementationRunState(
   );
 }
 
-async function assertTaskSessionState(
+/**
+ * Проверяет окружение task-сессии. Возвращает причину устаревания, когда Git
+ * HEAD больше не продолжает baseline сессии, и `null`, когда сессия остаётся
+ * на своей истории. Чужая ветка, другой репозиторий и коммиты origin, которых
+ * нет локально, — ошибки окружения: новая сессия их не исправит.
+ */
+async function inspectTaskSessionState(
   command: BoundedCommandRunner,
   gitRoot: string,
   session: PendingTaskExecutionSession,
   signal: AbortSignal,
-): Promise<void> {
+): Promise<string | null> {
   const currentBranch = await readCurrentBranch(command, gitRoot, signal);
   if (currentBranch !== session.implementationBranch) {
     throw new ChangeTaskExecutionError(
@@ -460,18 +509,18 @@ async function assertTaskSessionState(
     readRemoteCommit(command, gitRoot, session.changeBranch, signal),
     readHeadCommit(command, gitRoot, signal),
   ]);
-  if (localRoot !== head ||
-      (remoteRoot !== session.baselineCommit && remoteRoot !== head)) {
+  if (localRoot !== head) {
     throw new ChangeTaskExecutionError(
       `Корневая ветка «${session.changeBranch}» изменилась после начала task-сессии`,
     );
   }
-  await assertDescendsFrom(
-    command,
-    gitRoot,
-    session.baselineCommit,
-    head,
-    "Implementation-ветка больше не продолжает baseline task-сессии",
-    signal,
-  );
+  if (!(await isCommitAncestor(command, gitRoot, remoteRoot, head, signal))) {
+    throw new ChangeTaskExecutionError(
+      `Origin корневой ветки «${session.changeBranch}» содержит коммиты, которых нет в локальной ветке`,
+    );
+  }
+  if (!(await isCommitAncestor(command, gitRoot, session.baselineCommit, head, signal))) {
+    return "Implementation-ветка больше не продолжает baseline task-сессии";
+  }
+  return null;
 }

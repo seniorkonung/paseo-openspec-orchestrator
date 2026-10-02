@@ -20,6 +20,7 @@ import { createImplementationBranchService } from "./implementation-branch.ts";
 import { createImplementationReviewService } from "./implementation-review.ts";
 import { createPhaseWorkService } from "./phase-work.ts";
 import { createPhaseTaskPlanningService } from "./phase-task-planning.ts";
+import { createRootBranchService } from "./root-branch-state.ts";
 import { createRootPullRequestService } from "./root-pull-request.ts";
 import type { OrchestratorEngine } from "./orchestrator-engine.ts";
 import { OrchestratorLedger, type WaitResult } from "./orchestrator-ledger.ts";
@@ -181,6 +182,7 @@ export class OrchestratorController {
       changeTaskExecution: createChangeTaskExecutionService({ createAgent }),
       phaseWork,
       phaseTaskPlanning: createPhaseTaskPlanningService({ createAgent, phaseWork }),
+      rootBranch: createRootBranchService(),
       rootPullRequest,
       changeArchive: createChangeArchiveService({ createAgent, rootPullRequest }),
     });

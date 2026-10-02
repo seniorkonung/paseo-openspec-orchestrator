@@ -6,6 +6,7 @@ import {
   commitHashSchema,
   type PendingArtifactSession,
 } from "./change-artifact-model.ts";
+import { isCommitAncestor } from "./git-ancestry.ts";
 
 export interface ArtifactGitStatus {
   readonly gitRoot: string;
@@ -58,24 +59,13 @@ export async function verifyArtifactCommit(
     expectedPaths.map((path) => repositoryPath(status.gitRoot, path, session.artifactId)),
   );
 
-  let changedPaths: string[];
-  try {
-    const result = await command(
-      "git",
-      [
-        "diff",
-        "--name-only",
-        "--no-renames",
-        "-z",
-        `${session.baselineCommit}..${head}`,
-      ],
-      { cwd: status.gitRoot, signal },
-    );
-    changedPaths = result.stdout.split("\0").filter(Boolean);
-  } catch (error) {
-    if (signal.aborted) throw error;
-    throw new ChangeArtifactCreationError("Не удалось проверить состав Git-коммита артефакта");
-  }
+  const changedPaths = await readChangedPaths(
+    command,
+    status.gitRoot,
+    session.baselineCommit,
+    head,
+    signal,
+  );
   if (changedPaths.length === 0 || changedPaths.some((path) => !allowed.has(path))) {
     throw new ChangeArtifactCreationError(
       "Git-коммит должен содержать только файлы ожидаемого OpenSpec-артефакта",
@@ -83,14 +73,51 @@ export async function verifyArtifactCommit(
   }
 }
 
-export async function assertRecoverableCommitRange(
+/**
+ * Описывает, чем коммиты после baseline уже нарушают контракт artifact-этапа:
+ * история переписана либо в диапазон попали файлы вне артефакта. Такой
+ * диапазон этап не примет ни при каком продолжении. Незакоммиченная или ещё
+ * не начатая работа нарушением не считается.
+ */
+export async function describeArtifactRangeViolation(
+  command: BoundedCommandRunner,
+  status: ArtifactGitStatus,
+  session: PendingArtifactSession,
+  signal: AbortSignal,
+): Promise<string | null> {
+  const head = await readHeadCommit(command, status.gitRoot, signal);
+  if (!(await isCommitAncestor(command, status.gitRoot, session.baselineCommit, head, signal))) {
+    return "Текущий Git HEAD больше не продолжает сохранённый исходный коммит";
+  }
+  const allowed = new Set(
+    (status.artifactPaths.get(session.artifactId)?.existingOutputPaths ?? []).map((path) =>
+      repositoryPath(status.gitRoot, path, session.artifactId),
+    ),
+  );
+  const changedPaths = await readChangedPaths(command, status.gitRoot, session.baselineCommit, head, signal);
+  return changedPaths.some((path) => !allowed.has(path))
+    ? "После baseline artifact-сессии появились коммиты вне файлов артефакта"
+    : null;
+}
+
+async function readChangedPaths(
   command: BoundedCommandRunner,
   gitRoot: string,
   baselineCommit: string,
-  signal?: AbortSignal,
-): Promise<void> {
-  const head = await readHeadCommit(command, gitRoot, signal);
-  await assertDescendsFromBaseline(command, gitRoot, baselineCommit, head, signal);
+  head: string,
+  signal: AbortSignal,
+): Promise<string[]> {
+  try {
+    const result = await command(
+      "git",
+      ["diff", "--name-only", "--no-renames", "-z", `${baselineCommit}..${head}`],
+      { cwd: gitRoot, signal },
+    );
+    return result.stdout.split("\0").filter(Boolean);
+  } catch (error) {
+    if (signal.aborted) throw error;
+    throw new ChangeArtifactCreationError("Не удалось проверить состав Git-коммита артефакта");
+  }
 }
 
 export async function assertCleanWorktree(

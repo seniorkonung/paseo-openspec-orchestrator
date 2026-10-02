@@ -132,6 +132,11 @@ export function buildFindingResolutionPrompt(
   input: ReviewFindingPromptInput,
 ): string {
   const resolved = input.alreadyCommitted || input.publicationAlreadyCompleted;
+  // Во время implementation run список задач неизменен. При планировании
+  // сохраняются только завершённые задачи: новые встают в порядке выполнения.
+  const taskListRule = input.taskScope.kind === "implementation"
+    ? "Preserve the existing task list exactly, including completion marks: never reopen a completed task or rewrite or delete an existing task. If more implementation is needed, append new unfinished tasks."
+    : "Preserve every completed task exactly, including its completion mark: never reopen a completed task or rewrite or delete it. If more implementation is needed, add new unfinished tasks.";
   const resolutionInstruction = input.publicationAlreadyCompleted
     ? `This is a recovery session: finding \`${input.findingId}\` already has a valid committed resolution and a verified entry in the root pull request. Change nothing: do not invoke the skill, request the user's decision, commit, or push.`
     : input.alreadyCommitted
@@ -143,7 +148,7 @@ export function buildFindingResolutionPrompt(
 
 1. Explain the finding in Russian to someone who has never seen it: what is wrong, how it affects the product, and what you recommend. Where the resolution depends on a product, contract, architecture, data, security, privacy, or cost choice, give the real options and trade-offs; for an obvious technical correction, explain why product behavior stays the same.
 2. Get one explicit decision from the user about how to resolve this finding before changing any artifact or accepting residual risk. A recommendation is not a decision, and acceptance is never inferred: on acceptance let the skill record it through its own procedure instead of claiming a fix.
-3. Let the skill implement that decision for only this finding and keep later findings intact unless current evidence changes them. If the chosen resolution cannot be implemented or requires a materially different decision, explain the blocker instead of silently changing course. Preserve the existing task list exactly, including completion marks: never reopen a completed task or rewrite or delete an existing task. If more implementation is needed, append new unfinished tasks. ${taskScopeRule(input.taskScope)} The resolution holds only when the agreed outcome is durably owned by the OpenSpec artifacts, any remaining implementation is tracked work, and the finding heading is gone from Findings.
+3. Let the skill implement that decision for only this finding and keep later findings intact unless current evidence changes them. If the chosen resolution cannot be implemented or requires a materially different decision, explain the blocker instead of silently changing course. ${taskListRule} ${taskScopeRule(input.taskScope)} The resolution holds only when the agreed outcome is durably owned by the OpenSpec artifacts, any remaining implementation is tracked work, and the finding heading is gone from Findings.
 4. Validate the resulting artifact changes and report state. Then commit only files inside the change root in at least one commit without asking for another approval. Report the changes and validation to the user while continuing through publication and completion without pausing for permission.`;
   const completion = input.publicationAlreadyCompleted
     ? `Finish by calling the orchestrator MCP tool \`${variant.toolName}\` with \`{"mode":"acknowledge-existing"}\`. If it reports an error, follow its feedback and retry the same tool.`

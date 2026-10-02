@@ -11,7 +11,7 @@ import {
 } from "./bounded-command.ts";
 import {
   assertCleanWorktree,
-  assertRecoverableCommitRange,
+  describeArtifactRangeViolation,
   readHeadCommit,
   verifyArtifactCommit,
 } from "./change-artifact-git.ts";
@@ -47,6 +47,11 @@ import {
   updateAgentNotificationLabel,
   type AgentNotificationLabelUpdater,
 } from "./paseo-agent-labels.ts";
+import {
+  RESUMABLE_SESSION,
+  staleSession,
+  type SessionAssessment,
+} from "./session-assessment.ts";
 
 type PaseoApi = PluginHandlerContext["paseo"];
 type PaseoWorkspace = ReturnType<PaseoApi["workspaces"]["ref"]>;
@@ -91,6 +96,17 @@ export interface ChangeArtifactCreationService {
     changeId: string,
     signal?: AbortSignal,
   ): Promise<PendingArtifactSession>;
+  /**
+   * Оценивает сохранённую artifact-сессию, не меняя репозиторий. Продолжить
+   * можно сессию, чей артефакт ещё не начат либо уже создан проверенным
+   * коммитом. Иначе следующий артефакт определяется заново по OpenSpec status.
+   */
+  assess(
+    workspaceDirectory: string,
+    changeId: string,
+    session: PendingArtifactSession,
+    signal: AbortSignal,
+  ): Promise<SessionAssessment>;
   create(request: ChangeArtifactCreationRequest): Promise<ChangeArtifactPlan>;
   verifyApply(
     workspaceDirectory: string,
@@ -131,8 +147,47 @@ export function createChangeArtifactCreationService(
     options.agentDrainTimeoutMs ?? DEFAULT_AGENT_DRAIN_TIMEOUT_MS;
   const logger = options.logger ?? console;
 
+  const inspectSession = async (
+    status: InspectedOpenSpecStatus,
+    session: PendingArtifactSession,
+    signal: AbortSignal,
+  ): Promise<ArtifactSessionRecovery> => {
+    const stale = (reason: string): ArtifactSessionRecovery => ({ kind: "stale", reason });
+    const artifact = status.artifacts.get(session.artifactId);
+    if (status.schemaName !== session.schemaName || !artifact) {
+      return stale("Schema или ожидаемый артефакт изменились после сохранения checkpoint");
+    }
+    if (artifact.status === "blocked" || artifact.status === "skipped") {
+      return stale(`Артефакт «${session.artifactId}» больше нельзя создать на текущем этапе`);
+    }
+    if (artifact.status === "ready") {
+      const plan = planArtifactStatus(status);
+      if (plan.kind !== "next-artifact" || plan.artifactId !== session.artifactId) {
+        return stale(
+          "OpenSpec изменил рекомендуемый следующий артефакт после сохранения checkpoint",
+        );
+      }
+      await assertCleanWorktree(command, status.gitRoot, signal);
+      const head = await readHeadCommit(command, status.gitRoot, signal);
+      return head === session.baselineCommit
+        ? { kind: "fresh" }
+        : stale("Git HEAD изменился до начала создания ожидаемого артефакта");
+    }
+    // Артефакт создан. Этап принимает только коммиты с его файлами после
+    // baseline: иной состав коммитов эта сессия подтвердить уже не сможет.
+    // Незакоммиченный артефакт остаётся работой агента той же сессии.
+    const violation = await describeArtifactRangeViolation(command, status, session, signal);
+    return violation === null ? { kind: "created" } : stale(violation);
+  };
+
   return {
     inspect: statusGateway.inspect,
+    async assess(workspaceDirectory, changeId, sessionInput, signal) {
+      const session = pendingArtifactSessionSchema.parse(sessionInput);
+      const status = await statusGateway.read(workspaceDirectory, changeId, signal);
+      const recovery = await inspectSession(status, session, signal);
+      return recovery.kind === "stale" ? staleSession(recovery.reason) : RESUMABLE_SESSION;
+    },
     async prepare(workspaceDirectory, changeId, signal) {
       const status = await statusGateway.read(workspaceDirectory, changeId, signal);
       const plan = planArtifactStatus(status);
@@ -165,42 +220,11 @@ export function createChangeArtifactCreationService(
         request.changeId,
         request.signal,
       );
-      const expectedArtifact = before.artifacts.get(parsedSession.artifactId);
-      if (before.schemaName !== parsedSession.schemaName || !expectedArtifact) {
-        throw new ChangeArtifactCreationError(
-          `Schema или ожидаемый артефакт изменились после сохранения checkpoint`,
-        );
-      }
-      if (expectedArtifact.status === "blocked" || expectedArtifact.status === "skipped") {
-        throw new ChangeArtifactCreationError(
-          `Артефакт «${parsedSession.artifactId}» больше нельзя создать на текущем этапе`,
-        );
-      }
-      if (expectedArtifact.status === "ready") {
-        const plan = planArtifactStatus(before);
-        if (
-          plan.kind !== "next-artifact" ||
-          plan.artifactId !== parsedSession.artifactId
-        ) {
-          throw new ChangeArtifactCreationError(
-            `OpenSpec изменил рекомендуемый следующий артефакт после сохранения checkpoint`,
-          );
-        }
-        await assertCleanWorktree(command, before.gitRoot, request.signal);
-        const currentHead = await readHeadCommit(command, before.gitRoot, request.signal);
-        if (currentHead !== parsedSession.baselineCommit) {
-          throw new ChangeArtifactCreationError(
-            "Git HEAD изменился до начала создания ожидаемого артефакта",
-          );
-        }
-      } else {
-        await assertRecoverableCommitRange(
-          command,
-          before.gitRoot,
-          parsedSession.baselineCommit,
-          request.signal,
-        );
-      }
+      const recovery = await inspectSession(before, parsedSession, request.signal);
+      // Устаревшую сессию сбрасывает согласование перед шагом; здесь она
+      // возможна только при изменении репозитория после него.
+      if (recovery.kind === "stale") throw new ChangeArtifactCreationError(recovery.reason);
+      const alreadyCreated = recovery.kind === "created";
 
       const host = await mcpHost.listen();
       let completedPlan: ChangeArtifactPlan | null = null;
@@ -346,7 +370,7 @@ export function createChangeArtifactCreationService(
           artifactCreationPrompt({
             changeId: parseChangeId(request.changeId),
             artifactId: parsedSession.artifactId,
-            alreadyCreated: expectedArtifact.status === "done",
+            alreadyCreated,
           }),
         );
 
@@ -359,6 +383,15 @@ export function createChangeArtifactCreationService(
     },
   };
 }
+
+/**
+ * Состояние сохранённой artifact-сессии относительно репозитория: артефакт ещё
+ * не начат, уже создан проверенным коммитом либо сессию нельзя завершить.
+ */
+type ArtifactSessionRecovery =
+  | { readonly kind: "fresh" }
+  | { readonly kind: "created" }
+  | { readonly kind: "stale"; readonly reason: string };
 
 function artifactCreationPrompt(input: {
   readonly changeId: string;

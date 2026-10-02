@@ -24,6 +24,8 @@ import {
   workflowStateSchema,
   type WorkflowCheckpoint,
   type WorkflowDefinition,
+  type WorkflowReconciler,
+  type WorkflowReconciliation,
   type WorkflowState,
   type WorkflowStepDefinition,
   type WorkflowStepId,
@@ -53,7 +55,13 @@ interface WorkspaceRuntime {
 interface PreparedWorkflow {
   readonly startStepId: WorkflowStepId;
   readonly steps: ReadonlyMap<WorkflowStepId, WorkflowStepDefinition>;
+  readonly reconcile: WorkflowReconciler | null;
 }
+
+/** Что делать движку после согласования состояния с рабочей областью. */
+type ReconcileOutcome = "proceed" | "stopped";
+
+const RECONCILE_LABEL = "Сверяю состояние с репозиторием";
 
 const ACTIVE_LIFECYCLE_STATUSES = ["starting", "running", "pausing", "paused"] as const;
 const MAX_STEP_LABEL_LENGTH = ORCHESTRATOR_LIMITS.actionText;
@@ -95,7 +103,7 @@ function prepareWorkflow(definition: WorkflowDefinition): PreparedWorkflow {
   if (!steps.has(definition.startStepId)) {
     throw new Error(`Начальный шаг workflow не найден: ${definition.startStepId}`);
   }
-  return { startStepId: definition.startStepId, steps };
+  return { startStepId: definition.startStepId, steps, reconcile: definition.reconcile ?? null };
 }
 
 export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
@@ -297,11 +305,17 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
         return;
       }
 
-      const currentStepId = runtime.currentStepId;
-      if (currentStepId === null) {
+      if (runtime.currentStepId === null) {
         this.#complete(workspaceId, reporter, runtime);
         return;
       }
+      if (
+        (await this.#reconcile(workspaceId, runtime, reporter, generation)) === "stopped"
+      ) {
+        return;
+      }
+      // Согласование может направить workflow на другой шаг.
+      const currentStepId = runtime.currentStepId;
       const step = runtime.workflow.steps.get(currentStepId);
       if (!step) {
         this.#fail(
@@ -426,6 +440,116 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
         );
         return;
       }
+    }
+  }
+
+  /**
+   * Перед шагом приводит сохранённое состояние к рабочей области. Принятое
+   * состояние сохраняется отдельным действием истории, чтобы пользователь
+   * видел, что именно оркестратор взял из репозитория.
+   */
+  async #reconcile(
+    workspaceId: string,
+    runtime: WorkspaceRuntime,
+    reporter: OrchestratorReporter,
+    generation: number,
+  ): Promise<ReconcileOutcome> {
+    const reconcile = runtime.workflow.reconcile;
+    const stepId = runtime.currentStepId;
+    const abortController = runtime.abortController;
+    if (!reconcile || stepId === null || !abortController) return "proceed";
+
+    let outcome: WorkflowReconciliation;
+    try {
+      outcome = await reconcile({
+        signal: abortController.signal,
+        stepId,
+        state: runtime.state,
+      });
+    } catch (error) {
+      if (this.#disposed || runtime.generation !== generation) return "stopped";
+      // Несостоявшееся согласование не останавливает workflow: шаг сам
+      // проверит рабочую область и сообщит о конкретной проблеме.
+      console.error("[OpenSpec] Не удалось сверить состояние workflow с репозиторием", {
+        workspaceId,
+        stepId,
+        code:
+          error && typeof error === "object" && "code" in error
+            ? String(Reflect.get(error, "code"))
+            : "unknown",
+      });
+      return "proceed";
+    }
+    if (this.#disposed || runtime.generation !== generation) return "stopped";
+    if (outcome.kind === "unchanged") return "proceed";
+
+    const handle = reporter.beginAction({ text: RECONCILE_LABEL });
+    runtime.currentHandle = handle;
+    try {
+      handle.update({ text: outcome.summary });
+      if (outcome.kind === "halt") {
+        this.#fail(workspaceId, reporter, runtime, outcome.message);
+        return "stopped";
+      }
+      if (!runtime.workflow.steps.has(outcome.next)) {
+        this.#fail(
+          workspaceId,
+          reporter,
+          runtime,
+          `Шаг «${outcome.next}» не найден; проверьте конфигурацию workflow и нажмите «Повторить»`,
+        );
+        return "stopped";
+      }
+      const parsed = workflowStateSchema.safeParse(outcome.state);
+      if (!parsed.success) {
+        // Некорректное принятое состояние нельзя сохранять: шаг получит прежнее.
+        console.error("[OpenSpec] Согласование вернуло некорректное состояние workflow", {
+          workspaceId,
+          stepId,
+          issues: parsed.error.issues.map(({ path, message }) => ({ path, message })),
+        });
+        handle.cancel();
+        runtime.currentHandle = null;
+        return "proceed";
+      }
+      if (
+        !(await this.#saveCheckpoint(
+          workspaceId,
+          runtime,
+          reporter,
+          generation,
+          checkpointFor(outcome.next, parsed.data),
+        ))
+      ) {
+        return "stopped";
+      }
+      if (this.#disposed || runtime.generation !== generation) return "stopped";
+      runtime.state = parsed.data;
+      this.#syncPublicChange(workspaceId, reporter, parsed.data.change);
+      runtime.currentStepId = outcome.next;
+      handle.succeed();
+      runtime.currentHandle = null;
+      return "proceed";
+    } catch (error) {
+      if (this.#disposed || runtime.generation !== generation) return "stopped";
+      // Ответ согласования не удалось записать в историю или состояние,
+      // например из-за недопустимого текста. Workflow останавливается явно,
+      // а не остаётся в running без исполняемого шага.
+      console.error("[OpenSpec] Не удалось применить согласование состояния workflow", {
+        workspaceId,
+        stepId,
+        code:
+          error && typeof error === "object" && "code" in error
+            ? String(Reflect.get(error, "code"))
+            : "unknown",
+      });
+      this.#fail(
+        workspaceId,
+        reporter,
+        runtime,
+        "Не удалось применить согласование состояния с репозиторием; нажмите «Повторить»",
+      );
+      return "stopped";
     }
   }
 

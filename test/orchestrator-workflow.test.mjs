@@ -10,6 +10,11 @@ import { readGitBranch } from "../server/git-branch.ts";
 import { readGitWorktreeStatus } from "../server/git-worktree.ts";
 import { OpenSpecOrchestratorEngine } from "../server/openspec-orchestrator-engine.ts";
 import { OrchestratorLedger } from "../server/orchestrator-ledger.ts";
+import {
+  PUBLISHED_HEAD_STEPS,
+  ROUTING_STEPS,
+  UNRECONCILED_STEPS,
+} from "../server/workflow/reconciliation.ts";
 import { createOpenSpecWorkflow } from "../server/workflow/steps/index.ts";
 import { createInitialWorkflowState, workflowCheckpointSchema } from "../server/workflow/types.ts";
 import { classifyPhaseWork, phaseTaskFingerprint } from "../server/phase-work.ts";
@@ -94,6 +99,8 @@ function workflowHarness({ feedbackOnce = false, reviewFindings = 0, twoPhases =
     ...(twoPhases ? [{ id: "task-b", number: "2.1", done: false }] : []),
   ];
   let resolvedReviewFindings = 0;
+  // Git HEAD рабочей области: stub-этапы продвигают его своими коммитами.
+  let head = hashes.a;
   let rootReady = false;
   let rootMerged = false;
   let archivePublished = false;
@@ -321,6 +328,7 @@ function workflowHarness({ feedbackOnce = false, reviewFindings = 0, twoPhases =
           remainingTasks: 0,
         };
         phaseTasks.find(({ id }) => id === request.session.taskId).done = true;
+        head = result.commit;
         await request.onTaskCompleted(result);
         return result;
       },
@@ -433,6 +441,14 @@ function workflowHarness({ feedbackOnce = false, reviewFindings = 0, twoPhases =
       async prepare() { throw new Error("phase planning не требуется"); },
       async run() { throw new Error("phase planning не требуется"); },
     },
+    rootBranch: {
+      // Репозиторий совпадает с сохранённым состоянием: согласование ничего не меняет.
+      async inspect() { return { kind: "available", head, origin: { kind: "synchronized" } }; },
+      async publish() { throw new Error("публикация не требуется"); },
+      async nearestAncestors(_workspace, commits) {
+        return new Map(commits.map((commit) => [commit, commit]));
+      },
+    },
     rootPullRequest: {
       async synchronize() { return archivePublished ? hashes.h : hashes.f; },
       async inspect() {
@@ -458,7 +474,7 @@ function workflowHarness({ feedbackOnce = false, reviewFindings = 0, twoPhases =
         archivePublished = true;
         return { session: request.session, commit: hashes.h };
       },
-      async verifyArchived() { calls.push("archive.verify"); },
+      async verifyArchived() { calls.push("archive.verify"); return hashes.h; },
     },
   });
   return { workflow, calls, mergeRoot: () => { rootMerged = true; }, get rootReady() { return rootReady; } };
@@ -508,6 +524,11 @@ test("workflow выполняет задачи и ревью в одном PR, �
       .filter((link) => link.kind === "agent").map(({ agentId }) => agentId),
     ["publication-agent", "planning-review-agent", "task-agent", "implementation-review-agent", "archive-agent"],
   );
+  // Пока репозиторий соответствует состоянию, согласование не оставляет следов.
+  assert.equal(
+    ledger.get("workspace").history.some(({ text }) => text.startsWith("Принято состояние репозитория")),
+    false,
+  );
   harness.mergeRoot();
   engine.command("workspace", "retry");
   await settleWorkflow(ledger);
@@ -539,6 +560,10 @@ test("две фазы проходят через один Draft PR и заве�
   assert.equal(harness.calls.filter((call) => call === "publication.publish").length, 1);
   assert.equal(harness.calls.includes("planning.merge"), false);
   assert.equal(harness.calls.includes("implementation.merge"), false);
+  assert.equal(
+    ledger.get("workspace").history.some(({ text }) => text.startsWith("Принято состояние репозитория")),
+    false,
+  );
   harness.mergeRoot();
   engine.command("workspace", "retry");
   await settleWorkflow(ledger);
@@ -586,6 +611,15 @@ test("грязное дерево блокирует эффекты до Retry",
   engine.command("workspace", "retry");
   await settleWorkflow(ledger);
   assert.equal(ledger.get("workspace").lifecycle.status, "completed");
+});
+
+test("согласование ссылается только на шаги собранного workflow", () => {
+  const { workflow } = workflowHarness();
+  const stepIds = new Set(workflow.steps.map(({ id }) => id));
+  assert.equal(typeof workflow.reconcile, "function");
+  for (const stepId of [...UNRECONCILED_STEPS, ...PUBLISHED_HEAD_STEPS, ...Object.values(ROUTING_STEPS)]) {
+    assert.ok(stepIds.has(stepId), `Шаг «${stepId}» отсутствует в workflow`);
+  }
 });
 
 test("checkpoint v5 несовместим с v6", () => {

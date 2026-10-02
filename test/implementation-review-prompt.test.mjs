@@ -54,6 +54,8 @@ test("ревью имплементации добавляет задачи то
 
   assert.match(result, /"phaseNumber":2/u);
   assert.match(result, /Add new tasks only to Phase 2 or to a new phase of your own/u);
+  assert.match(result, /task IDs, numbers, descriptions, and order stay the same/u);
+  assert.match(result, /strictly in file order\. Append the new tasks in the order they must run/u);
   assert.match(result, /Number new Phase 2 tasks as 2\.<next free number>/u);
   assert.match(result, /Never add tasks to another existing phase/u);
   assert.match(result, /The orchestrator plans every phase that has no tasks/u);

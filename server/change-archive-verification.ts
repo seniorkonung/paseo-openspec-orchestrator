@@ -3,7 +3,8 @@ import { dirname, join, relative, sep } from "node:path";
 import { z } from "zod";
 import { runBoundedCommand, type BoundedCommandRunner } from "./bounded-command.ts";
 import { createChangeArtifactStatusGateway, type ChangeArtifactStatusGateway } from "./change-artifact-status.ts";
-import { ChangeArchiveError, pendingArchiveSessionSchema, type ArchivedChange, type PendingArchiveSession } from "./change-archive-model.ts";
+import { ChangeArchiveError, pendingArchiveSessionSchema, type ArchivedChange, type PendingArchiveSession, type VerifiedChangeArchive } from "./change-archive-model.ts";
+import { isCommitAncestor } from "./git-ancestry.ts";
 import { runWorkspaceMiseCommand } from "./mise-toolchain.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import { assertCleanReviewWorktree, readCurrentReviewBranch, readReviewHeadCommit } from "./review-publication-gateway.ts";
@@ -16,11 +17,36 @@ const listSchema = z.object({ changes: z.array(z.object({
 }).loose()) }).loose();
 const MAX_SPEC_BYTES = 1024 * 1024;
 
+/**
+ * Состояние сохранённой сессии архивации относительно репозитория:
+ *
+ * - `fresh` — архивация ещё не начата;
+ * - `partial` — архивация начата, но change ещё не перенесён в архив коммитом;
+ * - `committed` — change перенесён в архив коммитами этапа после baseline;
+ * - `adopted` — change уже в архиве, но диапазон сессии это не подтверждает:
+ *   история переписана либо в неё попали коммиты вне путей архивации. Агенту
+ *   делать нечего, архив принимается из репозитория;
+ * - `stale` — change ещё не в архиве, а сессию завершить нельзя: архивацию
+ *   нужно спланировать заново от текущего HEAD.
+ */
+export type ArchiveSessionRecovery =
+  | { readonly kind: "fresh" }
+  | { readonly kind: "partial" }
+  | { readonly kind: "committed" }
+  | { readonly kind: "adopted" }
+  | { readonly kind: "stale"; readonly reason: string };
+
 export interface ChangeArchiveVerification {
   plan(workspaceDirectory: string, changeId: string, identity: RootPullRequestIdentity, signal?: AbortSignal): Promise<PendingArchiveSession>;
-  inspectRecovery(workspaceDirectory: string, session: PendingArchiveSession, signal?: AbortSignal): Promise<"fresh" | "partial" | "committed">;
-  verifyCommit(workspaceDirectory: string, session: PendingArchiveSession, signal?: AbortSignal): Promise<ArchivedChange>;
-  verifyArchived(workspaceDirectory: string, archived: ArchivedChange, signal?: AbortSignal): Promise<void>;
+  inspectRecovery(workspaceDirectory: string, session: PendingArchiveSession, signal?: AbortSignal): Promise<ArchiveSessionRecovery>;
+  verifyCommit(workspaceDirectory: string, session: PendingArchiveSession, signal?: AbortSignal): Promise<VerifiedChangeArchive>;
+  /**
+   * Проверяет архив перед финальным merge и возвращает текущий HEAD. Коммит,
+   * проверенный этапом, проверяется заново целиком. Когда HEAD от него
+   * отличается или архив принят из репозитория, достаточно, чтобы change
+   * оставался в архиве.
+   */
+  verifyArchived(workspaceDirectory: string, archived: ArchivedChange, signal?: AbortSignal): Promise<string>;
 }
 
 export function createChangeArchiveVerification(options: {
@@ -47,8 +73,8 @@ export function createChangeArchiveVerification(options: {
     if (!targetStat?.isDirectory() || targetStat.isSymbolicLink()) throw new ChangeArchiveError("Каталог архива отсутствует или не является обычным каталогом");
     const resolved = await realpath(target);
     if (relative(root, resolved).split(sep).some((part) => part === "..")) throw new ChangeArchiveError("Архив вышел за пределы репозитория");
-    const specRoot = `${dirname(dirname(session.sourcePath))}/specs/`;
-    const allowedSpecs = new Set(session.deltaSpecPaths.map((path) => `${specRoot}${path.slice("specs/".length)}`));
+    const specRoot = mainSpecRoot(session);
+    const allowedSpecs = mainSpecPaths(session);
     const [before, after, mainTree] = await Promise.all([
       readTree(command, directory, session.baselineCommit, session.sourcePath, signal),
       readTree(command, directory, "HEAD", session.archivePath, signal),
@@ -59,9 +85,8 @@ export function createChangeArchiveVerification(options: {
       const expected = `${session.archivePath}${path.slice(session.sourcePath.length)}`;
       if (after.get(expected) !== entry) throw new ChangeArchiveError(`Архив изменил файл ${path}`);
     }
-    const { stdout: changed } = await command("git", ["diff", "--name-only", "-z", session.baselineCommit, "HEAD"], { cwd: directory, signal });
-    for (const path of changed.split("\0").filter(Boolean)) {
-      if (!path.startsWith(`${session.sourcePath}/`) && !path.startsWith(`${session.archivePath}/`) && !allowedSpecs.has(path)) {
+    for (const path of await readChangedPaths(command, directory, session.baselineCommit, "HEAD", signal)) {
+      if (!isArchivePath(session, path)) {
         throw new ChangeArchiveError(`Архивный коммит изменил посторонний путь ${path}`);
       }
     }
@@ -120,10 +145,22 @@ export function createChangeArchiveVerification(options: {
         const sourceExists = await pathExists(join(directory, session.sourcePath));
         const targetExists = await pathExists(join(directory, session.archivePath));
         const { stdout: worktree } = await command("git", ["status", "--porcelain", "-z"], { cwd: directory, signal });
-        return sourceExists && !targetExists && worktree.length === 0 ? "fresh" : "partial";
+        return { kind: sourceExists && !targetExists && worktree.length === 0 ? "fresh" : "partial" };
       }
-      await assertCommittedArchive(command, directory, session.baselineCommit, signal);
-      return "committed";
+      // Этап принимает только коммиты в путях архивации после своего baseline.
+      // Иной диапазон эта сессия подтвердить уже не сможет.
+      const continuesBaseline = await isCommitAncestor(command, directory, session.baselineCommit, head, signal);
+      const withinArchivePaths = continuesBaseline &&
+        (await readChangedPaths(command, directory, session.baselineCommit, head, signal))
+          .every((path) => isArchivePath(session, path));
+      if (await isArchivedAt(command, directory, head, session, signal)) {
+        return { kind: withinArchivePaths ? "committed" : "adopted" };
+      }
+      if (!continuesBaseline) return { kind: "stale", reason: "Архивный HEAD не продолжает baseline" };
+      // Незавершённый перенос продолжает агент той же сессии.
+      return withinArchivePaths
+        ? { kind: "partial" }
+        : { kind: "stale", reason: "После baseline архивации появились коммиты вне путей архивации" };
     },
     async verifyCommit(directory, sessionInput, signal) {
       const session = pendingArchiveSessionSchema.parse(sessionInput);
@@ -138,11 +175,56 @@ export function createChangeArchiveVerification(options: {
       const parsed = pendingArchiveSessionSchema.parse(archived.session);
       await assertCleanReviewWorktree(command, directory, signal);
       const head = await readReviewHeadCommit(command, directory, signal);
-      if (head !== archived.commit) throw new ChangeArchiveError("HEAD изменился после архивного коммита");
-      await assertCommittedArchive(command, directory, parsed.baselineCommit, signal);
-      await verifyTree(directory, parsed, signal);
+      if (archived.commit !== null && head === archived.commit) {
+        await assertCommittedArchive(command, directory, parsed.baselineCommit, signal);
+        await verifyTree(directory, parsed, signal);
+        return head;
+      }
+      // Проверенного этапом коммита в вершине нет: коммиты добавлены или
+      // переписаны вне этапа. Достаточно, чтобы change оставался в архиве.
+      if (!(await isArchivedAt(command, directory, head, parsed, signal))) {
+        throw new ChangeArchiveError("Change снова оказался вне архива: верните его в архив коммитом");
+      }
+      return head;
     },
   };
+}
+
+/** Каталог основных specs, с которыми синхронизируются delta specs change. */
+function mainSpecRoot(session: PendingArchiveSession): string {
+  return `${dirname(dirname(session.sourcePath))}/specs/`;
+}
+
+function mainSpecPaths(session: PendingArchiveSession): ReadonlySet<string> {
+  const specRoot = mainSpecRoot(session);
+  return new Set(session.deltaSpecPaths.map((path) => `${specRoot}${path.slice("specs/".length)}`));
+}
+
+/** Пути, которые архивация вправе менять: change, его архив и основные specs. */
+function isArchivePath(session: PendingArchiveSession, path: string): boolean {
+  return path.startsWith(`${session.sourcePath}/`) ||
+    path.startsWith(`${session.archivePath}/`) ||
+    mainSpecPaths(session).has(path);
+}
+
+async function readChangedPaths(command: BoundedCommandRunner, directory: string, baseline: string, revision: string, signal?: AbortSignal): Promise<readonly string[]> {
+  const { stdout } = await command("git", ["diff", "--name-only", "-z", baseline, revision], { cwd: directory, signal });
+  return stdout.split("\0").filter(Boolean);
+}
+
+/** Change перенесён в архив: активного каталога в коммите нет, архивный — есть. */
+async function isArchivedAt(
+  command: BoundedCommandRunner,
+  directory: string,
+  revision: string,
+  session: PendingArchiveSession,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const [source, archive] = await Promise.all([
+    readTree(command, directory, revision, session.sourcePath, signal, false),
+    readTree(command, directory, revision, session.archivePath, signal, false),
+  ]);
+  return source.size === 0 && archive.size > 0;
 }
 
 async function assertCommittedArchive(command: BoundedCommandRunner, directory: string, baseline: string, signal?: AbortSignal): Promise<string> {

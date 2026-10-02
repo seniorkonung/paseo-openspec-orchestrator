@@ -745,7 +745,11 @@ test("prompt требует одно решение, сохраняет зада
   assert.match(prompt, /one explicit decision/);
   assert.match(prompt, /without asking for another approval/);
   assert.match(prompt, /never reopen a completed task/);
-  assert.match(prompt, /append new unfinished tasks/);
+  // При планировании новые задачи встают в порядке выполнения, а не в конец.
+  assert.match(prompt, /add new unfinished tasks/);
+  assert.doesNotMatch(prompt, /append new unfinished tasks|Preserve the existing task list exactly/u);
+  assert.match(prompt, /strictly in file order/u);
+  assert.match(prompt, /may be inserted, reordered, and renumbered/u);
   assert.match(prompt, /Add new tasks only to phases that already have tasks: Phase 1\./u);
   assert.match(prompt, /The orchestrator plans every phase that has no tasks/u);
   assert.match(prompt, /"plannedPhases":\[1\]/u);
@@ -780,5 +784,59 @@ test("prompt требует одно решение, сохраняет зада
     taskScope: { kind: "phase-planning", phaseNumber: 2 },
   });
   assert.match(planningPrompt, /Add new tasks only to Phase 2\./u);
+  assert.match(planningPrompt, /Never describe an execution order that differs from file order/u);
   assert.match(planningPrompt, /"phaseNumber":2/u);
+});
+
+test("оценка finding-сессии различает неначатую, устранённую и устаревшую", async (context) => {
+  const fixture = await createRepository(context);
+  const { command } = createCommand(fixture);
+  const service = createChangeFindingResolutionService({
+    command,
+    phaseWork: stubPhaseWork(),
+    async createAgent() {},
+  });
+  const signal = new AbortController().signal;
+  const git = async (...args) =>
+    (await execFileAsync("git", args, { cwd: fixture.workspace })).stdout.trim();
+  const assess = (session) =>
+    service.assess({ workspaceDirectory: fixture.workspace, session, taskScope: initialScope, signal });
+
+  const plan = await service.plan(fixture.workspace, changeId, branch);
+  assert.equal(plan.kind, "finding-required");
+  assert.deepEqual(await assess(plan.session), { kind: "resumable" });
+
+  // Незавершённое устранение внутри change продолжает агент той же сессии.
+  await writeFile(join(fixture.changeRoot, "proposal.md"), "# Предложение\n\nЧерновик правки.\n");
+  await git("add", ".");
+  await git("commit", "-m", "docs(openspec): draft resolution");
+  assert.deepEqual(await assess(plan.session), { kind: "resumable" });
+
+  // Коммит пользователя с кодом: finding-этап принять его не может.
+  await writeFile(join(fixture.workspace, "application.ts"), "export const fixed = true;\n");
+  await git("add", ".");
+  await git("commit", "-m", "fix: ручная правка кода");
+  assert.deepEqual(await assess(plan.session), {
+    kind: "stale",
+    reason: "После baseline finding-сессии появились коммиты вне каталога change",
+  });
+
+  // Сессия от текущего HEAD принимает устранение, закоммиченное после него.
+  await git("push", "origin", branch);
+  const replanned = await service.plan(fixture.workspace, changeId, branch);
+  assert.equal(replanned.findingId, "F1");
+  assert.equal(replanned.session.baselineCommit, await git("rev-parse", "HEAD"));
+  await commitResolution(fixture);
+  assert.deepEqual(await assess(replanned.session), { kind: "resumable" });
+  // Для прежней сессии диапазон содержит код вне change.
+  assert.equal((await assess(plan.session)).kind, "stale");
+
+  // Переписанная история лишает сессию baseline.
+  await git("checkout", "--orphan", "rewritten");
+  await git("commit", "-m", "переписанная история");
+  await git("branch", "-M", branch);
+  assert.deepEqual(await assess(replanned.session), {
+    kind: "stale",
+    reason: "Текущий Git HEAD больше не продолжает baseline finding-сессии",
+  });
 });

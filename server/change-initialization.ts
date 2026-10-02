@@ -31,7 +31,13 @@ import {
   readReviewPullRequest,
   resolveReviewRepository,
 } from "./review-publication-gateway.ts";
+import { isCommitAncestor } from "./git-ancestry.ts";
 import { updateGitHubPullRequest } from "./github-pull-request-mutation.ts";
+import {
+  RESUMABLE_SESSION,
+  staleSession,
+  type SessionAssessment,
+} from "./session-assessment.ts";
 
 const MAX_PATH_LENGTH = 8_192;
 const FALLBACK_COMMIT_SUBJECT = "docs(openspec): add change scaffold";
@@ -133,6 +139,17 @@ export interface ChangeInitializationService {
     changeBranch: string,
     signal?: AbortSignal,
   ): Promise<PendingChangeInitializationSession>;
+  /**
+   * Оценивает сохранённую сессию инициализации, не меняя репозиторий. Сессия
+   * устарела, когда change или OpenSpec root изменились после её подготовки,
+   * Git HEAD сдвинулся до создания scaffold либо после baseline появились
+   * коммиты, которые не являются scaffold нового change.
+   */
+  assess(
+    workspaceDirectory: string,
+    session: PendingChangeInitializationSession,
+    signal: AbortSignal,
+  ): Promise<SessionAssessment>;
   initialize(
     workspaceDirectory: string,
     session: PendingChangeInitializationSession,
@@ -189,6 +206,45 @@ export function createChangeInitializationService(
         openSpecRoot: listedChange.openSpecRoot,
         existingRootPullRequest,
       });
+    },
+
+    async assess(workspaceDirectory, sessionInput, signal) {
+      const session = pendingChangeInitializationSessionSchema.parse(sessionInput);
+      const listedChange = await inspectChangeList(
+        command,
+        workspaceDirectory,
+        session.changeId,
+        signal,
+      );
+      if (listedChange.openSpecRoot !== session.openSpecRoot) {
+        return staleSession("OpenSpec root изменился после начала инициализации change");
+      }
+      if (!listedChange.exists) {
+        if (session.changeExisted) {
+          return staleSession(
+            `OpenSpec change «${session.changeId}» исчез после начала инициализации`,
+          );
+        }
+        return (await readHead(command, workspaceDirectory, signal)) === session.baselineCommit
+          ? RESUMABLE_SESSION
+          : staleSession("Git HEAD изменился до создания OpenSpec change");
+      }
+      // Существовавший change инициализация только публикует: новые коммиты
+      // ей не мешают.
+      if (session.changeExisted) return RESUMABLE_SESSION;
+      const paths = await readChangePaths(
+        command,
+        workspaceDirectory,
+        session.changeId,
+        session.openSpecRoot,
+        signal,
+      );
+      // Scaffold создан, но ещё не закоммичен: его зафиксирует шаг.
+      if (!(await isChangeCommitted(command, paths.gitRoot, paths.changeRepositoryPath, signal))) {
+        return RESUMABLE_SESSION;
+      }
+      const violation = await describeScaffoldRangeViolation(command, paths, session, signal);
+      return violation === null ? RESUMABLE_SESSION : staleSession(violation);
     },
 
     async initialize(workspaceDirectory, sessionInput, signal) {
@@ -529,36 +585,45 @@ async function verifyRecoveredCreationCommit(
   session: PendingChangeInitializationSession,
   signal?: AbortSignal,
 ): Promise<void> {
-  const head = await readHead(command, paths.gitRoot, signal);
+  let violation: string | null;
   try {
-    await command(
-      "git",
-      ["merge-base", "--is-ancestor", session.baselineCommit, head],
-      { cwd: paths.gitRoot, signal },
-    );
-    if (head === session.baselineCommit) throw new Error("Отсутствует scaffold-коммит");
-    const committedPaths = await readNullSeparatedCommand(
-      command,
-      "git",
-      ["diff", "--name-only", "-z", session.baselineCommit, head],
-      paths.gitRoot,
-      signal,
-    );
-    if (
-      committedPaths.length === 0 ||
-      committedPaths.some(
-        (path) => !isInsideRepositoryPath(path, paths.changeRepositoryPath),
-      )
-    ) {
-      throw new Error("Неверные пути scaffold-коммита");
-    }
+    violation = await describeScaffoldRangeViolation(command, paths, session, signal);
   } catch (error) {
     if (signal?.aborted) throw error;
     throw new ChangeInitializationError(
       "Не удалось подтвердить коммиты scaffold нового change",
     );
   }
+  if (violation !== null) throw new ChangeInitializationError(violation);
   await assertCleanWorktree(command, paths.gitRoot, signal);
+}
+
+/**
+ * Описывает, чем коммиты после baseline не подтверждают scaffold нового change:
+ * история переписана, scaffold-коммита нет либо в диапазон попали файлы вне
+ * каталога change. `null` — диапазон содержит только scaffold.
+ */
+async function describeScaffoldRangeViolation(
+  command: BoundedCommandRunner,
+  paths: Awaited<ReturnType<typeof readChangePaths>>,
+  session: PendingChangeInitializationSession,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const head = await readHead(command, paths.gitRoot, signal);
+  if (!(await isCommitAncestor(command, paths.gitRoot, session.baselineCommit, head, signal))) {
+    return "Git HEAD больше не продолжает baseline сессии инициализации";
+  }
+  const committedPaths = await readNullSeparatedCommand(
+    command,
+    "git",
+    ["diff", "--name-only", "-z", session.baselineCommit, head],
+    paths.gitRoot,
+    signal,
+  );
+  if (committedPaths.length === 0) return "После baseline нет коммита со scaffold нового change";
+  return committedPaths.some((path) => !isInsideRepositoryPath(path, paths.changeRepositoryPath))
+    ? "После baseline сессии инициализации появились коммиты вне каталога change"
+    : null;
 }
 
 async function ensureRootPullRequest(

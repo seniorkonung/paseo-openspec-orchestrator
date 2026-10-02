@@ -380,38 +380,33 @@ export function plannedPhaseNumbers(decision: PhaseWorkDecision): readonly numbe
 }
 
 /**
- * Проверяет, что этап добавил задачи только в разрешённые ему фазы.
+ * Описывает нарушение области задач этапа либо возвращает `null`.
  *
- * Для фазовых областей decision должен быть получен inspect с тем же
- * `scope.baseline`: тогда baseline-задачи образуют точный префикс snapshot.
+ * Для фазовых областей `snapshot` должен продолжать `scope.baseline`: тогда
+ * baseline-задачи образуют точный префикс snapshot.
  */
-export function assertPhaseTaskScope(
-  decision: PhaseWorkDecision,
+export function describeTaskScopeViolation(
+  snapshot: PhaseWorkSnapshot,
   scope: PhaseTaskScope,
-): void {
-  const { snapshot } = decision;
+): string | null {
   switch (scope.kind) {
     case "initial-planning": {
       // До первой проверки фаз история задач не фиксируется, поэтому
       // проверяются все задачи, а не только добавленные.
       const planned = new Set(scope.plannedPhases);
       const foreign = snapshot.tasks.filter(({ phaseNumber }) => !planned.has(phaseNumber));
-      if (foreign.length === 0) return;
+      if (foreign.length === 0) return null;
       const allowed = scope.plannedPhases.length === 0
         ? "До начального review задач не было ни в одной фазе, поэтому review и findings не добавляют задачи"
         : `До первой проверки фаз задачи можно добавлять только в фазы, где они уже были: ${formatPhases(scope.plannedPhases)}`;
-      throw new PhaseWorkError(
-        `${allowed}. Задачи ${formatTaskNumbers(foreign)} нарушают это правило: ${UNPLANNED_PHASE_RULE}`,
-      );
+      return `${allowed}. Задачи ${formatTaskNumbers(foreign)} нарушают это правило: ${UNPLANNED_PHASE_RULE}`;
     }
     case "phase-planning": {
       const foreign = addedTasks(snapshot, scope.baseline).filter(
         ({ phaseNumber }) => phaseNumber !== scope.phaseNumber,
       );
-      if (foreign.length === 0) return;
-      throw new PhaseWorkError(
-        `При планировании Phase ${scope.phaseNumber} новые задачи допускаются только в ней. Задачи ${formatTaskNumbers(foreign)} относятся к другим фазам: ${UNPLANNED_PHASE_RULE}`,
-      );
+      if (foreign.length === 0) return null;
+      return `При планировании Phase ${scope.phaseNumber} новые задачи допускаются только в ней. Задачи ${formatTaskNumbers(foreign)} относятся к другим фазам: ${UNPLANNED_PHASE_RULE}`;
     }
     case "implementation": {
       const knownPhases = new Set(scope.baseline.phases.map(({ number }) => number));
@@ -427,12 +422,24 @@ export function assertPhaseTaskScope(
           index === undefined ||
           index < currentIndex;
       });
-      if (foreign.length === 0) return;
-      throw new PhaseWorkError(
-        `Во время implementation run Phase ${scope.phaseNumber} новые задачи допускаются только в Phase ${scope.phaseNumber} или в новой фазе, вставленной в plan.md после неё с номером больше всех прежних. Задачи ${formatTaskNumbers(foreign)} нарушают это правило: ${UNPLANNED_PHASE_RULE}; номера существующих фаз менять нельзя`,
-      );
+      if (foreign.length === 0) return null;
+      return `Во время implementation run Phase ${scope.phaseNumber} новые задачи допускаются только в Phase ${scope.phaseNumber} или в новой фазе, вставленной в plan.md после неё с номером больше всех прежних. Задачи ${formatTaskNumbers(foreign)} нарушают это правило: ${UNPLANNED_PHASE_RULE}; номера существующих фаз менять нельзя`;
     }
   }
+}
+
+/**
+ * Проверяет, что этап добавил задачи только в разрешённые ему фазы.
+ *
+ * Для фазовых областей decision должен быть получен inspect с тем же
+ * `scope.baseline`: тогда baseline-задачи образуют точный префикс snapshot.
+ */
+export function assertPhaseTaskScope(
+  decision: PhaseWorkDecision,
+  scope: PhaseTaskScope,
+): void {
+  const violation = describeTaskScopeViolation(decision.snapshot, scope);
+  if (violation !== null) throw new PhaseWorkError(violation);
 }
 
 /** Проверяет фазы и задачи change и ограничивает их изменения областью этапа. */
@@ -553,30 +560,41 @@ function assertHistoricalProgress(
   previous: PhaseProgress | null,
 ): void {
   if (!previous) return;
-  if (snapshot.tasks.length < previous.tasks.length) {
-    throw new PhaseWorkError("Из OpenSpec удалена ранее известная задача");
+  const violation = describeTaskHistoryViolation(snapshot.tasks, previous);
+  if (violation !== null) throw new PhaseWorkError(violation);
+}
+
+/**
+ * Описывает, чем текущий список задач нарушает сохранённую историю, либо
+ * возвращает `null`. История сохранена, когда известные задачи образуют точный
+ * префикс списка, завершённые задачи остаются завершёнными, а новые добавлены
+ * незавершёнными.
+ */
+export function describeTaskHistoryViolation(
+  tasks: readonly PhaseTaskSnapshot[],
+  previous: PhaseProgress,
+): string | null {
+  if (tasks.length < previous.tasks.length) {
+    return "Из OpenSpec удалена ранее известная задача";
   }
-  previous.tasks.forEach((known, index) => {
-    const current = snapshot.tasks[index];
+  for (const [index, known] of previous.tasks.entries()) {
+    const current = tasks[index];
     if (
       !current ||
       current.id !== known.id ||
       current.number !== known.number ||
       current.fingerprint !== known.fingerprint
     ) {
-      throw new PhaseWorkError(
-        `Список задач перестал сохранять точный префикс на позиции ${index + 1}`,
-      );
+      return `Список задач перестал сохранять точный префикс на позиции ${index + 1}`;
     }
     if (known.done && !current.done) {
-      throw new PhaseWorkError(`Завершённая задача ${known.number} снова открыта`);
-    }
-  });
-  for (const added of snapshot.tasks.slice(previous.tasks.length)) {
-    if (added.done) {
-      throw new PhaseWorkError(`Новая задача ${added.number} уже отмечена завершённой`);
+      return `Завершённая задача ${known.number} снова открыта`;
     }
   }
+  for (const added of tasks.slice(previous.tasks.length)) {
+    if (added.done) return `Новая задача ${added.number} уже отмечена завершённой`;
+  }
+  return null;
 }
 
 async function readApplyInstructions(

@@ -62,21 +62,18 @@ async function executeChangeTasksStep(
             summary: `Пакет из ${implementationRun.batch.tasks.length} задач готов к implementation review`,
           };
         }
-        if (implementationRun.publication.kind === "unreviewed") {
-          return {
-            kind: "halt",
-            summary: "Для фазы нет implementation-коммитов",
-            message:
-              "OpenSpec не содержит задач для выполнения; проверьте план фазы",
-          };
-        }
+        // Пакет пуст: с его начала в фазе не завершено ни одной задачи.
+        // Когда run ещё ничего не проверял, задачи фазы убраны или перенесены
+        // вне этапа, и следующую работу нужно выбрать заново.
         return {
           kind: "continue",
           next: "inspect-phase-work",
           state: { pendingTaskExecutionSession: null, implementationRun: null },
-          summary: plan.reason === "phase-complete"
-            ? `Все задачи Phase ${implementationRun.phaseNumber} выполнены`
-            : `Все OpenSpec-задачи change ${change.id} выполнены`,
+          summary: implementationRun.publication.kind === "unreviewed"
+            ? `В Phase ${implementationRun.phaseNumber} не осталось задач для выполнения`
+            : plan.reason === "phase-complete"
+              ? `Все задачи Phase ${implementationRun.phaseNumber} выполнены`
+              : `Все OpenSpec-задачи change ${change.id} выполнены`,
         };
       }
       session = plan.session;

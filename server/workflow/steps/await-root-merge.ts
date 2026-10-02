@@ -15,23 +15,25 @@ async function awaitRootMerge(dependencies: AwaitRootMergeDependencies, context:
     return { kind: "halt", summary: "Не сохранена архивация change", message: "Перед финальным merge нужен проверенный архивный коммит" };
   }
   try {
-    await dependencies.archive.verifyArchived(dependencies.workspaceDirectory, archivedChange, context.signal);
+    // Финальный gate относится к текущему HEAD: коммиты после архивного
+    // допускаются, пока change остаётся в архиве.
+    const gateHead = await dependencies.archive.verifyArchived(dependencies.workspaceDirectory, archivedChange, context.signal);
     const head = await dependencies.rootPullRequest.synchronize(dependencies.workspaceDirectory, change.id, changeBranch, context.signal);
-    if (head !== archivedChange.commit) throw new ChangeArchiveError("Корневая ветка изменилась после архивации");
+    if (head !== gateHead) throw new ChangeArchiveError("Корневая ветка изменилась во время проверки архива");
     let pr = await dependencies.rootPullRequest.inspect(dependencies.workspaceDirectory, change.id, changeBranch, rootPullRequest, context.signal);
-    if (pr.head !== archivedChange.commit) throw new ChangeArchiveError("HEAD корневого PR изменился после архивации");
+    if (pr.head !== gateHead) throw new ChangeArchiveError("HEAD корневого PR не совпадает с проверенным архивом");
     if (pr.kind === "closed") throw new RootPullRequestError("Корневой pull request закрыт без merge");
     if (pr.kind === "merged") return { kind: "complete", summary: `Change ${change.id} архивирован, корневой PR слит` };
     if (pr.isDraft) {
       pr = await dependencies.rootPullRequest.makeReady(dependencies.workspaceDirectory, pr, context.signal);
-      if (pr.kind === "closed" || pr.head !== archivedChange.commit) throw new RootPullRequestError("Корневой PR изменился при переводе в Ready");
+      if (pr.kind === "closed" || pr.head !== gateHead) throw new RootPullRequestError("Корневой PR изменился при переводе в Ready");
       if (pr.kind === "merged") return { kind: "complete", summary: `Change ${change.id} архивирован, корневой PR слит` };
       if (pr.isDraft) throw new RootPullRequestError("Корневой pull request не перешёл в Ready");
     }
-    await dependencies.archive.verifyArchived(dependencies.workspaceDirectory, archivedChange, context.signal);
+    const finalGateHead = await dependencies.archive.verifyArchived(dependencies.workspaceDirectory, archivedChange, context.signal);
     const finalHead = await dependencies.rootPullRequest.synchronize(dependencies.workspaceDirectory, change.id, changeBranch, context.signal);
     const finalPr = await dependencies.rootPullRequest.inspect(dependencies.workspaceDirectory, change.id, changeBranch, pr.identity, context.signal);
-    if (finalHead !== archivedChange.commit || finalPr.head !== archivedChange.commit) throw new ChangeArchiveError("HEAD изменился после Ready");
+    if (finalGateHead !== gateHead || finalHead !== gateHead || finalPr.head !== gateHead) throw new ChangeArchiveError("HEAD изменился после Ready");
     if (finalPr.kind === "merged") return { kind: "complete", summary: `Change ${change.id} архивирован, корневой PR слит` };
     if (finalPr.kind === "closed") throw new RootPullRequestError("Корневой pull request закрыт без merge");
     if (finalPr.isDraft) throw new RootPullRequestError("Корневой pull request вернулся в Draft");

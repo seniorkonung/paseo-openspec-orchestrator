@@ -461,3 +461,79 @@ test("длинный change ID использует короткий fallback su
     "docs(openspec): add change scaffold",
   );
 });
+
+test("оценка сессии инициализации различает продолжаемую и устаревшую", async (context) => {
+  const fixture = await repository(context);
+  const service = createChangeInitializationService({ command: commandFor(fixture) });
+  const signal = new AbortController().signal;
+  const session = await service.prepare(fixture.workspace, changeId, changeBranch);
+  assert.deepEqual(await service.assess(fixture.workspace, session, signal), { kind: "resumable" });
+
+  // Change, существовавший при подготовке, исчез.
+  assert.deepEqual(
+    await service.assess(fixture.workspace, { ...session, changeExisted: true }, signal),
+    { kind: "stale", reason: `OpenSpec change «${changeId}» исчез после начала инициализации` },
+  );
+  // OpenSpec root изменился.
+  assert.deepEqual(
+    await service.assess(fixture.workspace, { ...session, openSpecRoot: "/other/root" }, signal),
+    { kind: "stale", reason: "OpenSpec root изменился после начала инициализации change" },
+  );
+
+  // Посторонний коммит до создания scaffold сдвигает baseline.
+  await writeFile(join(fixture.workspace, "notes.md"), "заметка\n");
+  await git(fixture.workspace, ["add", "."]);
+  await git(fixture.workspace, ["commit", "-m", "docs: посторонний коммит"]);
+  assert.deepEqual(await service.assess(fixture.workspace, session, signal), {
+    kind: "stale",
+    reason: "Git HEAD изменился до создания OpenSpec change",
+  });
+});
+
+test("коммит вне scaffold не останавливает инициализацию после сбоя публикации", async (context) => {
+  const fixture = await repository(context);
+  const service = createChangeInitializationService({ command: commandFor(fixture) });
+  const signal = new AbortController().signal;
+  const session = await service.prepare(fixture.workspace, changeId, changeBranch);
+  fixture.pushFailures = 1;
+  await assert.rejects(service.initialize(fixture.workspace, session), /Не удалось опубликовать ветку/u);
+
+  // Scaffold и его дополнения внутри change продолжают прежнюю сессию.
+  assert.deepEqual(await service.assess(fixture.workspace, session, signal), { kind: "resumable" });
+  await writeFile(join(fixture.changeRoot, "proposal.md"), "# Дополнение\n");
+  await git(fixture.workspace, ["add", "openspec"]);
+  await git(fixture.workspace, ["commit", "-m", "Дополнение scaffold"]);
+  assert.deepEqual(await service.assess(fixture.workspace, session, signal), { kind: "resumable" });
+
+  // Пользователь исправил причину сбоя коммитом вне change: scaffold этой
+  // сессией уже не подтвердить.
+  await writeFile(join(fixture.workspace, "mise.toml"), "[tools]\n");
+  await git(fixture.workspace, ["add", "."]);
+  await git(fixture.workspace, ["commit", "-m", "chore: настроить инструменты"]);
+  const stale = {
+    kind: "stale",
+    reason: "После baseline сессии инициализации появились коммиты вне каталога change",
+  };
+  assert.deepEqual(await service.assess(fixture.workspace, session, signal), stale);
+  await assert.rejects(service.initialize(fixture.workspace, session), new RegExp(stale.reason, "u"));
+
+  // Новая сессия принимает change как существующий и только публикует его.
+  const replanned = await service.prepare(fixture.workspace, changeId, changeBranch);
+  assert.equal(replanned.changeExisted, true);
+  assert.deepEqual(await service.assess(fixture.workspace, replanned, signal), { kind: "resumable" });
+  const head = await git(fixture.workspace, ["rev-parse", "HEAD"]);
+  const initialized = await service.initialize(fixture.workspace, replanned);
+  assert.equal(initialized.pullRequest.number, 41);
+  assert.equal(await git(fixture.workspace, ["rev-parse", "HEAD"]), head);
+  assert.equal(await git(fixture.remote, ["rev-parse", changeBranch]), head);
+  assert.equal(fixture.newCalls, 1);
+
+  // Переписанная история лишает сессию, создавшую change, её baseline.
+  await git(fixture.workspace, ["checkout", "-q", "--orphan", "rewritten"]);
+  await git(fixture.workspace, ["commit", "-m", "переписанная история"]);
+  await git(fixture.workspace, ["branch", "-M", changeBranch]);
+  assert.deepEqual(await service.assess(fixture.workspace, session, signal), {
+    kind: "stale",
+    reason: "Git HEAD больше не продолжает baseline сессии инициализации",
+  });
+});

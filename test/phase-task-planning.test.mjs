@@ -47,6 +47,7 @@ test("prompt прямо поручает openspec-update-change только о�
   assert.match(prompt, /Do not inspect the command catalog first/u);
   assert.match(prompt, /interactive confirmation/u);
   assert.match(prompt, /at least one incomplete task numbered 2\.\*/u);
+  assert.match(prompt, /strictly in file order\. List the new tasks in the order they must run/u);
   assert.doesNotMatch(prompt, /agent\.commands|commands\(\)/u);
 });
 
@@ -218,8 +219,14 @@ test("phase planning отклоняет правки кода и принима�
     updateNotificationLabel: async () => {},
     logger: { error() {}, warn() {} },
   });
-  const prepared = await service.prepare(
+  const plan = await service.prepare(
     workspace, "phase-change", "change/phase-change", "change/phase-change", 2, session.baselineProgress,
+  );
+  assert.equal(plan.kind, "planning-required");
+  const prepared = plan.session;
+  assert.deepEqual(
+    await service.assess(workspace, prepared, new AbortController().signal),
+    { kind: "resumable" },
   );
   const controller = new AbortController();
   let toolResult;
@@ -261,4 +268,91 @@ test("phase planning отклоняет правки кода и принима�
   assert.equal(toolResult.isError, undefined);
   assert.equal(completed.commit, await git("rev-parse", "HEAD"));
   assert.equal(await git("rev-list", "--count", `${prepared.baselineCommit}..HEAD`), "3");
+  const signal = new AbortController().signal;
+  // Проверенный коммит с задачами продолжается той же сессией.
+  assert.deepEqual(await service.assess(workspace, prepared, signal), { kind: "resumable" });
+
+  // Задачи фазы уже есть в репозитории: агенту планировать нечего.
+  const alreadyPlanned = await service.prepare(
+    workspace, "phase-change", "change/phase-change", "change/phase-change", 2, session.baselineProgress,
+  );
+  assert.equal(alreadyPlanned.kind, "already-planned");
+  assert.equal(alreadyPlanned.progress, session.baselineProgress);
+
+  // Посторонний коммит после baseline эта сессия принять не может.
+  await writeFile(join(workspace, "application.ts"), "export const foreign = true;\n");
+  await git("add", ".");
+  await git("commit", "-m", "feat: посторонняя правка");
+  assert.deepEqual(await service.assess(workspace, prepared, signal), {
+    kind: "stale",
+    reason: "После baseline planning-сессии появились коммиты вне task-артефактов",
+  });
+  // Переписанная история лишает сессию baseline.
+  await git("reset", "--hard", prepared.baselineCommit);
+  await git("commit", "--amend", "-m", "Начальное состояние, переписано");
+  await writeFile(taskPath, "- [x] 1.1 Готовая задача\n- [ ] 2.1 Новая задача\n");
+  await git("add", ".");
+  await git("commit", "-m", "Планирование фазы заново");
+  assert.deepEqual(await service.assess(workspace, prepared, signal), {
+    kind: "stale",
+    reason: "Planning commit больше не продолжает baseline",
+  });
+});
+
+test("незавершённое планирование в task-артефактах продолжает та же сессия", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "phase-task-planning-partial-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const taskPath = join(workspace, "openspec", "changes", "phase-change", "tasks.md");
+  await mkdir(join(workspace, "openspec", "changes", "phase-change"), { recursive: true });
+  const git = async (...args) => (await execFileAsync("git", args, { cwd: workspace })).stdout.trim();
+  await git("init", "-b", "change/phase-change");
+  await git("config", "user.name", "OpenSpec Test");
+  await git("config", "user.email", "openspec@example.test");
+  await writeFile(taskPath, "- [x] 1.1 Готовая задача\n");
+  await git("add", ".");
+  await git("commit", "-m", "Начальное состояние");
+  const preserved = { ...session.baselineProgress.tasks[0], phaseNumber: 1 };
+  const added = {
+    id: "task-b", number: "2.1", description: "2.1 Новая задача", done: false,
+    phaseNumber: 2, fingerprint: phaseTaskFingerprint("task-b", "2.1", "2.1 Новая задача"),
+  };
+  // Список задач читается из файла: задача фазы появляется только со своей строкой.
+  const phaseWork = {
+    async inspect() {
+      const planned = (await git("show", "HEAD:openspec/changes/phase-change/tasks.md")).includes("2.1");
+      return planned
+        ? { kind: "implementation-required", phaseNumber: 2, runNumber: 4,
+          progress: session.baselineProgress, snapshot: { tasks: [preserved, added] } }
+        : { kind: "planning-required", phaseNumber: 2, progress: session.baselineProgress,
+          snapshot: { tasks: [preserved], taskArtifactPaths: [taskPath] } };
+    },
+  };
+  const service = createPhaseTaskPlanningService({
+    command: async (executable, args, options) => {
+      const result = await execFileAsync(executable, args, { cwd: options.cwd, signal: options.signal });
+      return { stdout: String(result.stdout), stderr: String(result.stderr) };
+    },
+    phaseWork,
+    async createAgent() { throw new Error("Агент не нужен"); },
+    updateNotificationLabel: async () => {},
+    logger: { error() {}, warn() {} },
+  });
+  const plan = await service.prepare(
+    workspace, "phase-change", "change/phase-change", "change/phase-change", 2, session.baselineProgress,
+  );
+  assert.equal(plan.kind, "planning-required");
+  const signal = new AbortController().signal;
+
+  // Агент закоммитил заготовку без задач фазы и был прерван: проверку такой
+  // коммит ещё не проходит, но завершить планирование этой сессией можно.
+  await writeFile(taskPath, "- [x] 1.1 Готовая задача\n\n## Phase 2\n");
+  await git("add", ".");
+  await git("commit", "-m", "docs(openspec): начать планирование фазы");
+  assert.deepEqual(await service.assess(workspace, plan.session, signal), { kind: "resumable" });
+
+  // Задачи фазы дописаны: сессия остаётся продолжаемой и уже подтверждается.
+  await writeFile(taskPath, "- [x] 1.1 Готовая задача\n\n## Phase 2\n\n- [ ] 2.1 Новая задача\n");
+  await git("add", ".");
+  await git("commit", "-m", "docs(openspec): спланировать задачи фазы");
+  assert.deepEqual(await service.assess(workspace, plan.session, signal), { kind: "resumable" });
 });

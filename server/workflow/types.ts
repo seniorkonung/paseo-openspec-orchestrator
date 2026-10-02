@@ -513,6 +513,43 @@ export interface WorkflowStepDefinition {
   readonly run: WorkflowStepFunction;
 }
 
+/** Итог согласования сохранённого состояния с рабочей областью перед шагом. */
+export type WorkflowReconciliation =
+  /** Состояние соответствует рабочей области либо её факты недоступны для сверки. */
+  | { readonly kind: "unchanged" }
+  /**
+   * Состояние приведено к рабочей области. Движок сохраняет его как checkpoint
+   * шага `next` и только затем запускает этот шаг.
+   */
+  | {
+      readonly kind: "adopted";
+      readonly next: WorkflowStepId;
+      readonly state: WorkflowState;
+      readonly summary: string;
+    }
+  /** Рабочая область требует действия пользователя; `message` называет его. */
+  | { readonly kind: "halt"; readonly summary: string; readonly message: string };
+
+export interface WorkflowReconcileContext {
+  readonly signal: AbortSignal;
+  /** Шаг, который движок собирается запустить. */
+  readonly stepId: WorkflowStepId;
+  readonly state: Readonly<WorkflowState>;
+}
+
+/**
+ * Согласует сохранённое состояние с рабочей областью перед каждым шагом.
+ *
+ * Рабочая область — источник истины: если пользователь изменил её вне этапа
+ * workflow, согласование переносит состояние на фактические данные вместо
+ * остановки. Ожидаемые расхождения возвращаются результатом. Исключение
+ * означает, что согласование не выполнено: движок запускает шаг с прежним
+ * состоянием, и о проблеме сообщает сам шаг.
+ */
+export type WorkflowReconciler = (
+  context: WorkflowReconcileContext,
+) => Promise<WorkflowReconciliation>;
+
 /**
  * Полный исполняемый контракт workflow. Конкретные зависимости уже связаны
  * со шагами в точке сборки и не видны универсальному движку.
@@ -520,6 +557,7 @@ export interface WorkflowStepDefinition {
 export interface WorkflowDefinition {
   readonly startStepId: WorkflowStepId;
   readonly steps: readonly WorkflowStepDefinition[];
+  readonly reconcile?: WorkflowReconciler;
 }
 
 export function createInitialWorkflowState(): WorkflowState {

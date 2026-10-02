@@ -8,6 +8,7 @@ import {
   STAGE_SCOPE_RULE,
   buildAgentPrompt,
   completionInstruction,
+  taskHistoryRule,
   taskScopeRule,
   taskScopeWorkflowData,
   type TaskScopePromptInput,
@@ -33,6 +34,7 @@ import {
   prepareReviewPublication,
 } from "./change-review-publication.ts";
 import { planningBranchSchema } from "./change-branch.ts";
+import { isCommitAncestor } from "./git-ancestry.ts";
 import {
   createChangeReviewVerification,
   type ChangeReviewVerificationOptions,
@@ -53,6 +55,11 @@ import {
   updateAgentNotificationLabel,
   type AgentNotificationLabelUpdater,
 } from "./paseo-agent-labels.ts";
+import {
+  RESUMABLE_SESSION,
+  staleSession,
+  type SessionAssessment,
+} from "./session-assessment.ts";
 
 export {
   ChangeReviewError,
@@ -93,6 +100,16 @@ export interface ChangeReviewService {
     phaseNumber: number | null,
     signal?: AbortSignal,
   ): Promise<PendingReviewSession>;
+  /**
+   * Оценивает сохранённую review-сессию, не меняя репозиторий. Review может
+   * продолжаться после любых новых коммитов; сессия устаревает, только когда
+   * Git HEAD перестаёт продолжать её baseline.
+   */
+  assess(
+    workspaceDirectory: string,
+    session: PendingReviewSession,
+    signal: AbortSignal,
+  ): Promise<SessionAssessment>;
   run(request: ChangeReviewRequest): Promise<CompletedChangeReview>;
 }
 
@@ -129,8 +146,23 @@ export function createChangeReviewService(
   const agentDrainTimeoutMs =
     options.agentDrainTimeoutMs ?? DEFAULT_AGENT_DRAIN_TIMEOUT_MS;
   const logger = options.logger ?? console;
+  const STALE_BASELINE = "Текущий Git HEAD больше не продолжает baseline review-сессии";
+  const continuesBaseline = (
+    gitRoot: string,
+    session: PendingReviewSession,
+    signal: AbortSignal,
+  ): Promise<boolean> =>
+    isCommitAncestor(command, gitRoot, session.baselineCommit, "HEAD", signal);
 
   return {
+    async assess(workspaceDirectory, sessionInput, signal) {
+      const session = pendingReviewSessionSchema.parse(sessionInput);
+      const context = await verification.readContext(workspaceDirectory, session.changeId, signal);
+      return (await continuesBaseline(context.gitRoot, session, signal))
+        ? RESUMABLE_SESSION
+        : staleSession(STALE_BASELINE);
+    },
+
     async plan(workspaceDirectory, changeId, changeBranch, activeBranch, phaseNumber, signal) {
       const context = await verification.readContext(
         workspaceDirectory,
@@ -178,6 +210,11 @@ export function createChangeReviewService(
         changeId,
         request.signal,
       );
+      // Устаревшую сессию сбрасывает согласование перед шагом; здесь она
+      // возможна только при изменении репозитория после него.
+      if (!(await continuesBaseline(context.gitRoot, session, request.signal))) {
+        throw new ChangeReviewError(STALE_BASELINE);
+      }
       await assertReviewPublicationRecovery(
         context.gitRoot,
         publicationTarget,
@@ -366,7 +403,7 @@ export function changeReviewPrompt(input: {
     body: [
       "The root change branch is already published. Verify that it still descends from the saved baseline.",
       reviewInstruction,
-      input.alreadyCommitted ? "" : `Follow the review skill for any corrections to code or artifacts. Preserve the workflow's recorded task history: task IDs, numbers, descriptions, and order stay the same, completed tasks stay complete, and new tasks start incomplete. ${taskScopeRule(input.taskScope)} Remaining findings do not block this stage: record them for the later finding-resolution stages. If the review cannot be finished or needs user input, say what is missing and keep the conversation in this session instead of completing the stage.`,
+      input.alreadyCommitted ? "" : `Follow the review skill for any corrections to code or artifacts. ${taskHistoryRule(input.taskScope)} ${taskScopeRule(input.taskScope)} Remaining findings do not block this stage: record them for the later finding-resolution stages. If the review cannot be finished or needs user input, say what is missing and keep the conversation in this session instead of completing the stage.`,
       input.alreadyCommitted ? "" : `Keep \`review.md\` at \`${input.reviewRepositoryPath}\`, materially update an existing report, and commit the report and all stage corrections in at least one new commit.`,
       "Do not push or create a pull request. The orchestrator verifies and publishes the review commits to the existing Draft root pull request.",
     ],

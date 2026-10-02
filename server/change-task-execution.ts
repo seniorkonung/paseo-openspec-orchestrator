@@ -51,6 +51,11 @@ import {
   updateAgentNotificationLabel,
   type AgentNotificationLabelUpdater,
 } from "./paseo-agent-labels.ts";
+import {
+  RESUMABLE_SESSION,
+  staleSession,
+  type SessionAssessment,
+} from "./session-assessment.ts";
 
 export {
   ChangeTaskExecutionError,
@@ -88,6 +93,16 @@ export interface ChangeTaskExecutionService {
     run: ImplementationRun,
     signal?: AbortSignal,
   ): Promise<ChangeTaskExecutionPlan>;
+  /**
+   * Оценивает сохранённую task-сессию, не меняя репозиторий. Сессия устарела,
+   * когда её задача, список задач или baseline больше не соответствуют
+   * репозиторию: продолжить её нельзя, задачу нужно выбрать заново.
+   */
+  assess(
+    workspaceDirectory: string,
+    session: PendingTaskExecutionSession,
+    signal: AbortSignal,
+  ): Promise<SessionAssessment>;
   run(request: ChangeTaskExecutionRequest): Promise<CompletedChangeTask>;
 }
 
@@ -119,6 +134,19 @@ export function createChangeTaskExecutionService(
     plan: (workspaceDirectory, run, signal) =>
       planChangeTaskExecution(command, workspaceDirectory, run, signal),
 
+    async assess(workspaceDirectory, sessionInput, signal) {
+      const session = pendingTaskExecutionSessionSchema.parse(sessionInput);
+      const gitRoot = await readTaskGitRoot(command, workspaceDirectory, signal);
+      const recovery = await inspectTaskExecutionRecovery(
+        command,
+        workspaceDirectory,
+        gitRoot,
+        session,
+        signal,
+      );
+      return recovery.kind === "stale" ? staleSession(recovery.reason) : RESUMABLE_SESSION;
+    },
+
     async run(request) {
       throwIfSignalAborted(request.signal);
       const session = pendingTaskExecutionSessionSchema.parse(request.session);
@@ -134,6 +162,10 @@ export function createChangeTaskExecutionService(
         session,
         request.signal,
       );
+      // Устаревшую сессию сбрасывает согласование перед шагом; здесь она
+      // возможна только при изменении репозитория после него.
+      if (recovery.kind === "stale") throw new ChangeTaskExecutionError(recovery.reason);
+      const alreadyCommitted = recovery.kind === "committed";
 
       const host = await mcpHost.listen();
       let completedTask: CompletedChangeTask | null = null;
@@ -267,7 +299,7 @@ export function createChangeTaskExecutionService(
         await agent.send(
           changeTaskExecutionPrompt({
             session,
-            alreadyCommitted: recovery.alreadyCommitted,
+            alreadyCommitted,
           }),
         );
 

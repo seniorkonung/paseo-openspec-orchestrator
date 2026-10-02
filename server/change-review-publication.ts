@@ -2,6 +2,7 @@ import { z } from "zod";
 import { runBoundedCommand, type BoundedCommandRunner } from "./bounded-command.ts";
 import { commitHashSchema } from "./change-artifact-model.ts";
 import { changeBranchFor, changeBranchSchema } from "./change-branch.ts";
+import { isCommitAncestor } from "./git-ancestry.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import {
   assertCleanReviewWorktree,
@@ -136,9 +137,15 @@ export async function assertReviewPublicationRecovery(
   if (repository.host !== target.repositoryHost ||
       repository.nameWithOwner.toLowerCase() !== target.repositoryNameWithOwner.toLowerCase() ||
       repository.url !== target.repositoryUrl ||
-      current !== target.parentBranch ||
-      (remote !== target.baselineCommit && remote !== local)) {
+      current !== target.parentBranch) {
     throw new ChangeReviewPublicationError("Состояние ветки или репозитория изменилось во время review");
+  }
+  // Origin может отставать от локальной ветки на любой её коммит: публикация
+  // остаётся fast-forward.
+  if (!(await isCommitAncestor(command, workspaceDirectory, remote, local, signal))) {
+    throw new ChangeReviewPublicationError(
+      "Origin корневой ветки содержит коммиты, которых нет в локальной ветке",
+    );
   }
   await assertRootPr(workspaceDirectory, changeId, target.parentBranch, remote, target.parentPullRequestNumber, signal, command);
 }

@@ -17,7 +17,9 @@ import type { ImplementationReviewService } from "../../implementation-review.ts
 import type { ImplementationRunVerifier } from "../../implementation-run-verification.ts";
 import type { PhaseWorkService } from "../../phase-work.ts";
 import type { PhaseTaskPlanningService } from "../../phase-task-planning.ts";
+import type { RootBranchService } from "../../root-branch-state.ts";
 import type { RootPullRequestService } from "../../root-pull-request.ts";
+import { createWorkflowReconciler } from "../reconciliation.ts";
 import type { WorkflowDefinition } from "../types.ts";
 import { createCheckAgentProfilesStep } from "./check-agent-profiles.ts";
 import { createCheckGitBranchStep } from "./check-git-branch.ts";
@@ -68,6 +70,7 @@ export interface OpenSpecWorkflowDependencies {
   readonly changeTaskExecution: ChangeTaskExecutionService;
   readonly phaseWork: PhaseWorkService;
   readonly phaseTaskPlanning: PhaseTaskPlanningService;
+  readonly rootBranch: RootBranchService;
   readonly rootPullRequest: RootPullRequestService;
   readonly changeArchive: ChangeArchiveService;
 }
@@ -79,8 +82,52 @@ export interface OpenSpecWorkflowDependencies {
 export function createOpenSpecWorkflow(
   dependencies: OpenSpecWorkflowDependencies,
 ): WorkflowDefinition {
+  const { workspaceDirectory } = dependencies;
   return {
     startStepId: "check-agent-profiles",
+    // Перед каждым шагом сохранённое состояние приводится к репозиторию:
+    // оценку pending-сессии выполняет этап, которому она принадлежит.
+    reconcile: createWorkflowReconciler({
+      workspaceDirectory,
+      rootBranch: dependencies.rootBranch,
+      phaseWork: dependencies.phaseWork,
+      sessions: {
+        changeInitialization: (session, signal) =>
+          dependencies.changeInitialization.assess(workspaceDirectory, session, signal),
+        artifact: (changeId, session, signal) =>
+          dependencies.changeArtifacts.assess(workspaceDirectory, changeId, session, signal),
+        review: (session, signal) =>
+          dependencies.changeReview.assess(workspaceDirectory, session, signal),
+        findingResolution: (session, taskScope, signal) =>
+          dependencies.changeFindingResolution.assess({
+            workspaceDirectory,
+            session,
+            taskScope,
+            signal,
+          }),
+        implementationFindingResolution: (session, taskScope, signal) =>
+          dependencies.implementationFindingResolution.assess({
+            workspaceDirectory,
+            session,
+            taskScope,
+            signal,
+          }),
+        taskExecution: (session, signal) =>
+          dependencies.changeTaskExecution.assess(workspaceDirectory, session, signal),
+        implementationReview: (run, session, taskBaseline, signal) =>
+          dependencies.implementationReview.assess({
+            workspaceDirectory,
+            run,
+            session,
+            taskBaseline,
+            signal,
+          }),
+        phaseTaskPlanning: (session, signal) =>
+          dependencies.phaseTaskPlanning.assess(workspaceDirectory, session, signal),
+        archive: (session, signal) =>
+          dependencies.changeArchive.assess(workspaceDirectory, session, signal),
+      },
+    }),
     steps: Object.freeze([
       createCheckAgentProfilesStep({
         readAgentProfiles: dependencies.readAgentProfiles,

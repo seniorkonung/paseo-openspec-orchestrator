@@ -7,6 +7,7 @@ import {
   PhaseTaskPlanningError,
   type PhaseTaskPlanningService,
 } from "../../phase-task-planning.ts";
+import { planningRunSchema } from "../../planning-run-model.ts";
 import type {
   WorkflowStepContext,
   WorkflowStepDefinition,
@@ -32,9 +33,12 @@ async function planPhaseTasksStep(
     };
   }
   let session = context.state.pendingPhaseTaskPlanningSession;
+  // Состояние, от которого строятся checkpoint шага: baseline run следует за
+  // baseline новой сессии.
+  let state = context.state;
   try {
     if (!session) {
-      session = await dependencies.phaseTaskPlanning.prepare(
+      const plan = await dependencies.phaseTaskPlanning.prepare(
         dependencies.workspaceDirectory,
         planningRun.changeId,
         planningRun.changeBranch,
@@ -43,10 +47,26 @@ async function planPhaseTasksStep(
         planningRun.baselineProgress,
         context.signal,
       );
-      await context.checkpointState({
+      if (plan.kind === "already-planned") {
+        return {
+          kind: "continue",
+          next: "publish-change",
+          state: { phaseProgress: plan.progress, pendingPhaseTaskPlanningSession: null },
+          summary: `Задачи Phase ${planningRun.phaseNumber} уже есть в репозитории`,
+        };
+      }
+      session = plan.session;
+      state = {
         ...context.state,
+        // Планирование начинается с текущего HEAD: коммиты, появившиеся после
+        // подготовки run, входят в его baseline.
+        planningRun: planningRunSchema.parse({
+          ...planningRun,
+          rootBaselineCommit: session.baselineCommit,
+        }),
         pendingPhaseTaskPlanningSession: session,
-      });
+      };
+      await context.checkpointState(state);
     }
     const profiles = await dependencies.readAgentProfiles();
     const resolution = resolveRequiredAgentProfile(profiles, "Ultra");
@@ -66,7 +86,7 @@ async function planPhaseTasksStep(
       }]),
       onCompleted: async (completion) => {
         await context.checkpointState({
-          ...context.state,
+          ...state,
           phaseProgress: completion.progress,
           // Сохраняем session до атомарного перехода шага. Если процесс
           // остановится после принятого commit, recovery проверит его и не
@@ -79,6 +99,7 @@ async function planPhaseTasksStep(
       kind: "continue",
       next: "publish-change",
       state: {
+        planningRun: state.planningRun,
         phaseProgress: completed.progress,
         pendingPhaseTaskPlanningSession: null,
       },

@@ -355,3 +355,218 @@ test("retry получает последнее состояние checkpoint в
     "completed",
   );
 });
+
+test("согласование перед шагом передаёт шагу состояние, принятое из рабочей области", async (context) => {
+  const received = [];
+  const reconciledSteps = [];
+  const workflow = {
+    startStepId: "prepare",
+    steps: [
+      {
+        id: "prepare",
+        label: "Готовлю состояние",
+        async run() {
+          return {
+            kind: "continue",
+            next: "work",
+            state: { changeBranch, activeBranch: changeBranch, change: { id: "engine-check" } },
+            summary: "Состояние подготовлено",
+          };
+        },
+      },
+      {
+        id: "work",
+        label: "Выполняю работу",
+        async run() {
+          throw new Error("Согласование должно направить workflow на другой шаг");
+        },
+      },
+      {
+        id: "replan",
+        label: "Планирую заново",
+        async run({ state }) {
+          received.push(state.change);
+          return { kind: "complete", summary: "План построен заново" };
+        },
+      },
+    ],
+    async reconcile({ stepId, state }) {
+      reconciledSteps.push(stepId);
+      if (stepId !== "work") return { kind: "unchanged" };
+      return {
+        kind: "adopted",
+        next: "replan",
+        state: { ...state, change: { id: "engine-check", title: "Принятый change" } },
+        summary: "Принято состояние репозитория: список задач изменён",
+      };
+    },
+  };
+  const { engine, ledger } = await createRuntime(context, "workspace-reconcile", workflow);
+
+  engine.command("workspace-reconcile", "start");
+  await settleWorkflow();
+
+  const snapshot = ledger.get("workspace-reconcile");
+  assert.equal(snapshot.lifecycle.status, "completed");
+  assert.deepEqual(reconciledSteps, ["prepare", "work"]);
+  assert.deepEqual(received, [{ id: "engine-check", title: "Принятый change" }]);
+  assert.deepEqual(
+    snapshot.history.map(({ text, outcome }) => [text, outcome]),
+    [
+      ["Состояние подготовлено", "succeeded"],
+      ["Принято состояние репозитория: список задач изменён", "succeeded"],
+      ["План построен заново", "succeeded"],
+    ],
+  );
+  assert.deepEqual(snapshot.change, { id: "engine-check", title: "Принятый change" });
+});
+
+test("принятое состояние сохраняется в checkpoint до запуска шага", async (context) => {
+  let rejectStep = true;
+  const workflow = {
+    startStepId: "work",
+    steps: [{
+      id: "work",
+      label: "Выполняю работу",
+      async run({ state }) {
+        if (rejectStep) {
+          return { kind: "halt", summary: "Шаг остановлен", message: "Нажмите «Повторить»" };
+        }
+        return { kind: "complete", summary: `Ветка ${state.changeBranch}` };
+      },
+    }],
+    async reconcile({ state }) {
+      if (state.changeBranch) return { kind: "unchanged" };
+      return {
+        kind: "adopted",
+        next: "work",
+        state: { ...state, changeBranch, activeBranch: changeBranch },
+        summary: "Принято состояние репозитория",
+      };
+    },
+  };
+  const { engine, ledger } = await createRuntime(context, "workspace-adopted-checkpoint", workflow);
+
+  engine.command("workspace-adopted-checkpoint", "start");
+  await settleWorkflow();
+  assert.equal(ledger.get("workspace-adopted-checkpoint").lifecycle.status, "failed");
+  assert.equal(
+    ledger.getWorkflowCheckpoint("workspace-adopted-checkpoint").state.changeBranch,
+    changeBranch,
+  );
+
+  rejectStep = false;
+  engine.command("workspace-adopted-checkpoint", "retry");
+  await settleWorkflow();
+  const snapshot = ledger.get("workspace-adopted-checkpoint");
+  assert.equal(snapshot.lifecycle.status, "completed");
+  // Повтор не принимает состояние второй раз: оно уже соответствует репозиторию.
+  assert.deepEqual(
+    snapshot.history.map(({ text }) => text),
+    ["Принято состояние репозитория", "Шаг остановлен", `Ветка ${changeBranch}`],
+  );
+});
+
+test("согласование останавливает workflow с действием для пользователя и не запускает шаг", async (context) => {
+  let diverged = true;
+  let runs = 0;
+  const workflow = {
+    startStepId: "work",
+    steps: [{
+      id: "work",
+      label: "Выполняю работу",
+      async run() {
+        runs += 1;
+        return { kind: "complete", summary: "Работа выполнена" };
+      },
+    }],
+    async reconcile() {
+      return diverged
+        ? {
+            kind: "halt",
+            summary: "Локальная ветка и origin разошлись",
+            message: "Опубликуйте локальную ветку и нажмите «Повторить»",
+          }
+        : { kind: "unchanged" };
+    },
+  };
+  const { engine, ledger } = await createRuntime(context, "workspace-reconcile-halt", workflow);
+
+  engine.command("workspace-reconcile-halt", "start");
+  await settleWorkflow();
+  const halted = ledger.get("workspace-reconcile-halt");
+  assert.equal(halted.lifecycle.status, "failed");
+  assert.equal(halted.lifecycle.message, "Опубликуйте локальную ветку и нажмите «Повторить»");
+  assert.deepEqual(
+    halted.history.map(({ text, outcome }) => [text, outcome]),
+    [["Локальная ветка и origin разошлись", "failed"]],
+  );
+  assert.equal(runs, 0);
+
+  diverged = false;
+  engine.command("workspace-reconcile-halt", "retry");
+  await settleWorkflow();
+  assert.equal(ledger.get("workspace-reconcile-halt").lifecycle.status, "completed");
+  assert.equal(runs, 1);
+});
+
+test("сбой согласования и некорректное принятое состояние не мешают шагу", async (context) => {
+  context.mock.method(console, "error", () => undefined);
+  for (const failure of ["исключение", "некорректное состояние", "неизвестный шаг", "недопустимый текст"]) {
+    await context.test(failure, async (subcontext) => {
+      const received = [];
+      const workflow = {
+        startStepId: "work",
+        steps: [{
+          id: "work",
+          label: "Выполняю работу",
+          async run({ state }) {
+            received.push(state.changeBranch);
+            return { kind: "complete", summary: "Работа выполнена" };
+          },
+        }],
+        async reconcile({ state }) {
+          if (failure === "исключение") throw new Error("git недоступен");
+          // Пустой текст действия не проходит схему ledger.
+          if (failure === "недопустимый текст") {
+            return { kind: "adopted", next: "work", state, summary: "" };
+          }
+          return failure === "некорректное состояние"
+            ? {
+                kind: "adopted",
+                next: "work",
+                // Корневая и активная ветки устанавливаются только вместе.
+                state: { ...state, changeBranch },
+                summary: "Принято состояние репозитория",
+              }
+            : { kind: "adopted", next: "missing", state, summary: "Принято состояние репозитория" };
+        },
+      };
+      const workspaceId = `workspace-reconcile-${{
+        "исключение": "throw",
+        "некорректное состояние": "invalid",
+        "неизвестный шаг": "missing",
+        "недопустимый текст": "text",
+      }[failure]}`;
+      const { engine, ledger } = await createRuntime(subcontext, workspaceId, workflow);
+      engine.command(workspaceId, "start");
+      await settleWorkflow();
+      const snapshot = ledger.get(workspaceId);
+      if (failure === "неизвестный шаг" || failure === "недопустимый текст") {
+        // Workflow останавливается явно, а не остаётся в running без шага.
+        assert.equal(snapshot.lifecycle.status, "failed");
+        assert.match(
+          snapshot.lifecycle.message,
+          failure === "неизвестный шаг"
+            ? /Шаг «missing» не найден/u
+            : /Не удалось применить согласование состояния с репозиторием/u,
+        );
+        assert.equal(snapshot.currentAction, null);
+        assert.deepEqual(received, []);
+        return;
+      }
+      assert.equal(snapshot.lifecycle.status, "completed");
+      assert.deepEqual(received, [null]);
+    });
+  }
+});

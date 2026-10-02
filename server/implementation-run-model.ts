@@ -34,7 +34,11 @@ export const implementationTaskCommitSchema = z
   .object({
     taskId: taskIdSchema,
     taskNumber: taskNumberSchema,
-    commit: commitHashSchema,
+    /**
+     * Завершающий коммит задачи. `null` — граница неизвестна: задача завершена
+     * вне task-сессии либо её коммит исчез после переписывания истории.
+     */
+    commit: commitHashSchema.nullable(),
   })
   .strict();
 
@@ -44,7 +48,8 @@ const nonEmptyTaskCommitsSchema = z
   .max(MAX_IMPLEMENTATION_BATCH_TASKS)
   .superRefine((tasks, context) => {
     for (const key of ["taskId", "taskNumber", "commit"] as const) {
-      if (new Set(tasks.map((task) => task[key])).size !== tasks.length) {
+      const values = tasks.map((task) => task[key]).filter((value) => value !== null);
+      if (new Set(values).size !== values.length) {
         context.addIssue({
           code: "custom",
           message: `Пакет implementation содержит повторяющийся ${key}`,
@@ -140,16 +145,19 @@ export const implementationRunSchema = z
   });
 
 export type ImplementationTaskCommit = z.infer<typeof implementationTaskCommitSchema>;
+/** Задача, завершённая task-сессией: её завершающий коммит известен. */
+export type CompletedImplementationTask = ImplementationTaskCommit & { readonly commit: string };
 export type ImplementationBatch = z.infer<typeof implementationBatchSchema>;
 export type ImplementationPublication = z.infer<typeof implementationPublicationSchema>;
 export type ImplementationRun = z.infer<typeof implementationRunSchema>;
 
 export function collectImplementationTask(
   runInput: ImplementationRun,
-  task: ImplementationTaskCommit,
+  task: CompletedImplementationTask,
 ): ImplementationRun {
   const run = implementationRunSchema.parse(runInput);
   const parsedTask = implementationTaskCommitSchema.parse(task);
+  const headCommit = commitHashSchema.parse(parsedTask.commit);
   if (run.batch.kind === "reviewed") {
     throw new Error("Нельзя добавлять task-коммит в уже проверенный пакет");
   }
@@ -161,7 +169,7 @@ export function collectImplementationTask(
     batch: {
       kind: "collecting",
       baseCommit: run.batch.baseCommit,
-      headCommit: parsedTask.commit,
+      headCommit,
       tasks,
     },
   });

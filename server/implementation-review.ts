@@ -7,10 +7,12 @@ import {
   OPENSPEC_CLI_RULE,
   buildAgentPrompt,
   completionInstruction,
+  taskHistoryRule,
   taskScopeRule,
   taskScopeWorkflowData,
 } from "./agent-prompt.ts";
 import { combineAbortSignals, throwIfSignalAborted } from "./agent-session-control.ts";
+import { isCommitAncestor } from "./git-ancestry.ts";
 import { runBoundedCommand, type BoundedCommandRunner } from "./bounded-command.ts";
 import { commitHashSchema } from "./change-artifact-model.ts";
 import { applyInstructionsSchema, type ApplyInstructions } from "./change-task-model.ts";
@@ -63,6 +65,11 @@ import {
 } from "./phase-work.ts";
 import { updateAgentNotificationLabel, type AgentNotificationLabelUpdater } from "./paseo-agent-labels.ts";
 import { ChangeReviewPublicationError } from "./review-publication-model.ts";
+import {
+  RESUMABLE_SESSION,
+  staleSession,
+  type SessionAssessment,
+} from "./session-assessment.ts";
 
 const REVIEW_SKILL = "openspec-review-implementation";
 const DEFAULT_AGENT_DRAIN_TIMEOUT_MS = 15_000;
@@ -105,6 +112,18 @@ export interface ImplementationReviewService {
     run: ImplementationRun,
     signal?: AbortSignal,
   ): Promise<PendingImplementationReviewSession>;
+  /**
+   * Оценивает сохранённую review-сессию, не меняя репозиторий. Сессия устарела,
+   * когда её диапазон или задачи больше не соответствуют пакету и истории, либо
+   * когда закоммиченный отчёт нельзя принять без нового review.
+   */
+  assess(request: {
+    readonly workspaceDirectory: string;
+    readonly run: ImplementationRun;
+    readonly session: PendingImplementationReviewSession;
+    readonly taskBaseline: PhaseProgress;
+    readonly signal: AbortSignal;
+  }): Promise<SessionAssessment>;
   run(request: {
     readonly workspaceDirectory: string;
     readonly profile: CompleteRequiredAgentProfile;
@@ -150,6 +169,22 @@ export function createImplementationReviewService(
   const mcpHost = options.mcpHost ?? OrchestratorMcpToolHost;
   const agentDrainTimeoutMs = options.agentDrainTimeoutMs ?? DEFAULT_AGENT_DRAIN_TIMEOUT_MS;
   const logger = options.logger ?? console;
+  const taskScopeCheck = (
+    workspaceDirectory: string,
+    run: ImplementationRun,
+    taskBaseline: PhaseProgress,
+  ): TaskScopeCheck =>
+    createTaskScopeCheck(
+      options.phaseWork,
+      workspaceDirectory,
+      run.changeId,
+      {
+        kind: "implementation",
+        phaseNumber: run.phaseNumber,
+        baseline: phaseProgressSchema.parse(taskBaseline),
+      },
+      (message) => new ImplementationReviewError(message),
+    );
 
   return {
     async plan(workspaceDirectory, runInput, signal) {
@@ -176,6 +211,14 @@ export function createImplementationReviewService(
         signal,
       );
       assertTaskCommitCoverage(commits, run.batch.tasks);
+      const incomplete = await describeReviewedTasksProblem(
+        command,
+        workspaceDirectory,
+        run.changeId,
+        run.batch.tasks,
+        signal,
+      );
+      if (incomplete !== null) throw new ImplementationReviewError(incomplete);
       return pendingImplementationReviewSessionSchema.parse({
         changeId: run.changeId,
         changeBranch: run.changeBranch,
@@ -188,11 +231,9 @@ export function createImplementationReviewService(
       });
     },
 
-    async run(request) {
-      throwIfSignalAborted(request.signal);
+    async assess(request) {
       const run = implementationRunSchema.parse(request.run);
       const session = pendingImplementationReviewSessionSchema.parse(request.session);
-      assertSessionMatchesRun(session, run);
       const context = await readImplementationReviewContext(
         command,
         request.workspaceDirectory,
@@ -200,24 +241,41 @@ export function createImplementationReviewService(
         (message) => new ImplementationReviewError(message),
         request.signal,
       );
-      const assertTaskScope = createTaskScopeCheck(
-        options.phaseWork,
-        request.workspaceDirectory,
-        session.changeId,
-        {
-          kind: "implementation",
-          phaseNumber: run.phaseNumber,
-          baseline: phaseProgressSchema.parse(request.taskBaseline),
-        },
-        (message) => new ImplementationReviewError(message),
-      );
-      const alreadyCommitted = await inspectExistingReviewCommit(
+      const recovery = await inspectReviewSession(
         command,
         context,
+        run,
+        session,
+        taskScopeCheck(request.workspaceDirectory, run, request.taskBaseline),
+        request.signal,
+      );
+      return recovery.kind === "stale" ? staleSession(recovery.reason) : RESUMABLE_SESSION;
+    },
+
+    async run(request) {
+      throwIfSignalAborted(request.signal);
+      const run = implementationRunSchema.parse(request.run);
+      const session = pendingImplementationReviewSessionSchema.parse(request.session);
+      const context = await readImplementationReviewContext(
+        command,
+        request.workspaceDirectory,
+        session.changeId,
+        (message) => new ImplementationReviewError(message),
+        request.signal,
+      );
+      const assertTaskScope = taskScopeCheck(request.workspaceDirectory, run, request.taskBaseline);
+      const recovery = await inspectReviewSession(
+        command,
+        context,
+        run,
         session,
         assertTaskScope,
         request.signal,
       );
+      // Устаревшую сессию сбрасывает согласование перед шагом; здесь она
+      // возможна только при изменении репозитория после него.
+      if (recovery.kind === "stale") throw new ImplementationReviewError(recovery.reason);
+      const alreadyCommitted = recovery.kind === "completed";
       const targetCommits = await readCommitRange(
         command,
         context.gitRoot,
@@ -410,6 +468,19 @@ export function implementationReviewPrompt(input: {
   const commitInstruction = input.alreadyCommitted
     ? ""
     : "When the report is complete and format-valid, commit the report and all stage corrections in at least one new commit after the reviewed head.";
+  // Границу имеют только задачи, завершённые task-сессией в сохранившейся истории.
+  const commitOrder = new Map(input.targetCommits.map((commit, index) => [commit, index]));
+  const bounded = session.tasks
+    .flatMap((task) =>
+      task.commit !== null && commitOrder.has(task.commit) ? [{ ...task, commit: task.commit }] : [],
+    )
+    .sort((left, right) => commitOrder.get(left.commit)! - commitOrder.get(right.commit)!);
+  const hasUnattributedWork =
+    bounded.length < session.tasks.length ||
+    (input.targetCommits.length > 0 && input.targetCommits.at(-1) !== bounded.at(-1)?.commit);
+  const unattributedInstruction = input.alreadyCommitted || !hasUnattributedWork
+    ? ""
+    : "Some work in this range was done outside task sessions: a task without a commit range and a target commit outside every range still belong to this review. Map them by their content.";
 
   return buildAgentPrompt({
     role: "You own one bounded implementation-review stage.",
@@ -421,10 +492,10 @@ export function implementationReviewPrompt(input: {
       reviewedHead: session.reviewedHead,
       targetCommits: input.targetCommits,
       tasks: session.tasks,
-      taskCommitRanges: session.tasks.map((task, index) => ({
+      taskCommitRanges: bounded.map((task, index) => ({
         taskId: task.taskId,
         taskNumber: task.taskNumber,
-        fromExclusive: index === 0 ? session.baseCommit : session.tasks[index - 1]!.commit,
+        fromExclusive: index === 0 ? session.baseCommit : bounded[index - 1]!.commit,
         throughInclusive: task.commit,
       })),
       reviewPath: input.reviewRepositoryPath,
@@ -440,8 +511,9 @@ export function implementationReviewPrompt(input: {
     body: [
       reviewInstruction,
       delegationInstruction,
+      unattributedInstruction,
       `The report at \`${input.reviewRepositoryPath}\` needs complete coverage and the exact Base commit, Reviewed head, and ordered Target commits from the workflow data.`,
-      input.alreadyCommitted ? "" : `Follow the review skill for any corrections to code or artifacts, verify those corrections in this session, and reflect their outcome in the report. Preserve the workflow's recorded task history: task IDs, numbers, descriptions, and order stay the same, completed tasks stay complete, and new tasks start incomplete. ${taskScopeRule(taskScope)} Record remaining findings for the later finding-resolution stages.`,
+      input.alreadyCommitted ? "" : `Follow the review skill for any corrections to code or artifacts, verify those corrections in this session, and reflect their outcome in the report. ${taskHistoryRule(taskScope)} ${taskScopeRule(taskScope)} Record remaining findings for the later finding-resolution stages.`,
       commitInstruction,
       "Do not push or create a pull request. The orchestrator publishes the verified review commit to the root branch.",
     ],
@@ -452,14 +524,38 @@ export function implementationReviewPrompt(input: {
   });
 }
 
-async function inspectExistingReviewCommit(
+/**
+ * Состояние сохранённой review-сессии относительно репозитория.
+ *
+ * - `fresh` — review ещё не начат;
+ * - `in-progress` — после reviewed head есть коммиты, но отчёт не обновлён;
+ * - `completed` — отчёт с правками закоммичен и проходит проверку;
+ * - `stale` — диапазон, задачи или отчёт не позволяют завершить эту сессию.
+ */
+type ImplementationReviewRecovery =
+  | { readonly kind: "fresh" }
+  | { readonly kind: "in-progress" }
+  | { readonly kind: "completed" }
+  | { readonly kind: "stale"; readonly reason: string };
+
+type InspectedReview =
+  | { readonly kind: "verified"; readonly review: Omit<CompletedImplementationReview, "pullRequest"> }
+  | { readonly kind: "rejected"; readonly reason: string };
+
+async function inspectReviewSession(
   command: BoundedCommandRunner,
   context: ImplementationReviewContext,
+  run: ImplementationRun,
   session: PendingImplementationReviewSession,
   assertTaskScope: TaskScopeCheck,
   signal: AbortSignal,
-): Promise<boolean> {
-  await assertSessionRepositoryState(command, context.gitRoot, session, signal);
+): Promise<ImplementationReviewRecovery> {
+  const stale = (reason: string): ImplementationReviewRecovery => ({ kind: "stale", reason });
+  if (!sessionMatchesRun(session, run)) {
+    return stale("Implementation review session не соответствует текущему пакету");
+  }
+  const outdated = await inspectSessionRepositoryState(command, context.gitRoot, session, signal);
+  if (outdated !== null) return stale(outdated);
   const head = await readTaskHeadCommit(command, context.gitRoot, signal);
   if (head === session.reviewedHead) {
     const remoteHead = await readRemoteTaskBranchCommit(
@@ -469,22 +565,28 @@ async function inspectExistingReviewCommit(
       signal,
     );
     if (remoteHead !== session.reviewedHead) {
-      throw new ImplementationReviewError(
-        "Origin корневой ветки не совпадает с reviewed head",
-      );
+      return stale("Origin корневой ветки не совпадает с reviewed head");
     }
-    return false;
+  } else if (!(await isCommitAncestor(command, context.gitRoot, session.reviewedHead, head, signal))) {
+    return stale("Git HEAD больше не продолжает reviewed head пакета");
+  } else {
+    const changedPaths = await readTaskChangedPaths(
+      command, context.gitRoot, session.reviewedHead, head, signal,
+    );
+    if (changedPaths.includes(context.reviewRepositoryPath)) {
+      const inspected = await inspectCompletedReview(
+        command, context, session, assertTaskScope, signal,
+      );
+      return inspected.kind === "verified" ? { kind: "completed" } : stale(inspected.reason);
+    }
   }
-  await assertTaskCommitDescendsFrom(
-    command, context.gitRoot, session.reviewedHead, head,
-    "Implementation review commit не продолжает reviewed head", signal,
+  // Review, который ещё не закоммитил отчёт, сможет завершиться только при
+  // сохранённых задачах пакета.
+  const incomplete = await describeReviewedTasksProblem(
+    command, context.gitRoot, session.changeId, session.tasks, signal,
   );
-  const changedPaths = await readTaskChangedPaths(
-    command, context.gitRoot, session.reviewedHead, head, signal,
-  );
-  if (!changedPaths.includes(context.reviewRepositoryPath)) return false;
-  await verifyCompletedReview(command, context, session, assertTaskScope, signal);
-  return true;
+  if (incomplete !== null) return stale(incomplete);
+  return head === session.reviewedHead ? { kind: "fresh" } : { kind: "in-progress" };
 }
 
 async function verifyCompletedReview(
@@ -494,17 +596,31 @@ async function verifyCompletedReview(
   assertTaskScope: TaskScopeCheck,
   signal: AbortSignal,
 ): Promise<Omit<CompletedImplementationReview, "pullRequest">> {
-  await assertSessionRepositoryState(command, context.gitRoot, session, signal);
-  await assertCleanTaskWorktree(command, context.gitRoot, signal);
+  const inspected = await inspectCompletedReview(command, context, session, assertTaskScope, signal);
+  if (inspected.kind === "rejected") throw new ImplementationReviewError(inspected.reason);
+  return inspected.review;
+}
+
+/**
+ * Проверяет контракт review-этапа: после reviewed head есть коммит с обновлённым
+ * корректным отчётом, задачи пакета остались завершёнными, а новые задачи
+ * добавлены в разрешённые фазы. Нарушение контракта — результат `rejected`;
+ * исключение означает, что окружение не готово либо факты не прочитаны.
+ */
+async function inspectCompletedReview(
+  command: BoundedCommandRunner,
+  context: ImplementationReviewContext,
+  session: PendingImplementationReviewSession,
+  assertTaskScope: TaskScopeCheck,
+  signal: AbortSignal,
+): Promise<InspectedReview> {
+  const rejected = (reason: string): InspectedReview => ({ kind: "rejected", reason });
+  const outdated = await inspectSessionRepositoryState(command, context.gitRoot, session, signal);
+  if (outdated !== null) return rejected(outdated);
   const head = await readTaskHeadCommit(command, context.gitRoot, signal);
-  await assertTaskCommitDescendsFrom(
-    command,
-    context.gitRoot,
-    session.reviewedHead,
-    head,
-    "Implementation review commit не продолжает reviewed head",
-    signal,
-  );
+  if (!(await isCommitAncestor(command, context.gitRoot, session.reviewedHead, head, signal))) {
+    return rejected("Implementation review commit не продолжает reviewed head");
+  }
   const commitCount = await readTaskCommitCount(
     command,
     context.gitRoot,
@@ -513,7 +629,7 @@ async function verifyCompletedReview(
     signal,
   );
   if (commitCount < 1) {
-    throw new ImplementationReviewError(
+    return rejected(
       "После reviewed head требуется хотя бы один новый implementation review commit",
     );
   }
@@ -525,9 +641,7 @@ async function verifyCompletedReview(
     signal,
   );
   if (!changedPaths.includes(context.reviewRepositoryPath)) {
-    throw new ImplementationReviewError(
-      "Review-коммиты должны добавлять или изменять implementation-review.md",
-    );
+    return rejected("Review-коммиты должны добавлять или изменять implementation-review.md");
   }
   try {
     await command("git", ["cat-file", "-e", `${head}:${context.reviewRepositoryPath}`], {
@@ -535,7 +649,7 @@ async function verifyCompletedReview(
     });
   } catch (error) {
     if (signal.aborted) throw error;
-    throw new ImplementationReviewError("implementation-review.md не добавлен в текущий Git HEAD");
+    return rejected("implementation-review.md не добавлен в текущий Git HEAD");
   }
   try {
     await readImplementationReviewReport({
@@ -545,70 +659,74 @@ async function verifyCompletedReview(
     });
   } catch (error) {
     if (signal.aborted) throw error;
-    if (error instanceof ImplementationReviewReportError) {
-      throw new ImplementationReviewError(error.message);
-    }
+    if (error instanceof ImplementationReviewReportError) return rejected(error.message);
     throw error;
   }
-  await assertReviewedTasksComplete(command, context.gitRoot, session, signal);
+  const incomplete = await describeReviewedTasksProblem(
+    command, context.gitRoot, session.changeId, session.tasks, signal,
+  );
+  if (incomplete !== null) return rejected(incomplete);
   // Проверка до публикации: задача в фазе, которую планирует оркестратор,
   // отменила бы её фокусное планирование.
-  await assertTaskScope(signal);
-  const remoteHead = await readRemoteTaskBranchCommit(
-    command,
-    context.gitRoot,
-    session.implementationBranch,
-    signal,
-  );
-  if (remoteHead !== session.reviewedHead && remoteHead !== head) {
-    throw new ImplementationReviewError(
-      "Origin корневой ветки содержит неожиданный commit",
-    );
+  try {
+    await assertTaskScope(signal);
+  } catch (error) {
+    if (signal.aborted) throw error;
+    if (error instanceof ImplementationReviewError) return rejected(error.message);
+    throw error;
   }
   return {
-    changeId: session.changeId,
-    branch: session.implementationBranch,
-    baseCommit: session.baseCommit,
-    reviewedHead: session.reviewedHead,
-    reviewCommit: head,
+    kind: "verified",
+    review: {
+      changeId: session.changeId,
+      branch: session.implementationBranch,
+      baseCommit: session.baseCommit,
+      reviewedHead: session.reviewedHead,
+      reviewCommit: head,
+    },
   };
 }
 
-async function assertReviewedTasksComplete(
+/**
+ * Описывает, какая задача пакета перестала быть завершённой или сменила номер.
+ * Недоступный или противоречивый ответ OpenSpec завершает проверку исключением:
+ * по нему нельзя судить о задачах.
+ */
+async function describeReviewedTasksProblem(
   command: BoundedCommandRunner,
   gitRoot: string,
-  session: PendingImplementationReviewSession,
-  signal: AbortSignal,
-): Promise<void> {
+  changeId: string,
+  tasks: readonly ImplementationTaskCommit[],
+  signal?: AbortSignal,
+): Promise<string | null> {
   let instructions: ApplyInstructions;
   try {
     const { stdout } = await runWorkspaceMiseCommand(
       command,
       gitRoot,
       "openspec",
-      ["instructions", "apply", "--change", session.changeId, "--json"],
+      ["instructions", "apply", "--change", changeId, "--json"],
       signal,
     );
     instructions = applyInstructionsSchema.parse(JSON.parse(stdout) as unknown);
   } catch (error) {
-    if (signal.aborted) throw error;
+    if (signal?.aborted) throw error;
     throw new ImplementationReviewError("Не удалось проверить выполненные OpenSpec-задачи пакета");
   }
-  if (instructions.changeName !== session.changeId) {
+  if (instructions.changeName !== changeId) {
     throw new ImplementationReviewError("OpenSpec вернул задачи другого change");
   }
   const tasksById = new Map(instructions.tasks.map((task) => [task.id, task]));
   if (tasksById.size !== instructions.tasks.length) {
     throw new ImplementationReviewError("OpenSpec вернул повторяющиеся ID задач");
   }
-  for (const reviewed of session.tasks) {
+  for (const reviewed of tasks) {
     const task = tasksById.get(reviewed.taskId);
     if (!task?.done || task.description.split(/\s/u, 1)[0] !== reviewed.taskNumber) {
-      throw new ImplementationReviewError(
-        `Выполненная задача ${reviewed.taskNumber} удалена, перенумерована или снова открыта во время review`,
-      );
+      return `Выполненная задача ${reviewed.taskNumber} удалена, перенумерована или снова открыта во время review`;
     }
   }
+  return null;
 }
 
 async function assertImplementationState(
@@ -628,7 +746,8 @@ async function assertImplementationState(
     tasks: run.batch.kind === "collecting" ? run.batch.tasks : [],
     repository: run.repository,
   });
-  await assertSessionRepositoryState(command, workspaceDirectory, session, signal);
+  const outdated = await inspectSessionRepositoryState(command, workspaceDirectory, session, signal);
+  if (outdated !== null) throw new ImplementationReviewError(outdated);
   const [head, remoteHead] = await Promise.all([
     readTaskHeadCommit(command, workspaceDirectory, signal),
     readRemoteTaskBranchCommit(
@@ -648,27 +767,38 @@ async function assertImplementationState(
   }
 }
 
-async function assertSessionRepositoryState(
+/**
+ * Проверяет окружение review-сессии. Возвращает причину устаревания, когда
+ * reviewed head больше не продолжает baseline run, и `null`, когда сессия
+ * остаётся на своей истории. Чужая ветка, другой репозиторий и коммиты origin,
+ * которых нет локально, — ошибки окружения: новая сессия их не исправит.
+ */
+async function inspectSessionRepositoryState(
   command: BoundedCommandRunner,
   gitRoot: string,
   session: PendingImplementationReviewSession,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<string | null> {
   await assertCleanTaskWorktree(command, gitRoot, signal);
-  const [branch, localRoot, remoteRoot, repository] = await Promise.all([
+  const [branch, localRoot, remoteRoot, repository, head] = await Promise.all([
     readCurrentTaskBranch(command, gitRoot, signal),
     readLocalTaskBranchCommit(command, gitRoot, session.changeBranch, signal),
     readRemoteTaskBranchCommit(command, gitRoot, session.changeBranch, signal),
     resolveTaskRepository(command, gitRoot, signal),
+    readTaskHeadCommit(command, gitRoot, signal),
   ]);
   if (branch !== session.implementationBranch) {
     throw new ImplementationReviewError(
       `Текущей должна быть корневая ветка «${session.implementationBranch}»`,
     );
   }
-  if (localRoot !== await readTaskHeadCommit(command, gitRoot, signal) ||
-      (remoteRoot !== session.reviewedHead && remoteRoot !== localRoot)) {
+  if (localRoot !== head) {
     throw new ImplementationReviewError("Корневая ветка изменилась во время implementation review");
+  }
+  if (!(await isCommitAncestor(command, gitRoot, remoteRoot, head, signal))) {
+    throw new ImplementationReviewError(
+      "Origin корневой ветки содержит коммиты, которых нет в локальной ветке",
+    );
   }
   if (
     repository.host !== session.repository.host ||
@@ -677,14 +807,12 @@ async function assertSessionRepositoryState(
   ) {
     throw new ImplementationReviewError("GitHub repository identity изменилась");
   }
-  await assertTaskCommitDescendsFrom(
-    command,
-    gitRoot,
-    session.rootBaselineCommit,
-    session.reviewedHead,
-    "Reviewed head не продолжает root baseline",
-    signal,
-  );
+  if (!(await isCommitAncestor(
+    command, gitRoot, session.rootBaselineCommit, session.reviewedHead, signal,
+  ))) {
+    return "Reviewed head не продолжает root baseline";
+  }
+  return null;
 }
 
 async function readCommitRange(
@@ -708,46 +836,43 @@ async function readCommitRange(
   }
 }
 
+/**
+ * Диапазон review покрывает всё от baseline пакета до reviewed head, включая
+ * коммиты вне task-сессий. Известный завершающий коммит задачи обязан лежать в
+ * этом диапазоне: иначе пакет описывает другую историю.
+ */
 function assertTaskCommitCoverage(
   commits: readonly string[],
   tasks: readonly ImplementationTaskCommit[],
 ): void {
-  let cursor = 0;
-  for (const task of tasks) {
-    while (cursor < commits.length && commits[cursor] !== task.commit) cursor += 1;
-    if (cursor === commits.length) {
-      throw new ImplementationReviewError(
-        "Завершающие коммиты задач не идут по порядку в Git-диапазоне review",
-      );
-    }
-    cursor += 1;
-  }
-  if (cursor !== commits.length) {
+  const range = new Set(commits);
+  const outside = tasks.filter(({ commit }) => commit !== null && !range.has(commit));
+  if (outside.length > 0) {
     throw new ImplementationReviewError(
-      "После завершающего коммита последней задачи есть непроверенные коммиты",
+      `Завершающие коммиты задач ${outside.map(({ taskNumber }) => taskNumber).join(", ")} не входят в Git-диапазон review`,
     );
   }
 }
 
-function assertSessionMatchesRun(
+function sessionMatchesRun(
   session: PendingImplementationReviewSession,
   run: ImplementationRun,
-): void {
-  if (
-    run.batch.kind !== "collecting" ||
-    session.changeId !== run.changeId ||
-    session.implementationBranch !== run.implementationBranch ||
-    session.baseCommit !== run.batch.baseCommit ||
-    session.reviewedHead !== run.batch.headCommit ||
-    !sameStrings(session.tasks.map(({ commit }) => commit), run.batch.tasks.map(({ commit }) => commit))
-  ) {
-    throw new ImplementationReviewError(
-      "Implementation review session не соответствует текущему пакету",
-    );
-  }
+): boolean {
+  return (
+    run.batch.kind === "collecting" &&
+    session.changeId === run.changeId &&
+    session.implementationBranch === run.implementationBranch &&
+    session.baseCommit === run.batch.baseCommit &&
+    session.reviewedHead === run.batch.headCommit &&
+    sameItems(session.tasks.map(taskKey), run.batch.tasks.map(taskKey))
+  );
 }
 
-function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+function taskKey(task: ImplementationTaskCommit): string {
+  return `${task.taskId}\u0000${task.taskNumber}\u0000${task.commit ?? ""}`;
+}
+
+function sameItems(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 

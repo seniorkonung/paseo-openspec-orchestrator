@@ -674,3 +674,46 @@ test("complete_artifact принимает произвольный subject", as
   const result = await runCommitScenario(context, "wrong-subject");
   assert.equal(result.isError, undefined);
 });
+
+test("оценка artifact-сессии различает неначатую, созданную и устаревшую", async (context) => {
+  const fixture = await createRepository(context);
+  const { command } = createCommand(fixture);
+  const service = createChangeArtifactCreationService({ command, async createAgent() {} });
+  const signal = new AbortController().signal;
+  const git = async (...args) =>
+    (await execFileAsync("git", args, { cwd: fixture.workspace })).stdout.trim();
+  const assess = (session) => service.assess(fixture.workspace, "custom-change", session, signal);
+
+  const session = await service.prepare(fixture.workspace, "custom-change");
+  assert.deepEqual(await assess(session), { kind: "resumable" });
+
+  // Посторонний коммит до создания артефакта сдвигает baseline сессии.
+  await writeFile(join(fixture.workspace, "notes.md"), "заметка\n");
+  await git("add", ".");
+  await git("commit", "-m", "docs: посторонний коммит");
+  assert.deepEqual(await assess(session), {
+    kind: "stale",
+    reason: "Git HEAD изменился до начала создания ожидаемого артефакта",
+  });
+
+  // Сессия от текущего HEAD продолжает артефакт, созданный, но ещё не
+  // закоммиченный агентом, и принимает его собственный коммит.
+  const replanned = await service.prepare(fixture.workspace, "custom-change");
+  assert.equal(replanned.baselineCommit, await git("rev-parse", "HEAD"));
+  await writeFile(fixture.riskPath, "# Карта рисков\n");
+  assert.deepEqual(await assess(replanned), { kind: "resumable" });
+  await git("add", ".");
+  await git("commit", "-m", "docs(openspec): add risk map");
+  assert.deepEqual(await assess(replanned), { kind: "resumable" });
+
+  // Для прежней сессии диапазон содержит посторонний файл: принять его она не сможет.
+  assert.deepEqual(await assess(session), {
+    kind: "stale",
+    reason: "После baseline artifact-сессии появились коммиты вне файлов артефакта",
+  });
+  // Изменённая schema делает сессию устаревшей.
+  assert.deepEqual(await assess({ ...replanned, schemaName: "other-schema" }), {
+    kind: "stale",
+    reason: "Schema или ожидаемый артефакт изменились после сохранения checkpoint",
+  });
+});

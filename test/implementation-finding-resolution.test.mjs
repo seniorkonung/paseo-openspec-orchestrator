@@ -714,6 +714,9 @@ test("prompt требует одно решение, сохраняет зада
   assert.match(prompt, /without asking for another approval/);
   assert.match(prompt, /never reopen a completed task/);
   assert.match(prompt, /append new unfinished tasks/);
+  assert.match(prompt, /Preserve the existing task list exactly/u);
+  assert.match(prompt, /strictly in file order\. Append the new tasks in the order they must run/u);
+  assert.doesNotMatch(prompt, /may be inserted, reordered, and renumbered/u);
   assert.match(prompt, /Add new tasks only to Phase 1 or to a new phase of your own/u);
   assert.match(prompt, /Never add tasks to another existing phase/u);
   assert.match(

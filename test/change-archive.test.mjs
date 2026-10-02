@@ -104,14 +104,14 @@ async function exists(path) {
 
 test("архив проверяет задачи, артефакты, перенос файлов и синхронизацию specs", async (context) => {
   const f = await fixture(context);
-  assert.equal(await f.verification.inspectRecovery(f.directory, { changeId, branch, baselineCommit: f.baseline, sourcePath: `openspec/changes/${changeId}`, archivePath: `openspec/changes/archive/2026-09-25-${changeId}`, deltaSpecPaths: ["specs/api/spec.md"], rootPullRequest: identity }), "fresh");
+  assert.deepEqual(await f.verification.inspectRecovery(f.directory, { changeId, branch, baselineCommit: f.baseline, sourcePath: `openspec/changes/${changeId}`, archivePath: `openspec/changes/archive/2026-09-25-${changeId}`, deltaSpecPaths: ["specs/api/spec.md"], rootPullRequest: identity }), { kind: "fresh" });
   const session = await f.verification.plan(f.directory, changeId, identity);
   assert.equal(session.archivePath, `openspec/changes/archive/2026-09-25-${changeId}`);
   const head = await f.archive(session);
-  assert.equal(await f.verification.inspectRecovery(f.directory, session), "committed");
+  assert.deepEqual(await f.verification.inspectRecovery(f.directory, session), { kind: "committed" });
   const result = await f.verification.verifyCommit(f.directory, session);
   assert.equal(result.commit, head);
-  await f.verification.verifyArchived(f.directory, result);
+  assert.equal(await f.verification.verifyArchived(f.directory, result), head);
   assert.match(changeArchivePrompt(session, "fresh"), /openspec-archive-change/u);
   assert.match(changeArchivePrompt(session, "committed"), /Do not invoke the skill/u);
   assert.match(changeArchivePrompt(session, "fresh"), /Never choose 'Archive without syncing'/u);
@@ -126,7 +126,7 @@ test("архив принимает несколько коммитов с пр�
   await f.git("add", "openspec/specs/api/spec.md");
   await f.git("commit", "-m", "Дополнительная синхронизация");
   const head = await f.git("rev-parse", "HEAD");
-  assert.equal(await f.verification.inspectRecovery(f.directory, session), "committed");
+  assert.deepEqual(await f.verification.inspectRecovery(f.directory, session), { kind: "committed" });
   const archived = await f.verification.verifyCommit(f.directory, session);
   assert.equal(archived.commit, head);
   await f.verification.verifyArchived(f.directory, archived);
@@ -208,14 +208,158 @@ test("проверка распознаёт переименование тре�
 test("Retry различает частичную синхронизацию, перенос и готовый коммит", async (context) => {
   const f = await fixture(context);
   const session = await f.verification.plan(f.directory, changeId, identity);
-  assert.equal(await f.verification.inspectRecovery(f.directory, session), "fresh");
+  assert.deepEqual(await f.verification.inspectRecovery(f.directory, session), { kind: "fresh" });
   const main = join(f.directory, "openspec", "specs", "api", "spec.md");
   await mkdir(join(f.directory, "openspec", "specs", "api"), { recursive: true });
   await writeFile(main, "## Requirements\n");
-  assert.equal(await f.verification.inspectRecovery(f.directory, session), "partial");
+  assert.deepEqual(await f.verification.inspectRecovery(f.directory, session), { kind: "partial" });
   await mkdir(join(f.directory, "openspec", "changes", "archive"), { recursive: true });
   await rename(f.source, join(f.directory, session.archivePath));
-  assert.equal(await f.verification.inspectRecovery(f.directory, session), "partial");
+  assert.deepEqual(await f.verification.inspectRecovery(f.directory, session), { kind: "partial" });
+});
+
+test("устаревшая сессия архивации отличается от прерванной и завершённой", async (context) => {
+  const f = await fixture(context);
+  const session = await f.verification.plan(f.directory, changeId, identity);
+  const service = createChangeArchiveService({
+    command: f.command, verification: f.verification, rootPullRequest: f.rootPullRequest,
+    async createAgent() { throw new Error("Агент не нужен"); },
+  });
+  const signal = new AbortController().signal;
+  assert.deepEqual(await service.assess(f.directory, session, signal), { kind: "resumable" });
+
+  // Синхронизация specs закоммичена, перенос ещё не выполнен: архивацию
+  // продолжает агент той же сессии.
+  await mkdir(join(f.directory, "openspec", "specs", "api"), { recursive: true });
+  await writeFile(join(f.directory, "openspec", "specs", "api", "spec.md"), addedMain);
+  await f.git("add", ".");
+  await f.git("commit", "-m", "docs(openspec): sync specs");
+  assert.deepEqual(await f.verification.inspectRecovery(f.directory, session), { kind: "partial" });
+  assert.deepEqual(await service.assess(f.directory, session, signal), { kind: "resumable" });
+
+  // Посторонний коммит после baseline этап принять не может.
+  await writeFile(join(f.directory, "notes.txt"), "заметка\n");
+  await f.git("add", ".");
+  await f.git("commit", "-m", "docs: посторонний коммит");
+  assert.deepEqual(await service.assess(f.directory, session, signal), {
+    kind: "stale",
+    reason: "После baseline архивации появились коммиты вне путей архивации",
+  });
+  await assert.rejects(
+    service.run({ workspaceDirectory: f.directory, profile: {}, session, signal, onAgentCreated() {} }),
+    /вне путей архивации/u,
+  );
+
+  // Переписанная история лишает сессию baseline: пока change не в архиве,
+  // архивация планируется заново.
+  await f.git("checkout", "--orphan", "rewritten");
+  await f.git("commit", "-m", "переписанная история");
+  await f.git("branch", "-M", branch);
+  assert.deepEqual(await service.assess(f.directory, session, signal), {
+    kind: "stale",
+    reason: "Архивный HEAD не продолжает baseline",
+  });
+});
+
+test("архив, который сессия не может подтвердить, принимается из репозитория", async (context) => {
+  const f = await fixture(context);
+  const session = await f.verification.plan(f.directory, changeId, identity);
+  const service = createChangeArchiveService({
+    command: f.command, verification: f.verification, rootPullRequest: f.rootPullRequest,
+    async createAgent() { throw new Error("Агент не нужен"); },
+  });
+  const signal = new AbortController().signal;
+  const run = () =>
+    service.run({ workspaceDirectory: f.directory, profile: {}, session, signal, onAgentCreated() {} });
+
+  // Пользователь добавил коммит во время архивации: change уже в архиве, но
+  // completion-инструмент этот диапазон не примет ни при каком продолжении.
+  await writeFile(join(f.directory, "notes.txt"), "заметка\n");
+  await f.git("add", ".");
+  await f.git("commit", "-m", "docs: посторонний коммит");
+  await f.archive(session);
+  await assert.rejects(f.verification.verifyCommit(f.directory, session), /посторонний путь notes\.txt/u);
+  assert.deepEqual(await f.verification.inspectRecovery(f.directory, session), { kind: "adopted" });
+  assert.deepEqual(await service.assess(f.directory, session, signal), { kind: "resumable" });
+  const adopted = await run();
+  assert.deepEqual(adopted, { session, commit: null });
+  assert.equal(await f.verification.verifyArchived(f.directory, adopted), await f.git("rev-parse", "HEAD"));
+
+  // Шаг сохраняет принятый архив и переходит к финальному gate без агента.
+  const step = createArchiveChangeStep({
+    workspaceDirectory: f.directory,
+    readAgentProfiles: async () => [{ name: "High", provider: "claude", model: "opus", modeId: "bypassPermissions", thinkingOptionId: "max" }],
+    archive: service,
+    phaseWork: { async inspect() { throw new Error("Задачи не читаются при сохранённой сессии"); } },
+    changeFindings: { async plan() { throw new Error("Findings не читаются при сохранённой сессии"); } },
+    implementationFindings: { async plan() { throw new Error("Findings не читаются при сохранённой сессии"); } },
+  });
+  const progress = { phases: [{ number: 1 }], tasks: [], nextImplementationRun: 2 };
+  const result = await step.run({
+    signal,
+    state: { ...createInitialWorkflowState(), change: { id: changeId }, changeBranch: branch, activeBranch: branch,
+      rootPullRequest: identity, phaseProgress: progress, pendingArchiveSession: session },
+    updateActionLinks() {}, async checkpointState() {}, async notify() { return true; },
+  });
+  assert.equal(result.kind, "continue");
+  assert.equal(result.next, "await-root-merge");
+  assert.deepEqual(result.state, { pendingArchiveSession: null, archivedChange: adopted });
+  assert.equal(
+    result.summary,
+    `Архив change ${changeId} принят из репозитория: коммиты добавлены или переписаны вне этапа`,
+  );
+
+  // Переписанная история с change в архиве принимается так же.
+  await f.git("checkout", "--orphan", "rewritten");
+  await f.git("commit", "-m", "переписанная история");
+  await f.git("branch", "-M", branch);
+  assert.deepEqual(await f.verification.inspectRecovery(f.directory, session), { kind: "adopted" });
+  assert.deepEqual(await run(), { session, commit: null });
+  assert.equal(await f.verification.verifyArchived(f.directory, adopted), await f.git("rev-parse", "HEAD"));
+});
+
+test("финальный gate принимает коммиты после архивного, пока change остаётся в архиве", async (context) => {
+  const f = await fixture(context);
+  const session = await f.verification.plan(f.directory, changeId, identity);
+  const commit = await f.archive(session);
+  const archivedChange = { session, commit };
+  await writeFile(join(f.directory, "CHANGELOG.md"), "# Изменения\n");
+  await f.git("add", ".");
+  await f.git("commit", "-m", "docs: финальная правка перед merge");
+  const head = await f.git("rev-parse", "HEAD");
+  assert.equal(await f.verification.verifyArchived(f.directory, archivedChange), head);
+
+  let ready = false;
+  const step = createAwaitRootMergeStep({
+    workspaceDirectory: f.directory,
+    archive: { verifyArchived: (...args) => f.verification.verifyArchived(...args) },
+    rootPullRequest: {
+      async synchronize() { return head; },
+      async inspect() { return { kind: "open", isDraft: !ready, head, identity }; },
+      async makeReady() { ready = true; return { kind: "open", isDraft: false, head, identity }; },
+    },
+  });
+  const state = { ...createInitialWorkflowState(), change: { id: changeId }, changeBranch: branch, activeBranch: branch, rootPullRequest: identity, archivedChange };
+  const waiting = await step.run({ signal: new AbortController().signal, state, updateActionLinks() {}, async checkpointState() {}, async notify() { return true; } });
+  assert.equal(waiting.kind, "halt");
+  assert.match(waiting.summary, /ожидает merge/u);
+  assert.equal(ready, true);
+
+  // История, сжатая перед merge, проходит gate, пока change в архиве: архивного
+  // коммита в ней уже нет.
+  await f.git("reset", "--soft", f.baseline);
+  await f.git("commit", "-m", "feat: всё изменение одним коммитом");
+  const squashed = await f.git("rev-parse", "HEAD");
+  await assert.rejects(f.git("merge-base", "--is-ancestor", commit, squashed));
+  assert.equal(await f.verification.verifyArchived(f.directory, archivedChange), squashed);
+
+  // Возврат change из архива делает gate недействительным.
+  await f.git("mv", session.archivePath, session.sourcePath);
+  await f.git("commit", "-m", "revert: вернуть change из архива");
+  await assert.rejects(
+    f.verification.verifyArchived(f.directory, archivedChange),
+    /снова оказался вне архива/u,
+  );
 });
 
 test("после архивации финальный gate ждёт merge и не читает active change", async (context) => {

@@ -6,6 +6,7 @@ import {
   FIXED_BRANCH_RULE,
   OPENSPEC_CLI_RULE,
   STAGE_SCOPE_RULE,
+  TASK_ORDER_FACT,
   buildAgentPrompt,
   completionInstruction,
 } from "./agent-prompt.ts";
@@ -20,13 +21,13 @@ import {
 } from "./change-branch.ts";
 import {
   assertCleanTaskWorktree,
-  assertTaskCommitDescendsFrom,
   readCurrentTaskBranch,
   readTaskChangedPaths,
   readTaskCommitCount,
   readTaskGitRoot,
   readTaskHeadCommit,
 } from "./change-task-gateway.ts";
+import { isCommitAncestor } from "./git-ancestry.ts";
 import { createManagedAgentSession } from "./managed-agent-session.ts";
 import { McpToolError, OrchestratorMcpToolHost, defineMcpTool } from "./orchestrator-mcp-tool-host.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
@@ -39,6 +40,11 @@ import {
   type PhaseWorkService,
 } from "./phase-work.ts";
 import { updateAgentNotificationLabel, type AgentNotificationLabelUpdater } from "./paseo-agent-labels.ts";
+import {
+  RESUMABLE_SESSION,
+  staleSession,
+  type SessionAssessment,
+} from "./session-assessment.ts";
 
 type PaseoApi = PluginHandlerContext["paseo"];
 type PaseoWorkspace = ReturnType<PaseoApi["workspaces"]["ref"]>;
@@ -96,6 +102,27 @@ export interface CompletedPhaseTaskPlanning {
   readonly progress: PhaseProgress;
 }
 
+/** Что нужно сделать для задач фазы по текущему состоянию репозитория. */
+export type PhaseTaskPlanningPlan =
+  | {
+      readonly kind: "planning-required";
+      readonly session: PendingPhaseTaskPlanningSession;
+    }
+  /**
+   * В фазе уже есть незавершённые задачи: их добавили вне planning-сессии, и
+   * агенту планировать нечего. Дальше они проходят обычное review.
+   */
+  | { readonly kind: "already-planned"; readonly progress: PhaseProgress };
+
+/**
+ * Состояние сохранённой planning-сессии относительно репозитория: задачи ещё
+ * не подтверждены, уже закоммичены и проверены либо сессию нельзя завершить.
+ */
+type PlanningSessionRecovery =
+  | { readonly kind: "unplanned" }
+  | { readonly kind: "committed" }
+  | { readonly kind: "stale"; readonly reason: string };
+
 export interface PhaseTaskPlanningService {
   prepare(
     workspaceDirectory: string,
@@ -105,7 +132,18 @@ export interface PhaseTaskPlanningService {
     phaseNumber: number,
     progress: PhaseProgress,
     signal?: AbortSignal,
-  ): Promise<PendingPhaseTaskPlanningSession>;
+  ): Promise<PhaseTaskPlanningPlan>;
+  /**
+   * Оценивает сохранённую planning-сессию, не меняя репозиторий. Сессия
+   * продолжается, пока планирование можно завершить и подтвердить ею. Она
+   * устарела, когда Git HEAD не продолжает её baseline или после него появились
+   * коммиты вне task-артефактов.
+   */
+  assess(
+    workspaceDirectory: string,
+    session: PendingPhaseTaskPlanningSession,
+    signal: AbortSignal,
+  ): Promise<SessionAssessment>;
   run(request: {
     readonly workspaceDirectory: string;
     readonly profile: CompleteRequiredAgentProfile;
@@ -167,6 +205,10 @@ export function createPhaseTaskPlanningService(
         progress,
         signal,
       );
+      if (decision.kind === "implementation-required" && decision.phaseNumber === phaseNumber) {
+        assertPhasePlanningDecision(decision, progress, phaseNumber);
+        return { kind: "already-planned", progress: decision.progress };
+      }
       if (decision.kind !== "planning-required" || decision.phaseNumber !== phaseNumber) {
         throw new PhaseTaskPlanningError(`Phase ${phaseNumber} больше не требует планирования`);
       }
@@ -174,15 +216,32 @@ export function createPhaseTaskPlanningService(
       const taskPaths = decision.snapshot.taskArtifactPaths.map((path) =>
         repositoryPath(gitRoot, path),
       );
-      return pendingPhaseTaskPlanningSessionSchema.parse({
-        changeId,
-        changeBranch,
-        planningBranch,
-        phaseNumber,
-        baselineCommit,
-        baselineProgress: progress,
-        taskPaths,
-      });
+      return {
+        kind: "planning-required",
+        session: pendingPhaseTaskPlanningSessionSchema.parse({
+          changeId,
+          changeBranch,
+          planningBranch,
+          phaseNumber,
+          baselineCommit,
+          baselineProgress: progress,
+          taskPaths,
+        }),
+      };
+    },
+
+    async assess(workspaceDirectory, sessionInput, signal) {
+      const session = pendingPhaseTaskPlanningSessionSchema.parse(sessionInput);
+      const gitRoot = await readTaskGitRoot(command, workspaceDirectory, signal);
+      const recovery = await inspectPlanningRecovery(
+        command,
+        options.phaseWork,
+        workspaceDirectory,
+        gitRoot,
+        session,
+        signal,
+      );
+      return recovery.kind === "stale" ? staleSession(recovery.reason) : RESUMABLE_SESSION;
     },
 
     async run(request) {
@@ -197,6 +256,10 @@ export function createPhaseTaskPlanningService(
         session,
         request.signal,
       );
+      // Устаревшую сессию сбрасывает согласование перед шагом; здесь она
+      // возможна только при изменении репозитория после него.
+      if (recovery.kind === "stale") throw new PhaseTaskPlanningError(recovery.reason);
+      const alreadyCommitted = recovery.kind === "committed";
       const host = await mcpHost.listen();
       let completed: CompletedPhaseTaskPlanning | null = null;
       const agentSession = createManagedAgentSession<CompletedPhaseTaskPlanning>({
@@ -270,7 +333,7 @@ export function createPhaseTaskPlanningService(
           () => options.createAgent({
             config,
             title: `Планирование Phase ${session.phaseNumber}: ${session.changeId}`,
-            prompt: phaseTaskPlanningPrompt(session, recovery.alreadyCommitted),
+            prompt: phaseTaskPlanningPrompt(session, alreadyCommitted),
             labels: { ntfy: "true" },
           }),
           request.onAgentCreated,
@@ -292,7 +355,7 @@ export function phaseTaskPlanningPrompt(
 ): string {
   const action = alreadyCommitted
     ? "This is a recovery session. The expected planning commits already exist. Do not invoke the skill, edit files, or amend/create a commit. Call the completion tool."
-    : `Invoke the openspec-update-change skill for change \`${session.changeId}\` and plan tasks exclusively for Phase ${session.phaseNumber}. Do not inspect the command catalog first. Follow every interactive confirmation the skill requires. Preserve all existing tasks byte-for-byte and in the same order, add at least one incomplete task numbered ${session.phaseNumber}.*, and plan no other phase.`;
+    : `Invoke the openspec-update-change skill for change \`${session.changeId}\` and plan tasks exclusively for Phase ${session.phaseNumber}. Do not inspect the command catalog first. Follow every interactive confirmation the skill requires. Preserve all existing tasks byte-for-byte and in the same order, add at least one incomplete task numbered ${session.phaseNumber}.*, and plan no other phase. ${TASK_ORDER_FACT} List the new tasks in the order they must run.`;
   const commitInstruction = alreadyCommitted
     ? ""
     : "Only the task artifact paths in the workflow data may change: leave plan.md, the other planning artifacts, review reports, code, tests, configuration, and documentation untouched. Existing task IDs, numbers, descriptions, order, and completion states stay as they are, and every new task starts incomplete. Commit the task files in at least one commit.";
@@ -331,12 +394,34 @@ async function inspectPlanningRecovery(
   gitRoot: string,
   session: PendingPhaseTaskPlanningSession,
   signal: AbortSignal,
-): Promise<{ readonly alreadyCommitted: boolean }> {
+): Promise<PlanningSessionRecovery> {
   await assertPlanningGitState(command, gitRoot, session.planningBranch, signal);
   const head = await readTaskHeadCommit(command, gitRoot, signal);
-  if (head === session.baselineCommit) return { alreadyCommitted: false };
-  await verifyPhasePlanning(command, phaseWork, workspaceDirectory, gitRoot, session, signal);
-  return { alreadyCommitted: true };
+  if (head === session.baselineCommit) return { kind: "unplanned" };
+  // Этап принимает только коммиты с task-артефактами после своего baseline.
+  // Иной диапазон эта сессия подтвердить уже не сможет.
+  if (!(await isCommitAncestor(command, gitRoot, session.baselineCommit, head, signal))) {
+    return { kind: "stale", reason: "Planning commit больше не продолжает baseline" };
+  }
+  const allowed = new Set(session.taskPaths);
+  const changed = await readTaskChangedPaths(command, gitRoot, session.baselineCommit, head, signal);
+  if (changed.some((path) => !allowed.has(path))) {
+    return { kind: "stale", reason: "После baseline planning-сессии появились коммиты вне task-артефактов" };
+  }
+  // Коммит с задачами, который ещё не проходит проверку, остаётся
+  // незавершённой работой агента той же сессии.
+  try {
+    await verifyPhasePlanning(command, phaseWork, workspaceDirectory, gitRoot, session, signal);
+  } catch (error) {
+    if (
+      signal.aborted ||
+      !(error instanceof PhaseTaskPlanningError || error instanceof PhaseWorkError)
+    ) {
+      throw error;
+    }
+    return { kind: "unplanned" };
+  }
+  return { kind: "committed" };
 }
 
 async function verifyPhasePlanning(
@@ -349,14 +434,9 @@ async function verifyPhasePlanning(
 ): Promise<CompletedPhaseTaskPlanning> {
   await assertPlanningGitState(command, gitRoot, session.planningBranch, signal);
   const head = await readTaskHeadCommit(command, gitRoot, signal);
-  await assertTaskCommitDescendsFrom(
-    command,
-    gitRoot,
-    session.baselineCommit,
-    head,
-    "Planning commit больше не продолжает baseline",
-    signal,
-  );
+  if (!(await isCommitAncestor(command, gitRoot, session.baselineCommit, head, signal))) {
+    throw new PhaseTaskPlanningError("Planning commit больше не продолжает baseline");
+  }
   if (await readTaskCommitCount(command, gitRoot, session.baselineCommit, head, signal) < 1) {
     throw new PhaseTaskPlanningError("Для task planning требуется хотя бы один новый commit");
   }

@@ -389,13 +389,13 @@ test("task checkpoint восстанавливается до push и после
   const signal = new AbortController().signal;
   assert.deepEqual(
     await inspectTaskExecutionRecovery(command, value.workspace, value.workspace, plan.session, signal),
-    { alreadyCommitted: true },
+    { kind: "committed" },
   );
   const first = await verifyCompletedTask(command, value.workspace, value.workspace, plan.session, signal);
   assert.equal(first.taskId, "internal-a");
   assert.deepEqual(
     await inspectTaskExecutionRecovery(command, value.workspace, value.workspace, plan.session, signal),
-    { alreadyCommitted: true },
+    { kind: "committed" },
   );
   const second = await verifyCompletedTask(command, value.workspace, value.workspace, plan.session, signal);
   assert.deepEqual(second, first);
@@ -433,13 +433,55 @@ test("implementation review получает все коммиты задачи 
   assert.ok(prompt.includes(`"targetCommits":["${first}","${completed.commit}"]`));
   assert.ok(prompt.includes(`"fromExclusive":"${value.baseline}"`));
   assert.ok(prompt.includes(`"throughInclusive":"${completed.commit}"`));
+  assert.doesNotMatch(prompt, /outside task sessions/u);
   await assert.rejects(
     review.plan(value.workspace, {
       ...run,
-      batch: { ...run.batch, tasks: [{ ...run.batch.tasks[0], commit: first }] },
+      batch: { ...run.batch, tasks: [{ ...run.batch.tasks[0], commit: "f".repeat(40) }] },
     }),
-    /непроверенные коммиты/u,
+    /Завершающие коммиты задач 1\.1 не входят в Git-диапазон review/u,
   );
+});
+
+test("implementation review включает коммиты вне task-сессий в свой диапазон", async (context) => {
+  const value = await fixture(context);
+  const taskService = createChangeTaskExecutionService({ command: value.command, async createAgent() {} });
+  const taskPlan = await taskService.plan(value.workspace, value.run);
+  await commitTask(value);
+  const taskCommit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: value.workspace })).stdout.trim();
+  // Коммит пользователя после завершения задачи.
+  await commitTaskFollowup(value);
+  const completed = await verifyCompletedTask(
+    value.command, value.workspace, value.workspace, taskPlan.session, new AbortController().signal,
+  );
+  const review = createImplementationReviewService({ command: value.command, phaseWork: value.phaseWork, async createAgent() {} });
+  const run = collectImplementationTask(value.run, {
+    taskId: completed.taskId, taskNumber: completed.taskNumber, commit: completed.commit,
+  });
+  const batch = { ...run.batch, tasks: [{ ...run.batch.tasks[0], commit: taskCommit }] };
+  const session = await review.plan(value.workspace, { ...run, batch });
+  assert.equal(session.reviewedHead, completed.commit);
+  const prompt = implementationReviewPrompt({
+    session,
+    phaseNumber: 1,
+    reviewRepositoryPath: `openspec/changes/${changeId}/implementation-review.md`,
+    alreadyCommitted: false,
+    targetCommits: [taskCommit, completed.commit],
+  });
+  assert.ok(prompt.includes(`"throughInclusive":"${taskCommit}"`));
+  assert.match(prompt, /a target commit outside every range still belong to this review/u);
+
+  // Задача, завершённая вне task-сессии, не имеет границы коммитов.
+  const unbounded = implementationReviewPrompt({
+    session: { ...session, tasks: [{ ...session.tasks[0], commit: null }] },
+    phaseNumber: 1,
+    reviewRepositoryPath: `openspec/changes/${changeId}/implementation-review.md`,
+    alreadyCommitted: false,
+    targetCommits: [taskCommit, completed.commit],
+  });
+  assert.ok(unbounded.includes('"taskCommitRanges":[]'));
+  assert.ok(unbounded.includes('"commit":null'));
+  assert.match(unbounded, /a task without a commit range/u);
 });
 
 test("implementation review публикует правки кода и артефактов вместе с отчётом из двух коммитов", async (context) => {
@@ -602,7 +644,9 @@ test("implementation review отклоняет задачи другого chang
     await context.test(response, async (subcontext) => {
       const value = await reviewFixture(subcontext);
       const command = value.command;
-      let invalid = true;
+      // Сверка сессии перед запуском агента читает задачи, поэтому некорректный
+      // ответ OpenSpec включается только на время завершения review.
+      let invalid = false;
       value.command = async (executable, args, options) => {
         const result = await command(executable, args, options);
         if (invalid && executable === "mise" && args.includes("apply")) {
@@ -621,6 +665,7 @@ test("implementation review отклоняет задачи другого chang
         await writeFile(value.reportPath, "# Review\n\nПравки проверены.\n");
         await value.git("add", ".");
         await value.git("commit", "-m", "docs(review): complete report");
+        invalid = true;
         const rejected = await client.callTool({ name: "complete_implementation_review", arguments: {} });
         assert.equal(rejected.isError, true);
         assert.match(rejected.content[0].text, response === "другой change" ? /другого change/u : /повторяющиеся ID/u);
@@ -709,4 +754,157 @@ test("recovery prompt не повторяет apply и запрещает GitHub
   assert.doesNotMatch(prompt, /\$openspec-apply-change/u);
   assert.match(prompt, /Never invoke `gh`/u);
   assert.match(prompt, new RegExp(implementationBranch, "u"));
+});
+
+test("оценка task-сессии различает неначатую, выполненную и устаревшую", async (context) => {
+  const value = await fixture(context);
+  const service = createChangeTaskExecutionService({ command: value.command, async createAgent() {} });
+  const signal = new AbortController().signal;
+  const git = async (...args) => (await execFileAsync("git", args, { cwd: value.workspace })).stdout.trim();
+  const plan = await service.plan(value.workspace, value.run);
+  assert.deepEqual(await service.assess(value.workspace, plan.session, signal), { kind: "resumable" });
+
+  // Коммит без отметки задачи: сессию нельзя ни начать с baseline, ни подтвердить.
+  await commitTaskFollowup(value);
+  assert.deepEqual(await service.assess(value.workspace, plan.session, signal), {
+    kind: "stale",
+    reason: "Implementation-ветка содержит commit, но выбранная задача не отмечена выполненной",
+  });
+  // Устаревшая сессия не запускает агента.
+  await assert.rejects(
+    service.run({
+      workspaceDirectory: value.workspace, profile: highProfile(), session: plan.session, signal,
+      onAgentCreated() { assert.fail("Агент не должен запускаться"); },
+      async onTaskCompleted() {},
+    }),
+    /выбранная задача не отмечена выполненной/u,
+  );
+
+  // Выполненная и закоммиченная задача подтверждается той же сессией.
+  await commitTask(value);
+  assert.deepEqual(await service.assess(value.workspace, plan.session, signal), { kind: "resumable" });
+
+  // Отмечена ещё одна задача: список не соответствует ни началу, ни итогу сессии.
+  await commitTask(value, { markSecond: true });
+  assert.deepEqual(await service.assess(value.workspace, plan.session, signal), {
+    kind: "stale",
+    reason: "Список OpenSpec-задач изменился после сохранения checkpoint",
+  });
+
+  // Выбранная задача переименована или перенесена на другую позицию.
+  const renamed = createChangeTaskExecutionService({
+    async command(executable, args, options) {
+      const result = await value.command(executable, args, options);
+      if (executable !== "mise") return result;
+      const instructions = JSON.parse(result.stdout);
+      instructions.tasks[0].description = "1.1 Другая задача";
+      return { stdout: JSON.stringify(instructions), stderr: "" };
+    },
+    async createAgent() {},
+  });
+  assert.deepEqual(await renamed.assess(value.workspace, plan.session, signal), {
+    kind: "stale",
+    reason: "OpenSpec больше не возвращает сохранённую задачу 1.1",
+  });
+
+  // Переписанная и опубликованная пользователем история лишает сессию baseline.
+  await git("checkout", "--orphan", "rewritten");
+  await git("commit", "-m", "переписанная история");
+  await git("branch", "-M", changeBranch);
+  await git("push", "--force", "origin", changeBranch);
+  assert.deepEqual(await service.assess(value.workspace, plan.session, signal), {
+    kind: "stale",
+    reason: "Implementation-ветка больше не продолжает baseline task-сессии",
+  });
+});
+
+test("plan продолжает пустой пакет после коммитов вне task-сессий", async (context) => {
+  const value = await fixture(context);
+  const service = createChangeTaskExecutionService({ command: value.command, async createAgent() {} });
+  // Коммит пользователя после baseline пакета опубликован до первой задачи.
+  await commitTaskFollowup(value);
+  await execFileAsync("git", ["push", "origin", changeBranch], { cwd: value.workspace });
+  const head = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: value.workspace })).stdout.trim();
+  const plan = await service.plan(value.workspace, value.run);
+  assert.equal(plan.kind, "next-task");
+  assert.equal(plan.session.baselineCommit, head);
+  assert.equal(plan.session.rootBaselineCommit, value.baseline);
+
+  // Baseline пакета вне текущей истории пакет продолжить не может.
+  await assert.rejects(
+    service.plan(value.workspace, { ...value.run, batch: { kind: "empty", baseCommit: "f".repeat(40) } }),
+    /Git HEAD не продолжает baseline пакета implementation-run/u,
+  );
+});
+
+test("оценка review-сессии различает начатую, завершённую и устаревшую", async (context) => {
+  const value = await reviewFixture(context);
+  const review = createImplementationReviewService({
+    command: value.command, phaseWork: value.phaseWork, async createAgent() {},
+  });
+  const signal = new AbortController().signal;
+  const assess = (overrides = {}) => review.assess({
+    workspaceDirectory: value.workspace,
+    run: value.run,
+    session: value.session,
+    taskBaseline: value.taskBaseline,
+    signal,
+    ...overrides,
+  });
+  assert.deepEqual(await assess(), { kind: "resumable" });
+
+  // Пакет изменился после планирования review.
+  assert.deepEqual(
+    await assess({ run: { ...value.run, batch: { ...value.run.batch, headCommit: "f".repeat(40) } } }),
+    { kind: "stale", reason: "Implementation review session не соответствует текущему пакету" },
+  );
+
+  // Правка кода без отчёта: review продолжается.
+  await writeFile(join(value.workspace, "implementation.ts"), "export const implemented = 'исправлено';\n");
+  await value.git("add", ".");
+  await value.git("commit", "-m", "fix(review): correct implementation");
+  assert.deepEqual(await assess(), { kind: "resumable" });
+
+  // Отчёт с повторно открытой задачей принять нельзя.
+  const completedTasks = await readFile(value.tasksPath, "utf8");
+  await writeFile(value.tasksPath, completedTasks.replace("- [x] 1.1", "- [ ] 1.1"));
+  await writeFile(value.reportPath, "# Review\n\nОтчёт с повторно открытой задачей.\n");
+  await value.git("add", ".");
+  await value.git("commit", "-m", "docs(review): report with reopened task");
+  assert.deepEqual(await assess(), {
+    kind: "stale",
+    reason: "Выполненная задача 1.1 удалена, перенумерована или снова открыта во время review",
+  });
+
+  // Восстановленная задача делает готовый отчёт продолжаемым.
+  await writeFile(value.tasksPath, completedTasks);
+  await value.git("add", ".");
+  await value.git("commit", "-m", "fix(review): preserve completed task");
+  assert.deepEqual(await assess(), { kind: "resumable" });
+
+  // Переписанная история лишает сессию reviewed head.
+  await value.git("checkout", "--orphan", "rewritten");
+  await value.git("commit", "-m", "переписанная история");
+  await value.git("branch", "-M", implementationBranch);
+  await value.git("push", "--force", "origin", implementationBranch);
+  assert.deepEqual(await assess(), {
+    kind: "stale",
+    reason: "Git HEAD больше не продолжает reviewed head пакета",
+  });
+});
+
+test("неопубликованный reviewed head делает review-сессию устаревшей", async (context) => {
+  const value = await reviewFixture(context);
+  const review = createImplementationReviewService({
+    command: value.command, phaseWork: value.phaseWork, async createAgent() {},
+  });
+  // Origin возвращён к baseline: reviewed head есть только локально.
+  await value.git("push", "--force", "origin", `${value.baseline}:refs/heads/${implementationBranch}`);
+  assert.deepEqual(
+    await review.assess({
+      workspaceDirectory: value.workspace, run: value.run, session: value.session,
+      taskBaseline: value.taskBaseline, signal: new AbortController().signal,
+    }),
+    { kind: "stale", reason: "Origin корневой ветки не совпадает с reviewed head" },
+  );
 });

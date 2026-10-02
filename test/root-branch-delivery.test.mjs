@@ -13,6 +13,8 @@ function fixture(options = {}) {
   let remote = options.remote ?? base;
   let pushed = false;
   const calls = [];
+  // Пары «предок потомок», известные тестовой истории Git.
+  const ancestry = new Set([`${base} ${head}`, ...(options.ancestry ?? [])]);
   const pr = () => ({
     number: 41,
     url: `${repositoryUrl}/pull/41`,
@@ -45,8 +47,9 @@ function fixture(options = {}) {
     if (key.startsWith("gh pr list ") || key.startsWith("gh pr view ")) {
       return { stdout: JSON.stringify(key.startsWith("gh pr list ") ? [pr()] : pr()), stderr: "" };
     }
-    if (key === `git merge-base --is-ancestor ${base} ${head}`) {
-      return { stdout: "", stderr: "" };
+    if (key.startsWith("git merge-base --is-ancestor ")) {
+      if (ancestry.has(args.slice(2).join(" "))) return { stdout: "", stderr: "" };
+      throw Object.assign(new Error("не предок"), { code: 1 });
     }
     if (key === `git push origin HEAD:refs/heads/${branch}`) {
       remote = head;
@@ -83,6 +86,36 @@ test("расхождение origin и преждевременный merge ос
     );
     assert.equal(state.calls.some((call) => call.startsWith("git push")), false);
   }
+});
+
+test("origin на промежуточном коммите допускает fast-forward публикацию", async () => {
+  // Пользователь или агент уже опубликовал часть коммитов этапа.
+  const state = fixture({ remote: other, ancestry: [`${other} ${head}`] });
+  await deliverRootCommit("/repo", changeId, base, head, undefined, state.command);
+  assert.equal(state.remote(), head);
+  assert.equal(state.calls.filter((call) => call.startsWith("git push")).length, 1);
+});
+
+test("коммит не от baseline этапа не публикуется", async () => {
+  const state = fixture({ remote: other, ancestry: [`${other} ${head}`] });
+  await assert.rejects(
+    deliverRootCommit("/repo", changeId, "d".repeat(40), head, undefined, state.command),
+    /не происходит от сохранённого baseline/u,
+  );
+  assert.equal(state.calls.some((call) => call.startsWith("git push")), false);
+});
+
+test("принятые коммиты публикуются в Ready PR только по явному разрешению", async () => {
+  const strict = fixture({ isDraft: false });
+  await assert.rejects(
+    deliverRootCommit("/repo", changeId, base, head, undefined, strict.command),
+    /Draft/u,
+  );
+  const relaxed = fixture({ isDraft: false });
+  await deliverRootCommit(
+    "/repo", changeId, base, head, undefined, relaxed.command, undefined, { requireDraft: false },
+  );
+  assert.equal(relaxed.remote(), head);
 });
 
 test("изменение base корневого PR после push останавливает подтверждение", async () => {

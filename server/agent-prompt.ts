@@ -45,20 +45,45 @@ export type TaskScopePromptInput =
 const UNPLANNED_PHASE_RULE =
   "The orchestrator plans every phase that has no tasks: never add tasks to such a phase, and capture work that belongs there in that phase of plan.md instead.";
 
+/**
+ * Порядок исполнения задач. Оркестратор не читает зависимости и пометки в
+ * тексте: он берёт первую незавершённую задачу фазы по порядку в файле.
+ */
+export const TASK_ORDER_FACT =
+  "The orchestrator executes the incomplete tasks of a phase one at a time, strictly in file order.";
+
+/**
+ * До начала реализации задачи фазы ещё не входят в сохранённую историю,
+ * поэтому этап планирования расставляет их в порядке выполнения.
+ */
+const PLANNED_TASK_ORDER_RULE =
+  "Place every task after the tasks it depends on: until they run, the incomplete tasks of the phases you may extend may be inserted, reordered, and renumbered. Never describe an execution order that differs from file order.";
+
 /** Правило добавления задач: фазы без задач планирует только оркестратор. */
 export function taskScopeRule(scope: TaskScopePromptInput): string {
   switch (scope.kind) {
     case "initial-planning":
       return scope.plannedPhases.length === 0
         ? `No phase has tasks yet, so do not add tasks. ${UNPLANNED_PHASE_RULE}`
-        : `Add new tasks only to phases that already have tasks: ${scope.plannedPhases.map((phase) => `Phase ${phase}`).join(", ")}. ${UNPLANNED_PHASE_RULE}`;
+        : `Add new tasks only to phases that already have tasks: ${scope.plannedPhases.map((phase) => `Phase ${phase}`).join(", ")}. ${TASK_ORDER_FACT} ${PLANNED_TASK_ORDER_RULE} ${UNPLANNED_PHASE_RULE}`;
     case "phase-planning":
-      return `Add new tasks only to Phase ${scope.phaseNumber}. ${UNPLANNED_PHASE_RULE}`;
+      return `Add new tasks only to Phase ${scope.phaseNumber}. ${TASK_ORDER_FACT} ${PLANNED_TASK_ORDER_RULE} ${UNPLANNED_PHASE_RULE}`;
     case "implementation": {
       const phase = scope.phaseNumber;
-      return `Add new tasks only to Phase ${phase} or to a new phase of your own, and append every new task after all existing tasks. Number new Phase ${phase} tasks as ${phase}.<next free number>. Never add tasks to another existing phase. ${UNPLANNED_PHASE_RULE} When the agreed follow-up needs a phase of its own, insert its heading in plan.md right after Phase ${phase} with a number greater than every existing phase number, keep every existing phase number unchanged, and number its tasks with that new phase number.`;
+      return `Add new tasks only to Phase ${phase} or to a new phase of your own, and append every new task after all existing tasks. ${TASK_ORDER_FACT} Append the new tasks in the order they must run. Number new Phase ${phase} tasks as ${phase}.<next free number>. Never add tasks to another existing phase. ${UNPLANNED_PHASE_RULE} When the agreed follow-up needs a phase of its own, insert its heading in plan.md right after Phase ${phase} with a number greater than every existing phase number, keep every existing phase number unchanged, and number its tasks with that new phase number.`;
     }
   }
+}
+
+/**
+ * Правило сохранения списка задач для review-этапов. Во время implementation
+ * run история задач неизменна. При планировании сохраняются только
+ * завершённые задачи: незавершённые ещё можно расставить в порядке выполнения.
+ */
+export function taskHistoryRule(scope: TaskScopePromptInput): string {
+  return scope.kind === "implementation"
+    ? "Preserve the workflow's recorded task history: task IDs, numbers, descriptions, and order stay the same, completed tasks stay complete, and new tasks start incomplete."
+    : "Preserve the workflow's recorded task history: completed tasks stay exactly as they are and stay complete, and new tasks start incomplete.";
 }
 
 /** Данные области задач для workflow data промпта. */

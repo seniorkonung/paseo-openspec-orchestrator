@@ -1,6 +1,7 @@
 import { runBoundedCommand, type BoundedCommandRunner } from "./bounded-command.ts";
 import { commitHashSchema } from "./change-artifact-model.ts";
 import { changeBranchFor } from "./change-branch.ts";
+import { isCommitAncestor } from "./git-ancestry.ts";
 import {
   assertCleanReviewWorktree,
   listReviewPullRequests,
@@ -17,8 +18,17 @@ export class RootBranchDeliveryError extends Error {
   constructor(message: string) { super(message); this.name = "RootBranchDeliveryError"; }
 }
 
+export interface RootCommitDeliveryOptions {
+  /**
+   * Коммиты этапа публикуются только в Draft PR. Принятые коммиты пользователя
+   * могут публиковаться и после перевода PR в Ready.
+   */
+  readonly requireDraft?: boolean;
+}
+
 // Коммит проверяется вызывающим этапом. Эта граница публикует только проверенный
-// HEAD и никогда не перезаписывает неожиданное продвижение origin.
+// HEAD и только fast-forward: origin может указывать на любой предок HEAD, но
+// никогда не перезаписывается.
 export async function deliverRootCommit(
   workspaceDirectory: string,
   changeId: string,
@@ -27,7 +37,9 @@ export async function deliverRootCommit(
   signal?: AbortSignal,
   command: BoundedCommandRunner = runBoundedCommand,
   expectedPullRequest?: RootPullRequestIdentity,
+  options: RootCommitDeliveryOptions = {},
 ): Promise<void> {
+  const requireDraft = options.requireDraft ?? true;
   const baseline = commitHashSchema.parse(baselineInput);
   const head = commitHashSchema.parse(headInput);
   const branch = changeBranchFor(changeId);
@@ -38,16 +50,16 @@ export async function deliverRootCommit(
     readRemoteReviewBranchCommit(command, workspaceDirectory, branch, signal),
     resolveReviewRepository(command, workspaceDirectory, signal),
   ]);
-  if (current !== branch || local !== head || (remote !== baseline && remote !== head)) {
-    throw new RootBranchDeliveryError("Корневая ветка или origin изменились после сохранённого baseline");
+  if (current !== branch || local !== head) {
+    throw new RootBranchDeliveryError("Корневая ветка изменилась перед публикацией коммита");
   }
-  if (baseline !== head) {
-    try {
-      await command("git", ["merge-base", "--is-ancestor", baseline, head], { cwd: workspaceDirectory, signal });
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      throw new RootBranchDeliveryError("Новый коммит не происходит от сохранённого baseline");
-    }
+  if (!(await isCommitAncestor(command, workspaceDirectory, remote, head, signal))) {
+    throw new RootBranchDeliveryError(
+      "Origin корневой ветки содержит коммиты, которых нет в локальной ветке",
+    );
+  }
+  if (!(await isCommitAncestor(command, workspaceDirectory, baseline, head, signal))) {
+    throw new RootBranchDeliveryError("Новый коммит не происходит от сохранённого baseline");
   }
   const requests = await listReviewPullRequests(command, workspaceDirectory, repositoryArgument(repository), branch, "all", signal);
   if (requests.length !== 1) throw new RootBranchDeliveryError("Для change требуется ровно один корневой PR");
@@ -60,9 +72,13 @@ export async function deliverRootCommit(
     expectedPullRequest.repositoryNameWithOwner.toLowerCase() !== repository.nameWithOwner.toLowerCase() ||
     expectedPullRequest.repositoryUrl !== repository.url
   )) throw new RootBranchDeliveryError("Identity корневого PR изменилась до публикации коммита");
-  if (pr.state !== "OPEN" || !pr.isDraft || pr.isCrossRepository ||
+  if (pr.state !== "OPEN" || (requireDraft && !pr.isDraft) || pr.isCrossRepository ||
       pr.baseRefName !== "main" || pr.headRefName !== branch || pr.headRefOid !== remote) {
-    throw new RootBranchDeliveryError("Корневой PR изменился или уже не находится в Draft");
+    throw new RootBranchDeliveryError(
+      requireDraft
+        ? "Корневой PR изменился или уже не находится в Draft"
+        : "Корневой PR изменился или уже закрыт",
+    );
   }
   if (remote === head) return;
   try {
@@ -76,7 +92,7 @@ export async function deliverRootCommit(
     readReviewPullRequest(command, workspaceDirectory, repositoryArgument(repository), pr.number, signal),
   ]);
   assertPullRequestRepository(prAfter, repository.url);
-  if (remoteAfter !== head || prAfter.state !== "OPEN" || !prAfter.isDraft ||
+  if (remoteAfter !== head || prAfter.state !== "OPEN" || (requireDraft && !prAfter.isDraft) ||
       prAfter.isCrossRepository || prAfter.baseRefName !== "main" ||
       prAfter.headRefName !== branch || prAfter.headRefOid !== head ||
       prAfter.number !== pr.number) {

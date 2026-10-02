@@ -5,13 +5,14 @@ import type { CompleteRequiredAgentProfile } from "./agent-profiles.ts";
 import { FIXED_BRANCH_RULE, NO_GITHUB_RULE, OPENSPEC_CLI_RULE, buildAgentPrompt, completionInstruction } from "./agent-prompt.ts";
 import { combineAbortSignals, throwIfSignalAborted } from "./agent-session-control.ts";
 import { runBoundedCommand, type BoundedCommandRunner } from "./bounded-command.ts";
-import { archivedChangeSchema, ChangeArchiveError, pendingArchiveSessionSchema, type ArchivedChange, type PendingArchiveSession } from "./change-archive-model.ts";
+import { archivedChangeSchema, ChangeArchiveError, pendingArchiveSessionSchema, type ArchivedChange, type PendingArchiveSession, type VerifiedChangeArchive } from "./change-archive-model.ts";
 import { createChangeArchiveVerification, type ChangeArchiveVerification } from "./change-archive-verification.ts";
 import { createManagedAgentSession } from "./managed-agent-session.ts";
 import { McpToolError, OrchestratorMcpToolHost, defineMcpTool } from "./orchestrator-mcp-tool-host.ts";
 import { updateAgentNotificationLabel, type AgentNotificationLabelUpdater } from "./paseo-agent-labels.ts";
 import type { RootPullRequestIdentity, RootPullRequestService } from "./root-pull-request.ts";
 import { deliverRootCommit } from "./root-branch-delivery.ts";
+import { RESUMABLE_SESSION, staleSession, type SessionAssessment } from "./session-assessment.ts";
 
 type PaseoApi = PluginHandlerContext["paseo"];
 type PaseoWorkspace = ReturnType<PaseoApi["workspaces"]["ref"]>;
@@ -20,6 +21,17 @@ type AgentCreator = (options: Parameters<PaseoWorkspace["agents"]["create"]>[0])
 
 export interface ChangeArchiveService {
   plan(directory: string, changeId: string, identity: RootPullRequestIdentity, signal?: AbortSignal): Promise<PendingArchiveSession>;
+  /**
+   * Оценивает сохранённую сессию архивации, не меняя репозиторий. Продолжить
+   * можно сессию, которая не начата или прервана на незавершённом переносе, и
+   * любую сессию, чей change уже находится в архиве.
+   */
+  assess(directory: string, session: PendingArchiveSession, signal: AbortSignal): Promise<SessionAssessment>;
+  /**
+   * Завершает архивацию. Обычно её выполняет и подтверждает агент. Если change
+   * уже в архиве, но диапазон сессии это не подтверждает, агент не запускается:
+   * возвращается архив без проверенного коммита, принятый из репозитория.
+   */
   run(request: {
     readonly workspaceDirectory: string;
     readonly profile: CompleteRequiredAgentProfile;
@@ -27,7 +39,11 @@ export interface ChangeArchiveService {
     readonly signal: AbortSignal;
     readonly onAgentCreated: (agentId: string) => void;
   }): Promise<ArchivedChange>;
-  verifyArchived(directory: string, archived: ArchivedChange, signal?: AbortSignal): Promise<void>;
+  /**
+   * Проверяет архив перед финальным merge и возвращает текущий HEAD. Коммиты,
+   * добавленные после архивного, допускаются, пока change остаётся в архиве.
+   */
+  verifyArchived(directory: string, archived: ArchivedChange, signal?: AbortSignal): Promise<string>;
 }
 
 interface McpHostFactory { listen(): Promise<OrchestratorMcpToolHost>; }
@@ -49,13 +65,23 @@ export function createChangeArchiveService(options: {
   return {
     plan: (directory, id, identity, signal) => verification.plan(directory, id, identity, signal),
     verifyArchived: (directory, archived, signal) => verification.verifyArchived(directory, archived, signal),
+    async assess(directory, sessionInput, signal) {
+      const session = pendingArchiveSessionSchema.parse(sessionInput);
+      const recovery = await verification.inspectRecovery(directory, session, signal);
+      return recovery.kind === "stale" ? staleSession(recovery.reason) : RESUMABLE_SESSION;
+    },
     async run(request) {
       throwIfSignalAborted(request.signal);
       const session = pendingArchiveSessionSchema.parse(request.session);
-      const recovery = await verification.inspectRecovery(request.workspaceDirectory, session, request.signal);
+      const inspected = await verification.inspectRecovery(request.workspaceDirectory, session, request.signal);
+      // Устаревшую сессию сбрасывает согласование перед шагом; здесь она
+      // возможна только при изменении репозитория после него.
+      if (inspected.kind === "stale") throw new ChangeArchiveError(inspected.reason);
+      if (inspected.kind === "adopted") return { session, commit: null };
+      const recovery = inspected.kind;
       const host = await mcpHost.listen();
-      let completed: ArchivedChange | null = null;
-      const agentSession = createManagedAgentSession<ArchivedChange>({
+      let completed: VerifiedChangeArchive | null = null;
+      const agentSession = createManagedAgentSession<VerifiedChangeArchive>({
         signal: request.signal,
         host,
         updateNotificationLabel: options.updateNotificationLabel ?? updateAgentNotificationLabel,
@@ -73,7 +99,7 @@ export function createChangeArchiveService(options: {
             const combined = combineAbortSignals(request.signal, toolContext.signal);
             try {
               const activeAgent = await agentSession.waitForAgent(combined.signal);
-              let verified: ArchivedChange;
+              let verified: VerifiedChangeArchive;
               try {
                 verified = await verification.verifyCommit(request.workspaceDirectory, session, combined.signal);
                 await deliverRootCommit(request.workspaceDirectory, session.changeId, session.baselineCommit, verified.commit, combined.signal, command, session.rootPullRequest);

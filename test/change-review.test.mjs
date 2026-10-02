@@ -7,7 +7,11 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { prepareReviewPublication } from "../server/change-review-publication.ts";
 import { createChangeReviewVerification } from "../server/change-review-verification.ts";
-import { ChangeReviewError, changeReviewPrompt } from "../server/change-review.ts";
+import {
+  ChangeReviewError,
+  changeReviewPrompt,
+  createChangeReviewService,
+} from "../server/change-review.ts";
 
 const execFileAsync = promisify(execFile);
 const changeId = "complete-review-workflow";
@@ -181,6 +185,11 @@ test("review prompt разрешает правки и сохраняет зап
         : /Add new tasks only to Phase 2\./u,
     );
     assert.match(prompt, /The orchestrator plans every phase that has no tasks/u);
+    // При планировании порядок задач в файле — это порядок выполнения.
+    assert.match(prompt, /completed tasks stay exactly as they are and stay complete/u);
+    assert.doesNotMatch(prompt, /and order stay the same/u);
+    assert.match(prompt, /strictly in file order/u);
+    assert.match(prompt, /Never describe an execution order that differs from file order/u);
   }
 });
 
@@ -207,4 +216,44 @@ test("review не публикует коммит, который наполня
   );
   assert.deepEqual(scopeChecks, [signal, signal]);
   assert.equal(value.calls.some((call) => call.startsWith("git push ")), false);
+});
+
+test("review-сессия продолжается после новых коммитов и устаревает после переписанной истории", async (context) => {
+  const value = await fixture(context);
+  const service = createChangeReviewService({
+    command: value.command,
+    phaseWork: { async inspect() { throw new Error("Область задач не проверяется"); } },
+    async createAgent() {},
+  });
+  const signal = new AbortController().signal;
+  const session = await service.plan(value.workspace, changeId, branch, branch, null);
+  assert.deepEqual(await service.assess(value.workspace, session, signal), { kind: "resumable" });
+
+  // Коммит пользователя во время review входит в результат этапа.
+  await writeFile(join(value.workspace, "implementation.ts"), "export const implemented = true;\n");
+  await value.git("commit", "-am", "fix: ручная правка");
+  await value.git("push", "origin", branch);
+  assert.deepEqual(await service.assess(value.workspace, session, signal), { kind: "resumable" });
+
+  // Review поверх уже опубликованного промежуточного коммита публикуется fast-forward.
+  await writeFile(join(value.changeRoot, "review.md"), "# Review\n\nПроблем не найдено.\n");
+  await value.git("add", ".");
+  await value.git("commit", "-m", reviewSubject);
+  const verification = createChangeReviewVerification({ command: value.command });
+  const reviewContext = await verification.readContext(value.workspace, changeId);
+  const completed = await verification.verifyCompleted(reviewContext, session, withinTaskScope, signal);
+  assert.equal(completed.pullRequest.number, 41);
+  assert.match(
+    await value.git("ls-remote", "--heads", "origin", `refs/heads/${branch}`),
+    new RegExp(`^${await value.git("rev-parse", "HEAD")}`, "u"),
+  );
+
+  // Переписанная история лишает сессию baseline.
+  await value.git("checkout", "--orphan", "rewritten");
+  await value.git("commit", "-m", "переписанная история");
+  await value.git("branch", "-M", branch);
+  assert.deepEqual(await service.assess(value.workspace, session, signal), {
+    kind: "stale",
+    reason: "Текущий Git HEAD больше не продолжает baseline review-сессии",
+  });
 });

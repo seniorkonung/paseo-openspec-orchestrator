@@ -60,7 +60,9 @@ async function archiveChangeStep(dependencies: ArchiveChangeDependencies, contex
       kind: "continue",
       next: "await-root-merge",
       state: { pendingArchiveSession: null, archivedChange: archived },
-      summary: `Change ${change.id} архивирован коммитом ${archived.commit}`,
+      summary: archived.commit === null
+        ? `Архив change ${change.id} принят из репозитория: коммиты добавлены или переписаны вне этапа`
+        : `Change ${change.id} архивирован коммитом ${archived.commit}`,
     };
   } catch (error) { return archiveFailure(context, error, "Не удалось завершить архивацию change"); }
 }

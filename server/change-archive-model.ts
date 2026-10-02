@@ -42,10 +42,17 @@ export type PendingArchiveSession = z.infer<typeof pendingArchiveSessionSchema>;
 
 export const archivedChangeSchema = z.object({
   session: pendingArchiveSessionSchema,
-  commit: commitHashSchema,
+  /**
+   * Архивный коммит, проверенный этапом архивации. `null` — change перенесён в
+   * архив, но диапазон сессии это не подтверждает: история переписана либо в
+   * неё попали коммиты вне этапа. Такой архив принят из репозитория.
+   */
+  commit: commitHashSchema.nullable(),
 }).strict();
 
 export type ArchivedChange = z.infer<typeof archivedChangeSchema>;
+/** Архив, коммит которого проверен этапом архивации. */
+export type VerifiedChangeArchive = ArchivedChange & { readonly commit: string };
 
 export class ChangeArchiveError extends Error {
   constructor(message: string) { super(message); this.name = "ChangeArchiveError"; }

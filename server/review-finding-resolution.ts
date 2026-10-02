@@ -8,6 +8,7 @@ import {
 import { runBoundedCommand, type BoundedCommandRunner } from "./bounded-command.ts";
 import { commitHashSchema } from "./change-artifact-model.ts";
 import { changeBranchFor } from "./change-branch.ts";
+import { isCommitAncestor } from "./git-ancestry.ts";
 import { deliverRootCommit } from "./root-branch-delivery.ts";
 import {
   assertActiveReviewPullRequest,
@@ -36,6 +37,7 @@ import {
   createTaskScopeCheck,
   type PhaseTaskScope,
   type PhaseWorkService,
+  type TaskScopeCheck,
 } from "./phase-work.ts";
 import {
   updateAgentNotificationLabel,
@@ -46,6 +48,11 @@ import {
   parseChangeId,
   type ReviewFindingContextReaderOptions,
 } from "./review-finding-context.ts";
+import {
+  RESUMABLE_SESSION,
+  staleSession,
+  type SessionAssessment,
+} from "./session-assessment.ts";
 import {
   ReviewFindingResolutionError,
   findingResolutionBranchSchema,
@@ -62,8 +69,8 @@ import {
 import {
   assertCleanWorktree,
   assertCurrentBranch,
-  assertDescendsFromBaseline,
   assertRemoteHead,
+  describeFindingRangeViolation,
   assertReviewTracked,
   readHeadCommit,
   readLocalResolutionIfReady,
@@ -122,10 +129,32 @@ export interface ReviewFindingResolutionService<
     branch: string,
     signal?: AbortSignal,
   ): Promise<ReviewFindingResolutionPlan<Session>>;
+  /**
+   * Оценивает сохранённую finding-сессию, не меняя репозиторий. Сессия
+   * продолжается, пока устранение можно завершить и подтвердить ею. Она
+   * устарела, когда Git HEAD не продолжает её baseline или после него появились
+   * коммиты вне каталога change: их этап принять не может.
+   */
+  assess(request: {
+    readonly workspaceDirectory: string;
+    readonly session: Session;
+    readonly taskScope: PhaseTaskScope;
+    readonly signal: AbortSignal;
+  }): Promise<SessionAssessment>;
   run(
     request: ReviewFindingResolutionRequest<Session>,
   ): Promise<CompletedReviewFindingResolution>;
 }
+
+/**
+ * Состояние сохранённой finding-сессии относительно репозитория: устранение
+ * ещё не подтверждено, уже закоммичено и проверено либо сессию нельзя
+ * завершить.
+ */
+type FindingSessionRecovery =
+  | { readonly kind: "unresolved" }
+  | { readonly kind: "resolved"; readonly resolution: VerifiedReviewFindingResolution }
+  | { readonly kind: "stale"; readonly reason: string };
 
 interface McpHostFactory {
   listen(): Promise<OrchestratorMcpToolHost>;
@@ -164,7 +193,68 @@ export function createReviewFindingResolutionService<
     options.agentDrainTimeoutMs ?? DEFAULT_AGENT_DRAIN_TIMEOUT_MS;
   const logger = options.logger ?? console;
 
+  const inspectSession = async (
+    context: Awaited<ReturnType<typeof contextReader.readContext>>,
+    session: Session,
+    assertTaskScope: TaskScopeCheck,
+    signal: AbortSignal,
+  ): Promise<FindingSessionRecovery> => {
+    await assertCurrentBranch(command, context.gitRoot, session.branch, signal);
+    if (!(await isCommitAncestor(
+      command, context.gitRoot, session.baselineCommit, "HEAD", signal,
+    ))) {
+      return {
+        kind: "stale",
+        reason: "Текущий Git HEAD больше не продолжает baseline finding-сессии",
+      };
+    }
+    const resolution = await readLocalResolutionIfReady(
+      command,
+      context,
+      session,
+      behavior,
+      contextReader.readReport,
+      assertTaskScope,
+      signal,
+    );
+    if (resolution) return { kind: "resolved", resolution };
+    // Этап принимает только коммиты внутри каталога change. Если после
+    // baseline уже есть иные коммиты, завершить эту сессию нельзя: finding
+    // планируется заново от текущего HEAD. Незавершённое устранение
+    // продолжает агент той же сессии.
+    const violation = await describeFindingRangeViolation(command, context, session, signal);
+    return violation === null ? { kind: "unresolved" } : { kind: "stale", reason: violation };
+  };
+  const scopeCheck = (
+    workspaceDirectory: string,
+    changeId: string,
+    taskScope: PhaseTaskScope,
+  ): TaskScopeCheck =>
+    createTaskScopeCheck(
+      options.phaseWork,
+      workspaceDirectory,
+      changeId,
+      taskScope,
+      (message) => new ReviewFindingResolutionError(message),
+    );
+
   return {
+    async assess(request) {
+      const session = behavior.sessionSchema.parse(request.session);
+      const context = await contextReader.readContext(
+        request.workspaceDirectory,
+        session.changeId,
+        request.signal,
+      );
+      const recovery = await inspectSession(
+        context,
+        session,
+        scopeCheck(request.workspaceDirectory, session.changeId, request.taskScope),
+        request.signal,
+      );
+      return recovery.kind === "stale" ? staleSession(recovery.reason) : RESUMABLE_SESSION;
+    },
+
     async plan(workspaceDirectory, changeId, branch, signal) {
       const parsedBranch = parseFindingResolutionBranch(branch);
       if (parsedBranch !== changeBranchFor(changeId)) {
@@ -246,30 +336,12 @@ export function createReviewFindingResolutionService<
         changeId,
         request.signal,
       );
-      const assertTaskScope = createTaskScopeCheck(
-        options.phaseWork,
-        request.workspaceDirectory,
-        changeId,
-        request.taskScope,
-        (message) => new ReviewFindingResolutionError(message),
-      );
-      await assertCurrentBranch(command, context.gitRoot, branch, request.signal);
-      await assertDescendsFromBaseline(
-        command,
-        context.gitRoot,
-        session.baselineCommit,
-        request.signal,
-      );
-
-      const existingLocalResolution = await readLocalResolutionIfReady(
-        command,
-        context,
-        session,
-        behavior,
-        contextReader.readReport,
-        assertTaskScope,
-        request.signal,
-      );
+      const assertTaskScope = scopeCheck(request.workspaceDirectory, changeId, request.taskScope);
+      const recovery = await inspectSession(context, session, assertTaskScope, request.signal);
+      // Устаревшую сессию сбрасывает согласование перед шагом; здесь она
+      // возможна только при изменении репозитория после него.
+      if (recovery.kind === "stale") throw new ReviewFindingResolutionError(recovery.reason);
+      const existingLocalResolution = recovery.kind === "resolved" ? recovery.resolution : null;
       if (existingLocalResolution) {
         await deliverRootCommit(
           context.gitRoot,

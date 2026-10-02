@@ -161,6 +161,31 @@ async function verifyLocalResolution<Session extends ReviewFindingResolutionSess
   };
 }
 
+/**
+ * Описывает, чем коммиты после baseline уже нарушают контракт finding-этапа:
+ * в диапазон попали файлы вне каталога change. Такой диапазон этап не примет
+ * ни при каком продолжении. Незавершённое устранение нарушением не считается.
+ */
+export async function describeFindingRangeViolation(
+  command: BoundedCommandRunner,
+  context: FindingResolutionContext,
+  session: ReviewFindingResolutionSession,
+  signal: AbortSignal,
+): Promise<string | null> {
+  const head = await readHeadCommit(command, context.gitRoot, signal);
+  const changedPaths = await readDiffPaths(
+    command,
+    context.gitRoot,
+    session.baselineCommit,
+    head,
+    signal,
+  );
+  const allowedPrefix = `${context.changeRepositoryPath}/`;
+  return changedPaths.some((path) => !path.startsWith(allowedPrefix))
+    ? "После baseline finding-сессии появились коммиты вне каталога change"
+    : null;
+}
+
 export async function assertCleanWorktree(
   command: BoundedCommandRunner,
   gitRoot: string,
