@@ -250,6 +250,46 @@ already holds for the corrections the review agent commits itself.
 A stage that is stuck because the repository changed under it ends when the
 plugin is reloaded; the next Start reconciles and plans the stage again.
 
+## Agent resource lifecycle
+
+Every agent stage owns its Paseo session, its descendants, and its scoped MCP
+resources. On success, the stage waits for the final response before cleanup.
+On error or cancellation, it proceeds directly to cleanup. Waiting for a user
+decision remains active work; an idle agent turn alone does not close the stage.
+Concurrent calls to close a session wait for the same cleanup, including an
+agent that appears after cancellation during creation.
+
+Cleanup [archives the agent through the Paseo SDK](https://paseo.sh/docs/sdk/reference#agent-handle),
+which closes its runtime and removes its open tabs in Paseo. Conversation
+history remains available in the archive. The workflow checkpoint retains the
+verified stage result, so Retry recovers it without repeating completed work.
+
+Before requesting an agent from the daemon, the orchestrator durably registers
+its assigned ID in
+`<PASEO_HOME>/plugin-data/paseo-openspec-orchestrator/agent-resources.json`.
+This resource registry is separate from the workflow checkpoint and survives
+workflow state clearing. Parent links identify descendant Paseo agents,
+including late children of already archived parents. Failed cleanup retains
+the records, reports the failure in the workflow lifecycle, and blocks the next
+stage until Retry completes cleanup. MCP scope and host closure are attempted
+even when agent archive or process cleanup fails.
+
+On Linux, after archiving, cleanup scans `/proc` for an exact `PASEO_AGENT_ID`
+matching a registered session. It sends `SIGTERM`, waits up to five seconds,
+then uses `SIGKILL` and checks termination for up to two seconds. Before every
+signal it rechecks the UID, session marker, and process start time. Detached
+processes are included; manual sessions and processes of other agents are left
+alone. Cleanup deadlines are independent of workflow cancellation.
+
+At startup, the first orchestrator RPC provides the SDK context needed to
+recover unfinished cleanup from the previous plugin process. A graceful plugin
+shutdown waits for active sessions to close. After a crash, cleanup resumes on
+the next initialization. The integration targets installed Paseo 0.10; other
+operating systems use SDK runtime closure without the extra Linux process scan.
+A process that clears its environment marker and detaches, or whose environment
+is inaccessible before ownership can be confirmed, cannot be identified this
+way. Full coverage requires launch isolation in Paseo itself.
+
 ## Recovery and development
 
 Stages that create commits save a pending session before agent work.
@@ -262,7 +302,7 @@ A workspace is OpenSpec-enabled when `openspec/config.yaml` exists at its
 root. Detailed instructions for adding a workflow step are in
 [`server/workflow/README.md`](server/workflow/README.md).
 
-The project targets Node.js 22 and Paseo 0.8.0 or newer:
+The project targets Node.js 22 and Paseo 0.10.0 or newer (agent lifecycle hooks):
 
 ```sh
 mise install

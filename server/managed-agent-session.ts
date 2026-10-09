@@ -1,4 +1,5 @@
 import type { AgentNotificationLabelUpdater } from "./paseo-agent-labels.ts";
+import { AgentCleanupError, withCleanupDeadline } from "./agent-cleanup-error.ts";
 import {
   abortError,
   createDeferred,
@@ -15,7 +16,13 @@ interface AsyncClosable {
 interface ManagedAgent {
   readonly id: string;
   waitForFinish(timeoutMs: number): Promise<unknown>;
+  archive(): Promise<unknown>;
 }
+
+export type AgentResourceReleaser = (
+  agent: Pick<ManagedAgent, "id" | "archive">,
+  closeLocalResources: () => Promise<void>,
+) => Promise<void>;
 
 export interface ManagedAgentSessionOptions {
   readonly signal: AbortSignal;
@@ -24,6 +31,8 @@ export interface ManagedAgentSessionOptions {
   readonly agentDrainTimeoutMs: number;
   readonly logContext: string;
   readonly logger: Pick<Console, "warn">;
+  readonly cleanupTimeoutMs?: number;
+  readonly releaseAgent?: AgentResourceReleaser;
 }
 
 export interface ManagedAgentSession<Result> {
@@ -47,13 +56,14 @@ export interface ManagedAgentSession<Result> {
  *
  * Доменный сценарий по-прежнему решает, что проверять и когда считать работу
  * завершённой. Сессия гарантирует порядок публикации агента MCP-инструментам,
- * сериализацию их вызовов, отмену ожидания, best-effort cleanup и точное
+ * сериализацию их вызовов, отмену ожидания, закрытие агента и точное
  * отслеживание состояния финального уведомления.
  */
 export function createManagedAgentSession<Result>(
   options: ManagedAgentSessionOptions,
 ): ManagedAgentSession<Result> {
   const agentReady = createDeferred<ManagedAgent>();
+  void agentReady.promise.catch(() => undefined);
   const completion = createDeferred<Result>();
   void completion.promise.catch(() => undefined);
 
@@ -61,12 +71,22 @@ export function createManagedAgentSession<Result>(
   let scope: AsyncClosable | null = null;
   let notificationsEnabled = false;
   let closed = false;
+  let creation: Promise<ManagedAgent> | null = null;
+  let creationWaitExpired = false;
+  let closePromise: Promise<void> | null = null;
+  let agentClosePromise: Promise<void> | null = null;
+  let localClosePromise: Promise<void> | null = null;
+  const closedLocalResources = new Set<AsyncClosable>();
   const runExclusive = createSerializedExecutor();
-  const abortCompletion = () => completion.reject(abortError());
+  const abortCompletion = () => {
+    completion.reject(abortError());
+    agentReady.reject(abortError());
+  };
   options.signal.addEventListener("abort", abortCompletion, { once: true });
+  if (options.signal.aborted) abortCompletion();
 
   const warn = (
-    operation: "drain-agent" | "disable-notifications" | "close-scope" | "close-host",
+    operation: "drain-agent" | "disable-notifications" | "archive-agent" | "create-agent" | "close-scope" | "close-host",
     error: unknown,
   ): void => {
     try {
@@ -83,35 +103,90 @@ export function createManagedAgentSession<Result>(
     }
   };
 
-  const close = async (): Promise<void> => {
-    if (closed) return;
+  const closeLocalResources = (): Promise<void> => {
+    if (localClosePromise) return localClosePromise;
+    const closing = (async () => {
+      const failures: unknown[] = [];
+      for (const [operation, resource] of [["close-scope", scope], ["close-host", options.host]] as const) {
+        if (!resource || closedLocalResources.has(resource)) continue;
+        try {
+          await withCleanupDeadline(() => resource.close(), options.cleanupTimeoutMs);
+          closedLocalResources.add(resource);
+        } catch (error) {
+          failures.push(error);
+          warn(operation, error);
+        }
+      }
+      if (failures.length) throw new AgentCleanupError("Не удалось закрыть MCP scope или host", failures);
+    })();
+    localClosePromise = closing;
+    void closing.catch(() => {
+      if (localClosePromise === closing) localClosePromise = null;
+    });
+    return closing;
+  };
+
+  const closeAgent = (): Promise<void> => {
+    if (agentClosePromise) return agentClosePromise;
+    const ownedAgent = agent;
+    if (!ownedAgent) return Promise.resolve();
+    agentClosePromise = (async () => {
+      if (notificationsEnabled) {
+        try {
+          await withCleanupDeadline(() => options.updateNotificationLabel(ownedAgent.id, false), options.cleanupTimeoutMs);
+          notificationsEnabled = false;
+        } catch (error) {
+          warn("disable-notifications", error);
+        }
+      }
+      await withCleanupDeadline(
+        () => options.releaseAgent ? options.releaseAgent(ownedAgent, closeLocalResources) : ownedAgent.archive(),
+        options.cleanupTimeoutMs,
+      );
+    })();
+    return agentClosePromise;
+  };
+
+  const close = (): Promise<void> => {
+    if (closePromise) return closePromise;
     closed = true;
     options.signal.removeEventListener("abort", abortCompletion);
-
-    if (agent && notificationsEnabled) {
-      try {
-        await options.updateNotificationLabel(agent.id, false);
-        notificationsEnabled = false;
-      } catch (error) {
-        warn("disable-notifications", error);
+    agentReady.reject(abortError());
+    completion.reject(abortError());
+    closePromise = (async () => {
+      const failures: unknown[] = [];
+      if (creation) {
+        try {
+          await withCleanupDeadline(() => creation!, options.cleanupTimeoutMs);
+        } catch (error) {
+          if (error instanceof AgentCleanupError) {
+            creationWaitExpired = true;
+            failures.push(error);
+            warn("create-agent", error);
+          }
+          // Отклонённое создание уже сообщило ошибку вызывающему сценарию.
+        }
       }
-    }
-    if (scope) {
       try {
-        await scope.close();
+        await closeAgent();
       } catch (error) {
-        warn("close-scope", error);
+        failures.push(error);
+        warn("archive-agent", error);
       }
-    }
-    try {
-      await options.host.close();
-    } catch (error) {
-      warn("close-host", error);
-    }
+      try { await closeLocalResources(); }
+      catch (error) { failures.push(error); }
+      if (failures.length > 0) {
+        throw new AgentCleanupError("Не удалось освободить ресурсы агента; нажмите «Повторить» для повторной очистки", failures);
+      }
+    })();
+    return closePromise;
   };
 
   return {
-    runExclusive,
+    runExclusive: (operation) => runExclusive(() => {
+      if (closed) throw abortError();
+      return operation();
+    }),
 
     async openScope(create) {
       if (closed) throw new Error("Agent-сессия уже закрыта");
@@ -128,11 +203,20 @@ export function createManagedAgentSession<Result>(
 
     async launchAgent(create, onCreated) {
       if (closed) throw new Error("Agent-сессия уже закрыта");
-      if (agent) throw new Error("Agent-сессия уже запустила агента");
-      const createdAgent = await create();
-      agent = createdAgent;
-      notificationsEnabled = true;
       throwIfSignalAborted(options.signal);
+      if (creation) throw new Error("Agent-сессия уже запустила агента");
+      const creating = create().then((createdAgent) => {
+        agent = createdAgent;
+        notificationsEnabled = true;
+        if (creationWaitExpired) {
+          void closeAgent().catch((error) => warn("archive-agent", error));
+        }
+        return createdAgent;
+      });
+      creation = creating;
+      const createdAgent = await waitForPromise(creating, options.signal);
+      throwIfSignalAborted(options.signal);
+      if (closed) throw abortError();
       onCreated(createdAgent.id);
       agentReady.resolve(createdAgent);
       return createdAgent;
@@ -165,7 +249,7 @@ export function createManagedAgentSession<Result>(
     async drainAgent() {
       if (!agent) return;
       try {
-        await agent.waitForFinish(options.agentDrainTimeoutMs);
+        await waitForPromise(agent.waitForFinish(options.agentDrainTimeoutMs), options.signal);
       } catch (error) {
         warn("drain-agent", error);
       }

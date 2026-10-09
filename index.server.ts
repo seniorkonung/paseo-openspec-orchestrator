@@ -5,6 +5,7 @@ import {
 } from "./server/orchestrator-notifications";
 import { OrchestratorNotificationSettingsStore } from "./server/orchestrator-notification-settings";
 import { OrchestratorController } from "./server/orchestrator-controller";
+import { AgentResources } from "./server/agent-resources";
 import { openSpecAvailability } from "./shared/openspec-availability";
 import {
   orchestratorControl,
@@ -22,7 +23,11 @@ export default function contribute(server: PluginServerContext) {
   const notifications = new OrchestratorNotificationService({
     settings: notificationSettings,
   });
-  const orchestrator = new OrchestratorController({ notifications });
+  const resources = new AgentResources();
+  const orchestrator = new OrchestratorController({ notifications, resources });
+  const unsubscribeCreated = server.on("agent.created", ({ agent }, { paseo }) =>
+    resources.onAgentCreated(agent, paseo),
+  );
 
   server.handle(readOrchestratorNotificationSettingsRpc, async () => {
     const settings = await notificationSettings.read();
@@ -108,5 +113,8 @@ export default function contribute(server: PluginServerContext) {
     },
   );
 
-  return () => orchestrator.close();
+  return async () => {
+    try { await orchestrator.close(); }
+    finally { unsubscribeCreated(); }
+  };
 }

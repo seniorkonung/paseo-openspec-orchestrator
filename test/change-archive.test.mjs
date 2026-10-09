@@ -416,6 +416,7 @@ test("High-агент завершает архив через scoped MCP, а Re
           try { toolResults.push(await client.callTool({ name: "complete_change_archive", arguments: {} })); }
           finally { await client.close(); }
         },
+        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() { return { status: "idle" }; },
       };
     },
@@ -443,6 +444,7 @@ test("этап останавливается до отправки задани
     async createAgent() {
       return { id: "archive-agent", async commands() { return { commands: [], error: null }; },
         async send() { throw new Error("Задание не должно отправляться"); },
+        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() { return { status: "idle" }; } };
     },
   });

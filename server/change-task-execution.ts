@@ -37,7 +37,7 @@ import {
   planChangeTaskExecution,
   verifyCompletedTask,
 } from "./change-task-publication.ts";
-import { createManagedAgentSession } from "./managed-agent-session.ts";
+import { createManagedAgentSession, type AgentResourceReleaser } from "./managed-agent-session.ts";
 import {
   McpToolError,
   OrchestratorMcpToolHost,
@@ -111,6 +111,7 @@ interface McpHostFactory {
 }
 
 export interface ChangeTaskExecutionServiceOptions {
+  readonly releaseAgent?: AgentResourceReleaser;
   readonly createAgent: TaskPaseoAgentCreator;
   readonly command?: BoundedCommandRunner;
   readonly updateNotificationLabel?: AgentNotificationLabelUpdater;
@@ -171,6 +172,7 @@ export function createChangeTaskExecutionService(
       let completedTask: CompletedChangeTask | null = null;
       const agentSession = createManagedAgentSession<CompletedChangeTask>({
         signal: request.signal,
+        releaseAgent: options.releaseAgent,
         host,
         updateNotificationLabel,
         agentDrainTimeoutMs,

@@ -354,7 +354,7 @@ test("High завершает implementation finding, а оркестратор 
     async createAgent(options) {
       createdOptions = options;
       resolveCreated();
-      return { id: "agent-implementation-finding", async waitForFinish() { return { status: "idle" }; } };
+      return { id: "agent-implementation-finding", async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; }, async waitForFinish() { return { status: "idle" }; } };
     },
     updateNotificationLabel: async (agentId, enabled) => labels.push([agentId, enabled]),
     logger: { error() {}, warn() {} },
@@ -469,7 +469,7 @@ test("explicit accepted risk удаляет implementation finding из акти
           await client.close();
         }
       })();
-      return { id: "agent-risk", async waitForFinish() { await runTool; } };
+      return { id: "agent-risk", async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; }, async waitForFinish() { await runTool; } };
     },
     updateNotificationLabel: async () => {},
     logger: { error() {}, warn() {} },
@@ -519,7 +519,7 @@ test("устранение implementation finding не добавляет зад
           await client.close();
         }
       })();
-      return { id: "agent-task-scope", async waitForFinish() { await runTool; } };
+      return { id: "agent-task-scope", async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; }, async waitForFinish() { await runTool; } };
     },
     updateNotificationLabel: async () => {},
     logger: { error() {}, warn() {} },
@@ -564,7 +564,7 @@ async function commitScenarioResult(context, kind) {
     async createAgent(value) {
       options = value;
       resolveCreated();
-      return { id: `agent-${kind}`, async waitForFinish() {} };
+      return { id: `agent-${kind}`, async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; }, async waitForFinish() {} };
     },
     updateNotificationLabel: async () => {},
     logger: { error() {}, warn() {} },
@@ -653,7 +653,7 @@ test("ошибка checkpoint восстанавливает ntfy и recovery н
     async createAgent(value) {
       options = value;
       resolveCreated();
-      return { id: "agent-checkpoint", async waitForFinish() {} };
+      return { id: "agent-checkpoint", async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; }, async waitForFinish() {} };
     },
     updateNotificationLabel: async (agentId, enabled) => labels.push([agentId, enabled]),
     logger: { error() {}, warn() {} },

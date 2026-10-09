@@ -155,6 +155,7 @@ async function fixture(context) {
           agentRuns.push(run);
           await run;
         },
+        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() { return { status: "idle" }; },
       };
     },

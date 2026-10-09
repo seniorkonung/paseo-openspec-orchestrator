@@ -26,7 +26,7 @@ import {
   reviewFindingIdSchema,
   type ReviewFindingId,
 } from "./change-review-report.ts";
-import { createManagedAgentSession } from "./managed-agent-session.ts";
+import { createManagedAgentSession, type AgentResourceReleaser } from "./managed-agent-session.ts";
 import {
   McpToolError,
   OrchestratorMcpToolHost,
@@ -161,6 +161,7 @@ interface McpHostFactory {
 }
 
 export interface ReviewFindingResolutionServiceOptions {
+  readonly releaseAgent?: AgentResourceReleaser;
   readonly createAgent: ReviewFindingResolutionPaseoAgentCreator;
   readonly phaseWork: Pick<PhaseWorkService, "inspect">;
   readonly command?: BoundedCommandRunner;
@@ -389,6 +390,7 @@ export function createReviewFindingResolutionService<
       const agentSession =
         createManagedAgentSession<CompletedReviewFindingResolution>({
           signal: request.signal,
+        releaseAgent: options.releaseAgent,
           host,
           updateNotificationLabel,
           agentDrainTimeoutMs,

@@ -36,7 +36,7 @@ import {
   buildAgentPrompt,
   completionInstruction,
 } from "./agent-prompt.ts";
-import { createManagedAgentSession } from "./managed-agent-session.ts";
+import { createManagedAgentSession, type AgentResourceReleaser } from "./managed-agent-session.ts";
 import {
   McpToolError,
   OrchestratorMcpToolHost,
@@ -121,6 +121,7 @@ interface McpHostFactory {
 }
 
 export interface ChangeArtifactCreationServiceOptions {
+  readonly releaseAgent?: AgentResourceReleaser;
   readonly createAgent: ArtifactPaseoAgentCreator;
   readonly command?: BoundedCommandRunner;
   readonly resolveRealPath?: ChangeArtifactStatusGatewayOptions["resolveRealPath"];
@@ -230,6 +231,7 @@ export function createChangeArtifactCreationService(
       let completedPlan: ChangeArtifactPlan | null = null;
       const agentSession = createManagedAgentSession<ChangeArtifactPlan>({
         signal: request.signal,
+        releaseAgent: options.releaseAgent,
         host,
         updateNotificationLabel,
         agentDrainTimeoutMs,

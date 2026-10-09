@@ -317,15 +317,19 @@ export class OrchestratorMcpToolHost {
       close: async () => {
         if (closePromise) return closePromise;
         closed = true;
-        this.#scopes.delete(pathname);
-        closePromise = (async () => {
-          const handlerClose = handler.close();
+        const closing = (async () => {
+          const handlerClose = Promise.resolve().then(() => handler.close());
           for (const response of inFlight) {
             response.destroy();
           }
           await handlerClose;
+          this.#scopes.delete(pathname);
         })();
-        return closePromise;
+        closePromise = closing;
+        void closing.catch(() => {
+          if (closePromise === closing) closePromise = null;
+        });
+        return closing;
       },
     };
 
@@ -348,19 +352,24 @@ export class OrchestratorMcpToolHost {
   close(): Promise<void> {
     if (this.#closePromise) return this.#closePromise;
     this.#closed = true;
-    this.#closePromise = (async () => {
+    const closing = (async () => {
       const scopeResults = await Promise.allSettled(
         [...this.#scopes.values()].map((scope) => scope.close()),
       );
-      await closeHttpServer(this.#server);
       const failures = scopeResults
         .filter((result): result is PromiseRejectedResult => result.status === "rejected")
         .map((result) => result.reason);
+      try { await closeHttpServer(this.#server); }
+      catch (error) { failures.push(error); }
       if (failures.length > 0) {
-        throw new AggregateError(failures, "Не удалось закрыть все MCP scope");
+        throw new AggregateError(failures, "Не удалось закрыть MCP scope или HTTP-сервер");
       }
     })();
-    return this.#closePromise;
+    this.#closePromise = closing;
+    void closing.catch(() => {
+      if (this.#closePromise === closing) this.#closePromise = null;
+    });
+    return closing;
   }
 
   #assertOpen(): void {
@@ -459,7 +468,7 @@ function listenOnFreePort(server: Server): Promise<void> {
 function closeHttpServer(server: Server): Promise<void> {
   return new Promise((resolve, reject) => {
     server.close((error) => {
-      if (error) reject(error);
+      if (error && !("code" in error && error.code === "ERR_SERVER_NOT_RUNNING")) reject(error);
       else resolve();
     });
     server.closeIdleConnections();

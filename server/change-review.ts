@@ -39,7 +39,7 @@ import {
   createChangeReviewVerification,
   type ChangeReviewVerificationOptions,
 } from "./change-review-verification.ts";
-import { createManagedAgentSession } from "./managed-agent-session.ts";
+import { createManagedAgentSession, type AgentResourceReleaser } from "./managed-agent-session.ts";
 import {
   McpToolError,
   OrchestratorMcpToolHost,
@@ -118,6 +118,7 @@ interface McpHostFactory {
 }
 
 export interface ChangeReviewServiceOptions {
+  readonly releaseAgent?: AgentResourceReleaser;
   readonly createAgent: ReviewPaseoAgentCreator;
   readonly phaseWork: Pick<PhaseWorkService, "inspect">;
   readonly command?: BoundedCommandRunner;
@@ -233,6 +234,7 @@ export function createChangeReviewService(
       let completedReview: CompletedChangeReview | null = null;
       const agentSession = createManagedAgentSession<CompletedChangeReview>({
         signal: request.signal,
+        releaseAgent: options.releaseAgent,
         host,
         updateNotificationLabel,
         agentDrainTimeoutMs,

@@ -402,6 +402,7 @@ test("Ultra создаёт один артефакт и завершает ег�
             }
           })();
         },
+        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() {
           drainCalls += 1;
           await toolFlow;
@@ -479,6 +480,7 @@ test("отсутствие continue skill останавливает сесси�
         async send() {
           sends += 1;
         },
+        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() {
           return { status: "idle" };
         },
@@ -538,6 +540,7 @@ test("после рестарта с несколькими коммитами �
             }
           })();
         },
+        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() {
           await toolFlow;
           return { status: "idle" };
@@ -635,6 +638,7 @@ async function runCommitScenario(context, kind) {
             }
           })();
         },
+        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() {
           await toolFlow;
           return { status: "idle" };

@@ -224,6 +224,7 @@ async function runReview(value, action) {
           const client = await connectClient(url);
           try { await action(client, prompt); } finally { await client.close(); }
         },
+        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() { return { status: "idle" }; },
       };
     },
@@ -305,6 +306,7 @@ test("High-агент создаёт один task-коммит без task PR",
             await client.close();
           }
         },
+        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() { return { status: "idle" }; },
       };
     },
@@ -351,6 +353,7 @@ test("completion отклоняет изменение task-state следующ
             await client.close();
           }
         },
+        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() { return { status: "idle" }; },
       };
     },
@@ -524,6 +527,7 @@ test("implementation review публикует правки кода и арте
             await client.close();
           }
         },
+        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() { return { status: "idle" }; },
       };
     },

@@ -375,3 +375,26 @@ test("MCP-хост сразу отклоняет некорректные опр
   );
   await host.close();
 });
+
+test("повторное закрытие настоящего HTTP-хоста восстанавливается после временного сбоя", async (context) => {
+  const { Server } = await import("node:http");
+  const host = await OrchestratorMcpToolHost.listen();
+  context.after(() => host.close());
+  const close = Server.prototype.close;
+  let attempts = 0;
+  context.mock.method(Server.prototype, "close", function (callback) {
+    if (this.address()?.port === host.port) {
+      attempts++;
+      if (attempts === 1) {
+        queueMicrotask(() => callback(new Error("Временная ошибка закрытия HTTP")));
+        return this;
+      }
+    }
+    return close.call(this, callback);
+  });
+  await assert.rejects(host.close(), /HTTP/iu);
+  assert.equal((await fetch(`http://127.0.0.1:${host.port}`)).status, 404);
+  await Promise.all([host.close(), host.close()]);
+  assert.equal(attempts, 2);
+  await assert.rejects(fetch(`http://127.0.0.1:${host.port}`));
+});

@@ -2,6 +2,7 @@ import {
   ORCHESTRATOR_LIMITS,
   type ControlCommand,
 } from "../shared/orchestrator.ts";
+import { AgentCleanupError } from "./agent-cleanup-error.ts";
 import {
   normalizeOrchestratorWorkspaceDisplay,
   type OrchestratorNotificationRequest,
@@ -436,7 +437,9 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
           workspaceId,
           reporter,
           runtime,
-          `Шаг «${step.label}» завершился ошибкой; нажмите «Повторить»`,
+          error instanceof AgentCleanupError
+            ? error.message
+            : `Шаг «${step.label}» завершился ошибкой; нажмите «Повторить»`,
         );
         return;
       }

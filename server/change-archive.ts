@@ -7,7 +7,7 @@ import { combineAbortSignals, throwIfSignalAborted } from "./agent-session-contr
 import { runBoundedCommand, type BoundedCommandRunner } from "./bounded-command.ts";
 import { archivedChangeSchema, ChangeArchiveError, pendingArchiveSessionSchema, type ArchivedChange, type PendingArchiveSession, type VerifiedChangeArchive } from "./change-archive-model.ts";
 import { createChangeArchiveVerification, type ChangeArchiveVerification } from "./change-archive-verification.ts";
-import { createManagedAgentSession } from "./managed-agent-session.ts";
+import { createManagedAgentSession, type AgentResourceReleaser } from "./managed-agent-session.ts";
 import { McpToolError, OrchestratorMcpToolHost, defineMcpTool } from "./orchestrator-mcp-tool-host.ts";
 import { updateAgentNotificationLabel, type AgentNotificationLabelUpdater } from "./paseo-agent-labels.ts";
 import type { RootPullRequestIdentity, RootPullRequestService } from "./root-pull-request.ts";
@@ -49,6 +49,7 @@ export interface ChangeArchiveService {
 interface McpHostFactory { listen(): Promise<OrchestratorMcpToolHost>; }
 
 export function createChangeArchiveService(options: {
+  readonly releaseAgent?: AgentResourceReleaser;
   readonly createAgent: AgentCreator;
   readonly rootPullRequest: RootPullRequestService;
   readonly command?: BoundedCommandRunner;
@@ -83,6 +84,7 @@ export function createChangeArchiveService(options: {
       let completed: VerifiedChangeArchive | null = null;
       const agentSession = createManagedAgentSession<VerifiedChangeArchive>({
         signal: request.signal,
+        releaseAgent: options.releaseAgent,
         host,
         updateNotificationLabel: options.updateNotificationLabel ?? updateAgentNotificationLabel,
         agentDrainTimeoutMs: options.agentDrainTimeoutMs ?? 15_000,

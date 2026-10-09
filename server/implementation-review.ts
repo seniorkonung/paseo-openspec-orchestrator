@@ -52,7 +52,7 @@ import { deliverRootCommit } from "./root-branch-delivery.ts";
 import { createRootPullRequestService } from "./root-pull-request.ts";
 import { readReviewPullRequest } from "./review-publication-gateway.ts";
 import { repositoryArgument } from "./review-publication-model.ts";
-import { createManagedAgentSession } from "./managed-agent-session.ts";
+import { createManagedAgentSession, type AgentResourceReleaser } from "./managed-agent-session.ts";
 import { McpToolError, OrchestratorMcpToolHost, defineMcpTool } from "./orchestrator-mcp-tool-host.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import { runWorkspaceMiseCommand } from "./mise-toolchain.ts";
@@ -142,6 +142,7 @@ type PaseoWorkspace = ReturnType<PaseoApi["workspaces"]["ref"]>;
 type PaseoAgent = Awaited<ReturnType<PaseoWorkspace["agents"]["create"]>>;
 
 export interface ImplementationReviewServiceOptions {
+  readonly releaseAgent?: AgentResourceReleaser;
   readonly createAgent: (
     options: Parameters<PaseoWorkspace["agents"]["create"]>[0],
   ) => Promise<PaseoAgent>;
@@ -288,6 +289,7 @@ export function createImplementationReviewService(
       let completed: CompletedImplementationReview | null = null;
       const agentSession = createManagedAgentSession<CompletedImplementationReview>({
         signal: request.signal,
+        releaseAgent: options.releaseAgent,
         host,
         updateNotificationLabel,
         agentDrainTimeoutMs,

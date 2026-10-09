@@ -28,7 +28,7 @@ import {
   readTaskHeadCommit,
 } from "./change-task-gateway.ts";
 import { isCommitAncestor } from "./git-ancestry.ts";
-import { createManagedAgentSession } from "./managed-agent-session.ts";
+import { createManagedAgentSession, type AgentResourceReleaser } from "./managed-agent-session.ts";
 import { McpToolError, OrchestratorMcpToolHost, defineMcpTool } from "./orchestrator-mcp-tool-host.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import {
@@ -155,6 +155,7 @@ export interface PhaseTaskPlanningService {
 }
 
 export interface PhaseTaskPlanningServiceOptions {
+  readonly releaseAgent?: AgentResourceReleaser;
   readonly createAgent: PhasePlanningPaseoAgentCreator;
   readonly phaseWork: PhaseWorkService;
   readonly command?: BoundedCommandRunner;
@@ -264,6 +265,7 @@ export function createPhaseTaskPlanningService(
       let completed: CompletedPhaseTaskPlanning | null = null;
       const agentSession = createManagedAgentSession<CompletedPhaseTaskPlanning>({
         signal: request.signal,
+        releaseAgent: options.releaseAgent,
         host,
         updateNotificationLabel,
         agentDrainTimeoutMs,

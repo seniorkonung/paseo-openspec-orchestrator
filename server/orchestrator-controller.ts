@@ -29,6 +29,8 @@ import {
   type OrchestratorNotificationSink,
 } from "./orchestrator-notifications.ts";
 import { createOpenSpecWorkflow } from "./workflow/steps/index.ts";
+import { AgentResources } from "./agent-resources.ts";
+import { AgentCleanupError } from "./agent-cleanup-error.ts";
 
 type PaseoApi = PluginHandlerContext["paseo"];
 
@@ -45,16 +47,19 @@ export interface OrchestratorControllerOptions {
   ledger?: OrchestratorLedger;
   createEngine?: (ledger: OrchestratorLedger) => OrchestratorEngine;
   notifications?: OrchestratorNotificationSink;
+  resources?: AgentResources;
 }
 
 export class OrchestratorController {
   readonly #ledger: OrchestratorLedger;
   readonly #engine: OrchestratorEngine;
   readonly #notifications: OrchestratorNotificationSink;
+  readonly #resources: AgentResources;
 
   constructor(options: OrchestratorControllerOptions = {}) {
     this.#ledger = options.ledger ?? new OrchestratorLedger();
     this.#notifications = options.notifications ?? new NoopOrchestratorNotificationSink();
+    this.#resources = options.resources ?? new AgentResources();
     this.#engine =
       options.createEngine?.(this.#ledger) ??
       new OpenSpecOrchestratorEngine(this.#ledger, { notifications: this.#notifications });
@@ -123,18 +128,29 @@ export class OrchestratorController {
       return {
         status: "rejected",
         reason: "unavailable",
-        message: "Оркестратор временно не может выполнить команду",
+        message: error instanceof AgentCleanupError ? error.message : "Оркестратор временно не может выполнить команду",
         snapshot: this.#ledger.get(workspaceId),
       };
     }
   }
 
   async close(): Promise<void> {
-    await this.#engine.dispose();
-    await this.#ledger.close();
+    this.#resources.stop();
+    try {
+      await this.#engine.dispose();
+    } finally {
+      try { await this.#resources.close(); }
+      finally { await this.#ledger.close(); }
+    }
   }
 
   async #ensureWorkspace(workspaceId: string, paseo: PaseoApi): Promise<void> {
+    // Ошибка очистки не скрывает UI: следующий запуск покажет её в lifecycle.
+    await this.#resources.initialize(paseo).catch((error: unknown) => {
+      console.warn("[OpenSpec] Восстановление ресурсов агентов требует повторной очистки", {
+        code: error instanceof AgentCleanupError ? error.code : "UNKNOWN",
+      });
+    });
     if (this.#ledger.has(workspaceId)) return;
 
     const workspace = paseo.workspaces.ref(workspaceId);
@@ -154,12 +170,17 @@ export class OrchestratorController {
     // Workspace-handle сохраняет размещение агента в текущем окружении.
     // Источник: https://paseo.sh/docs/sdk/workspaces#start-an-agent-in-a-workspace
     const createAgent = (options: Parameters<typeof workspace.agents.create>[0]) =>
-      workspace.agents.create(options);
+      this.#resources.create(workspace, paseo, options);
+    const agentLifecycle = {
+      createAgent,
+      releaseAgent: (agent: { readonly id: string }, closeLocalResources: () => Promise<void>) =>
+        this.#resources.release(agent.id, paseo, closeLocalResources),
+    };
     const phaseWork = createPhaseWorkService();
     const rootPullRequest = createRootPullRequestService();
-    const changeFindingResolution = createChangeFindingResolutionService({ createAgent, phaseWork });
+    const changeFindingResolution = createChangeFindingResolutionService({ ...agentLifecycle, phaseWork });
     const implementationFindingResolution = createImplementationFindingResolutionService({
-      createAgent,
+      ...agentLifecycle,
       phaseWork,
     });
     const workflow = createOpenSpecWorkflow({
@@ -171,20 +192,20 @@ export class OrchestratorController {
       changeInitialization: createChangeInitializationService(),
       planningBranch: createPlanningBranchService(),
       implementationBranch: createImplementationBranchService(),
-      implementationReview: createImplementationReviewService({ createAgent, phaseWork }),
+      implementationReview: createImplementationReviewService({ ...agentLifecycle, phaseWork }),
       implementationRunVerification: createImplementationRunVerifier(),
       verifyChange: verifyOpenSpecChange,
-      changeArtifacts: createChangeArtifactCreationService({ createAgent }),
-      changePublication: createChangePublicationService({ createAgent }),
-      changeReview: createChangeReviewService({ createAgent, phaseWork }),
+      changeArtifacts: createChangeArtifactCreationService(agentLifecycle),
+      changePublication: createChangePublicationService(agentLifecycle),
+      changeReview: createChangeReviewService({ ...agentLifecycle, phaseWork }),
       changeFindingResolution,
       implementationFindingResolution,
-      changeTaskExecution: createChangeTaskExecutionService({ createAgent }),
+      changeTaskExecution: createChangeTaskExecutionService(agentLifecycle),
       phaseWork,
-      phaseTaskPlanning: createPhaseTaskPlanningService({ createAgent, phaseWork }),
+      phaseTaskPlanning: createPhaseTaskPlanningService({ ...agentLifecycle, phaseWork }),
       rootBranch: createRootBranchService(),
       rootPullRequest,
-      changeArchive: createChangeArchiveService({ createAgent, rootPullRequest }),
+      changeArchive: createChangeArchiveService({ ...agentLifecycle, rootPullRequest }),
     });
     this.#engine.initialize(workspaceId, {
       workspaceDisplay,
@@ -195,7 +216,13 @@ export class OrchestratorController {
         }
         return workspaceDisplayFromSnapshot(refreshed);
       },
-      workflow,
+      workflow: {
+        ...workflow,
+        steps: workflow.steps.map((step) => ({
+          ...step,
+          run: (context) => this.#resources.runStage(workspaceId, paseo, () => step.run(context)),
+        })),
+      },
     });
   }
 }

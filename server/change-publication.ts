@@ -35,7 +35,7 @@ import {
   changeBranchFor,
   changeBranchSchema,
 } from "./change-branch.ts";
-import { createManagedAgentSession } from "./managed-agent-session.ts";
+import { createManagedAgentSession, type AgentResourceReleaser } from "./managed-agent-session.ts";
 import {
   McpToolError,
   OrchestratorMcpToolHost,
@@ -79,6 +79,7 @@ interface McpHostFactory {
 }
 
 export interface ChangePublicationServiceOptions {
+  readonly releaseAgent?: AgentResourceReleaser;
   readonly createAgent: PublicationPaseoAgentCreator;
   readonly command?: BoundedCommandRunner;
   readonly updateNotificationLabel?: AgentNotificationLabelUpdater;
@@ -139,6 +140,7 @@ export function createChangePublicationService(
       let published: PublishedPullRequest | null = null;
       const agentSession = createManagedAgentSession<PublishedPullRequest>({
         signal: request.signal,
+        releaseAgent: options.releaseAgent,
         host,
         updateNotificationLabel,
         agentDrainTimeoutMs,
