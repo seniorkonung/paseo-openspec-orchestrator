@@ -13,6 +13,8 @@ import { createArchiveChangeStep } from "../server/workflow/steps/archive-change
 import { createInitialWorkflowState } from "../server/workflow/types.ts";
 import { deliverRootCommit } from "../server/root-branch-delivery.ts";
 
+const fastChecksWait = { pollIntervalMs: 1, settleMs: 0, timeoutMs: 1_000, maxConsecutiveFailures: 1 };
+
 const execFileAsync = promisify(execFile);
 const changeId = "archive-change";
 const branch = `change/${changeId}`;
@@ -337,10 +339,12 @@ test("финальный gate принимает коммиты после ар�
       async synchronize() { return head; },
       async inspect() { return { kind: "open", isDraft: !ready, head, identity }; },
       async makeReady() { ready = true; return { kind: "open", isDraft: false, head, identity }; },
+      async inspectChecks() { return { kind: "open", isDraft: !ready, head, checks: { total: 0, pending: 0 } }; },
     },
+    checksWait: fastChecksWait,
   });
   const state = { ...createInitialWorkflowState(), change: { id: changeId }, changeBranch: branch, activeBranch: branch, rootPullRequest: identity, archivedChange };
-  const waiting = await step.run({ signal: new AbortController().signal, state, updateActionLinks() {}, async checkpointState() {}, async notify() { return true; } });
+  const waiting = await step.run({ signal: new AbortController().signal, pauseSignal: new AbortController().signal, state, updateActionLinks() {}, async checkpointState() {}, async notify() { return true; } });
   assert.equal(waiting.kind, "halt");
   assert.match(waiting.summary, /ожидает merge/u);
   assert.equal(ready, true);
@@ -377,10 +381,12 @@ test("после архивации финальный gate ждёт merge и н
       async synchronize() { return observedHead; },
       async inspect() { return merged ? { kind: "merged", head: commit, identity } : { kind: "open", isDraft: !ready, head: commit, identity }; },
       async makeReady() { ready = true; return { kind: "open", isDraft: false, head: commit, identity }; },
+      async inspectChecks() { return merged ? { kind: "merged", head: commit } : { kind: "open", isDraft: !ready, head: commit, checks: { total: 0, pending: 0 } }; },
     },
+    checksWait: fastChecksWait,
   });
   const state = { ...createInitialWorkflowState(), change: { id: changeId }, changeBranch: branch, activeBranch: branch, rootPullRequest: identity, archivedChange };
-  const contextFor = () => ({ signal: new AbortController().signal, state, updateActionLinks() {}, async checkpointState() {}, async notify() { return true; } });
+  const contextFor = () => ({ signal: new AbortController().signal, pauseSignal: new AbortController().signal, state, updateActionLinks() {}, async checkpointState() {}, async notify() { return true; } });
   const waiting = await step.run(contextFor());
   assert.equal(waiting.kind, "halt");
   assert.equal(ready, true);

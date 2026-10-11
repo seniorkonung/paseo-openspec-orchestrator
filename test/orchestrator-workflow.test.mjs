@@ -458,7 +458,14 @@ function workflowHarness({ feedbackOnce = false, reviewFindings = 0, twoPhases =
       },
       async makeDraft(_workspace, inspection) { rootReady = false; return { ...inspection, isDraft: true }; },
       async makeReady(_workspace, inspection) { rootReady = true; return { ...inspection, isDraft: false }; },
+      async inspectChecks() {
+        const head = archivePublished ? hashes.h : hashes.f;
+        return rootMerged
+          ? { kind: "merged", head }
+          : { kind: "open", isDraft: !rootReady, head, checks: { total: 2, pending: 0 } };
+      },
     },
+    rootChecksWait: { pollIntervalMs: 1, settleMs: 0, timeoutMs: 1_000, maxConsecutiveFailures: 1 },
     changeArchive: {
       async plan() {
         calls.push("archive.plan");

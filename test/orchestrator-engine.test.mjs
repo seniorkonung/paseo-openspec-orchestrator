@@ -570,3 +570,48 @@ test("сбой согласования и некорректное принят
     });
   }
 });
+
+test("пауза прерывает ожидание шага через pauseSignal, а «Продолжить» запускает шаг снова", async (context) => {
+  const pauseSignals = [];
+  let markWaiting;
+  let waiting = new Promise((resolve) => { markWaiting = resolve; });
+  const workflow = {
+    startStepId: "wait",
+    steps: [{
+      id: "wait",
+      label: "Жду внешнюю систему",
+      async run({ pauseSignal }) {
+        pauseSignals.push(pauseSignal);
+        markWaiting();
+        await new Promise((resolve) => {
+          if (pauseSignal.aborted) resolve();
+          else pauseSignal.addEventListener("abort", resolve, { once: true });
+        });
+        return { kind: "continue", next: "wait", summary: "Ожидание прервано паузой" };
+      },
+    }],
+  };
+  const { engine, ledger } = await createRuntime(context, "workspace-pause-wait", workflow);
+
+  engine.command("workspace-pause-wait", "start");
+  await waiting;
+  assert.equal(pauseSignals[0].aborted, false);
+  engine.command("workspace-pause-wait", "pause");
+  assert.equal(pauseSignals[0].aborted, true);
+  await settleWorkflow();
+
+  assert.equal(ledger.get("workspace-pause-wait").lifecycle.status, "paused");
+  assert.equal(ledger.getWorkflowCheckpoint("workspace-pause-wait").nextStepId, "wait");
+  assert.equal(ledger.get("workspace-pause-wait").history.at(-1)?.text, "Ожидание прервано паузой");
+
+  waiting = new Promise((resolve) => { markWaiting = resolve; });
+  engine.command("workspace-pause-wait", "resume");
+  await waiting;
+  assert.equal(pauseSignals.length, 2);
+  assert.equal(pauseSignals[1].aborted, false);
+  assert.equal(ledger.get("workspace-pause-wait").lifecycle.status, "running");
+
+  engine.command("workspace-pause-wait", "pause");
+  await settleWorkflow();
+  assert.equal(ledger.get("workspace-pause-wait").lifecycle.status, "paused");
+});

@@ -41,7 +41,7 @@ import { createPreparePhasePlanningBranchStep } from "./prepare-phase-planning-b
 import { createPlanPhaseTasksStep } from "./plan-phase-tasks.ts";
 import { createValidatePhasePlanningStep } from "./validate-phase-planning.ts";
 import { createArchiveChangeStep } from "./archive-change.ts";
-import { createAwaitRootMergeStep } from "./await-root-merge.ts";
+import { createAwaitRootMergeStep, type RootChecksWaitPolicy } from "./await-root-merge.ts";
 
 /**
  * Все конкретные зависимости стандартного OpenSpec workflow.
@@ -73,6 +73,8 @@ export interface OpenSpecWorkflowDependencies {
   readonly rootBranch: RootBranchService;
   readonly rootPullRequest: RootPullRequestService;
   readonly changeArchive: ChangeArchiveService;
+  /** Ожидание проверок CI в финальном gate; по умолчанию DEFAULT_ROOT_CHECKS_WAIT. */
+  readonly rootChecksWait?: RootChecksWaitPolicy;
 }
 
 /**
@@ -201,6 +203,7 @@ export function createOpenSpecWorkflow(
         workspaceDirectory: dependencies.workspaceDirectory,
         archive: dependencies.changeArchive,
         rootPullRequest: dependencies.rootPullRequest,
+        checksWait: dependencies.rootChecksWait,
       }),
       createPreparePhasePlanningBranchStep({
         workspaceDirectory: dependencies.workspaceDirectory,

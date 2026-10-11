@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { runBoundedCommand, type BoundedCommandRunner } from "./bounded-command.ts";
+import { commitHashSchema } from "./change-artifact-model.ts";
 import { changeBranchFor, changeBranchSchema } from "./change-branch.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import {
@@ -17,6 +18,7 @@ import {
   githubHostSchema,
   httpsUrlSchema,
   pullRequestNumberSchema,
+  REVIEW_PARENT_BRANCH,
   repositoryArgument,
   repositoryNameWithOwnerSchema,
 } from "./review-publication-model.ts";
@@ -36,6 +38,127 @@ export type RootPullRequestInspection =
   | { readonly kind: "open"; readonly isDraft: boolean; readonly head: string; readonly identity: RootPullRequestIdentity }
   | { readonly kind: "merged"; readonly head: string; readonly identity: RootPullRequestIdentity }
   | { readonly kind: "closed"; readonly head: string; readonly identity: RootPullRequestIdentity };
+
+/** Сколько проверок CI сообщено для HEAD-коммита PR и сколько из них не завершено. */
+export interface RootPullRequestCheckProgress {
+  readonly total: number;
+  readonly pending: number;
+}
+
+export type RootPullRequestCheckInspection =
+  | {
+      readonly kind: "open";
+      readonly isDraft: boolean;
+      readonly head: string;
+      readonly checks: RootPullRequestCheckProgress;
+    }
+  | { readonly kind: "merged"; readonly head: string }
+  | { readonly kind: "closed"; readonly head: string };
+
+const checkRunStateSchema = z.enum([
+  "ACTION_REQUIRED",
+  "CANCELLED",
+  "COMPLETED",
+  "FAILURE",
+  "IN_PROGRESS",
+  "NEUTRAL",
+  "PENDING",
+  "QUEUED",
+  "SKIPPED",
+  "STALE",
+  "STARTUP_FAILURE",
+  "SUCCESS",
+  "TIMED_OUT",
+  "WAITING",
+]);
+const statusContextStateSchema = z.enum(["EXPECTED", "ERROR", "FAILURE", "PENDING", "SUCCESS"]);
+
+// Оркестратор не оценивает исход проверок: важно только, завершена ли каждая.
+const CHECK_RUN_STATE_PENDING: Readonly<Record<z.infer<typeof checkRunStateSchema>, boolean>> = {
+  ACTION_REQUIRED: false,
+  CANCELLED: false,
+  COMPLETED: false,
+  FAILURE: false,
+  IN_PROGRESS: true,
+  NEUTRAL: false,
+  PENDING: true,
+  QUEUED: true,
+  SKIPPED: false,
+  STALE: false,
+  STARTUP_FAILURE: false,
+  SUCCESS: false,
+  TIMED_OUT: false,
+  WAITING: true,
+};
+const STATUS_CONTEXT_STATE_PENDING: Readonly<Record<z.infer<typeof statusContextStateSchema>, boolean>> = {
+  EXPECTED: true,
+  ERROR: false,
+  FAILURE: false,
+  PENDING: true,
+  SUCCESS: false,
+};
+
+const stateCountSchema = <State extends z.ZodType>(state: State) =>
+  z.array(z.object({ state, count: z.number().int().nonnegative().max(1_000_000) })).max(64);
+
+// Счётчики по состояниям агрегируют все проверки коммита, поэтому пагинация не нужна.
+const ROOT_CHECKS_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      number
+      state
+      isDraft
+      isCrossRepository
+      baseRefName
+      headRefName
+      headRefOid
+      commits(last: 1) {
+        nodes {
+          commit {
+            oid
+            statusCheckRollup {
+              contexts {
+                checkRunCountsByState { state count }
+                statusContextCountsByState { state count }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+const rootChecksResponseSchema = z.object({
+  data: z.object({
+    repository: z.object({
+      pullRequest: z.object({
+        number: pullRequestNumberSchema,
+        state: z.enum(["OPEN", "CLOSED", "MERGED"]),
+        isDraft: z.boolean(),
+        isCrossRepository: z.boolean(),
+        baseRefName: z.string(),
+        headRefName: z.string(),
+        headRefOid: commitHashSchema,
+        commits: z.object({
+          nodes: z.tuple([
+            z.object({
+              commit: z.object({
+                oid: commitHashSchema,
+                statusCheckRollup: z.object({
+                  contexts: z.object({
+                    checkRunCountsByState: stateCountSchema(checkRunStateSchema),
+                    statusContextCountsByState: stateCountSchema(statusContextStateSchema),
+                  }),
+                }).nullable(),
+              }),
+            }),
+          ]),
+        }),
+      }),
+    }),
+  }),
+});
 
 export interface RootPullRequestService {
   synchronize(
@@ -61,6 +184,16 @@ export interface RootPullRequestService {
     inspection: Extract<RootPullRequestInspection, { kind: "open" }>,
     signal?: AbortSignal,
   ): Promise<RootPullRequestInspection>;
+  /**
+   * Читает только GitHub: состояние известного корневого PR и незавершённые
+   * проверки его HEAD-коммита. Локальный репозиторий не проверяется, поэтому
+   * результат нужно сверить с проверенным HEAD.
+   */
+  inspectChecks(
+    workspaceDirectory: string,
+    identity: RootPullRequestIdentity,
+    signal?: AbortSignal,
+  ): Promise<RootPullRequestCheckInspection>;
 }
 
 export class RootPullRequestError extends Error {
@@ -184,6 +317,73 @@ export function createRootPullRequestService(
     );
   };
 
+  const inspectChecks: RootPullRequestService["inspectChecks"] = async (
+    workspaceDirectory,
+    identityInput,
+    signal,
+  ) => {
+    const identity = rootPullRequestIdentitySchema.parse(identityInput);
+    const [owner, name] = identity.repositoryNameWithOwner.split("/");
+    let response: z.infer<typeof rootChecksResponseSchema>;
+    try {
+      const result = await command(
+        "gh",
+        [
+          "api",
+          "graphql",
+          "--hostname",
+          identity.repositoryHost,
+          "-f",
+          `query=${ROOT_CHECKS_QUERY}`,
+          "-f",
+          `owner=${owner!}`,
+          "-f",
+          `name=${name!}`,
+          "-F",
+          `number=${identity.number}`,
+        ],
+        { cwd: workspaceDirectory, signal },
+      );
+      response = rootChecksResponseSchema.parse(JSON.parse(result.stdout));
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new RootPullRequestError(
+        `Не удалось прочитать проверки CI корневого pull request #${identity.number}`,
+      );
+    }
+    const pullRequest = response.data.repository.pullRequest;
+    const [{ commit }] = pullRequest.commits.nodes;
+    if (
+      pullRequest.number !== identity.number ||
+      pullRequest.isCrossRepository ||
+      pullRequest.baseRefName !== REVIEW_PARENT_BRANCH ||
+      pullRequest.headRefName !== identity.changeBranch
+    ) {
+      throw new RootPullRequestError("Корневой pull request имеет неверные repository, base или head");
+    }
+    const head = pullRequest.headRefOid;
+    if (pullRequest.state === "MERGED") return { kind: "merged", head };
+    if (pullRequest.state === "CLOSED") return { kind: "closed", head };
+    // Сразу после push GitHub может отдать проверки предыдущего коммита.
+    if (commit.oid !== head) {
+      throw new RootPullRequestError("GitHub ещё не обновил проверки HEAD корневого pull request");
+    }
+    const contexts = commit.statusCheckRollup?.contexts;
+    const counts = [
+      ...(contexts?.checkRunCountsByState ?? []).map(({ state, count }) => ({ count, pending: CHECK_RUN_STATE_PENDING[state] })),
+      ...(contexts?.statusContextCountsByState ?? []).map(({ state, count }) => ({ count, pending: STATUS_CONTEXT_STATE_PENDING[state] })),
+    ];
+    return {
+      kind: "open",
+      isDraft: pullRequest.isDraft,
+      head,
+      checks: {
+        total: counts.reduce((sum, { count }) => sum + count, 0),
+        pending: counts.reduce((sum, { count, pending }) => sum + (pending ? count : 0), 0),
+      },
+    };
+  };
+
   return {
     async synchronize(workspaceDirectory, changeIdInput, changeBranchInput, signal) {
       const changeId = openSpecChangeIdSchema.parse(changeIdInput);
@@ -220,5 +420,6 @@ export function createRootPullRequestService(
       changeDraftState(workspaceDirectory, inspection, false, signal),
     makeReady: (workspaceDirectory, inspection, signal) =>
       changeDraftState(workspaceDirectory, inspection, true, signal),
+    inspectChecks,
   };
 }

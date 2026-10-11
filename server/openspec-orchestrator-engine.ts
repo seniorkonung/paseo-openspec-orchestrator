@@ -51,6 +51,8 @@ interface WorkspaceRuntime {
   durableCheckpoint: WorkflowCheckpoint | null;
   currentHandle: ActionHandle | null;
   abortController: AbortController | null;
+  /** Сигнал паузы выполняемого шага; null между шагами. */
+  stepPauseController: AbortController | null;
 }
 
 interface PreparedWorkflow {
@@ -153,6 +155,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
       durableCheckpoint: cloneCheckpoint(checkpoint),
       currentHandle: null,
       abortController: null,
+      stepPauseController: null,
     });
   }
 
@@ -172,6 +175,7 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
         runtime.pauseRequested = true;
         reporter.setLifecycle({ status: "pausing", availableCommand: null });
         if (!runtime.active) this.#reachPause(workspaceId, reporter, runtime);
+        else runtime.stepPauseController?.abort();
         break;
       case "resume":
         runtime.pauseRequested = false;
@@ -341,9 +345,13 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
         return;
       }
 
+      const stepPauseController = new AbortController();
+      if (runtime.pauseRequested) stepPauseController.abort();
+      runtime.stepPauseController = stepPauseController;
       try {
         const result = await step.run({
           signal: abortController.signal,
+          pauseSignal: stepPauseController.signal,
           state: runtime.state,
           updateActionLinks: (links) => {
             if (this.#disposed || runtime.generation !== generation) {
@@ -442,6 +450,8 @@ export class OpenSpecOrchestratorEngine implements OrchestratorEngine {
             : `Шаг «${step.label}» завершился ошибкой; нажмите «Повторить»`,
         );
         return;
+      } finally {
+        if (runtime.stepPauseController === stepPauseController) runtime.stepPauseController = null;
       }
     }
   }

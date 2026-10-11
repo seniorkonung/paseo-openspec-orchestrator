@@ -478,6 +478,13 @@ export type WorkflowCheckpoint = z.infer<typeof workflowCheckpointSchema>;
 
 export interface WorkflowStepContext {
   readonly signal: AbortSignal;
+  /**
+   * Срабатывает, когда пользователь запросил паузу. Движок останавливается
+   * только между шагами, поэтому шаг с долгим ожиданием без durable-эффектов
+   * может прервать его и вернуть переход к самому себе: после «Продолжить»
+   * ожидание начнётся заново. Остальные шаги сигнал не читают.
+   */
+  readonly pauseSignal: AbortSignal;
   readonly state: Readonly<WorkflowState>;
   readonly updateActionLinks: (links: readonly ActionLink[]) => void;
   readonly checkpointState: (nextState: WorkflowState) => Promise<void>;

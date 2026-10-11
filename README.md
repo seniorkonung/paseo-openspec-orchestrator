@@ -21,7 +21,8 @@ the pull request.
 ```text
 main
   ^
-  | one root PR: Draft during work, Ready after all checks, manual merge
+  | one root PR: Draft during work, Ready after all checks,
+  | CI finished, manual merge
 change/<id>
   | scaffold and planning artifact commits
   | initial OpenSpec review and finding resolutions
@@ -29,8 +30,8 @@ change/<id>
   | final spec synchronization and archive commits
 ```
 
-The workflow stops at the final root PR until the user merges it and presses
-Retry. It does not create planning, implementation, review, or per-task pull
+The workflow stops at the final root PR once its CI checks have finished,
+until the user merges it and presses Retry. It does not create planning, implementation, review, or per-task pull
 requests. Pull request comments and submitted reviews are not ingested as
 workflow input.
 
@@ -190,8 +191,24 @@ to the Draft root PR and can recover after an interrupted move, commit, or push.
 When every phase has tasks and all tasks are complete, the orchestrator checks
 the active change once more before archiving. A previously Ready PR returns to
 Draft for the archive commit. After publication, the final gate checks the
-archived tree and the exact PR head, moves the PR to Ready, then waits for
+archived tree and the exact PR head, moves the PR to Ready, then waits for the
+CI checks of that head to finish before it hands control to the user for
 manual merge and Retry. It no longer reads tasks from the archived change.
+
+The CI wait polls GitHub every 30 seconds for the check runs and commit
+statuses of the PR head. It does not judge their outcome or the merge state:
+failed checks, conflicts, and other blockers are left to the user. The
+notification is sent only when no check is queued, running, or expected. A
+verdict is accepted no earlier than one minute after the wait starts, because
+GitHub registers checks with a delay after a push or after the PR becomes
+Ready. A head without checks therefore hands over after that minute. Every run
+of the gate, including Retry after the notification, waits again for the
+checks of the current head, so a fix pushed before Retry is awaited as well.
+The wait stops early and notifies the user when the PR is merged, closed,
+returned to Draft, or receives a new head, and after two hours with checks
+still unfinished; Retry starts a new wait. Up to three consecutive GitHub read
+failures are retried. Pause interrupts the wait immediately, and Resume starts
+it again. The wait keeps no durable state, so a plugin restart simply repeats it.
 Commits added after the archive commit and a history rewritten before the
 merge are accepted while the change stays in the archive. A closed unmerged PR
 stops the workflow. A PR already merged before the archive commit also stops:
