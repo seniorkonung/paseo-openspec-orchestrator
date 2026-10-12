@@ -132,14 +132,9 @@ async function verifyLocalResolution<Session extends ReviewFindingResolutionSess
     head,
     signal,
   );
-  const allowedPrefix = `${context.changeRepositoryPath}/`;
-  if (
-    changedPaths.length === 0 ||
-    !changedPaths.includes(context.reviewRepositoryPath) ||
-    changedPaths.some((path) => !path.startsWith(allowedPrefix))
-  ) {
+  if (!changedPaths.includes(context.reviewRepositoryPath)) {
     throw new ReviewFindingResolutionError(
-      `Finding-коммит должен изменять ${behavior.report.fileName} и только файлы выбранного change`,
+      `Finding-коммит должен изменять ${behavior.report.fileName}`,
     );
   }
   // Проверка до публикации: задача в фазе, которую планирует оркестратор,
@@ -159,31 +154,6 @@ async function verifyLocalResolution<Session extends ReviewFindingResolutionSess
     commit: head,
     outcome,
   };
-}
-
-/**
- * Описывает, чем коммиты после baseline уже нарушают контракт finding-этапа:
- * в диапазон попали файлы вне каталога change. Такой диапазон этап не примет
- * ни при каком продолжении. Незавершённое устранение нарушением не считается.
- */
-export async function describeFindingRangeViolation(
-  command: BoundedCommandRunner,
-  context: FindingResolutionContext,
-  session: ReviewFindingResolutionSession,
-  signal: AbortSignal,
-): Promise<string | null> {
-  const head = await readHeadCommit(command, context.gitRoot, signal);
-  const changedPaths = await readDiffPaths(
-    command,
-    context.gitRoot,
-    session.baselineCommit,
-    head,
-    signal,
-  );
-  const allowedPrefix = `${context.changeRepositoryPath}/`;
-  return changedPaths.some((path) => !path.startsWith(allowedPrefix))
-    ? "После baseline finding-сессии появились коммиты вне каталога change"
-    : null;
 }
 
 export async function assertCleanWorktree(

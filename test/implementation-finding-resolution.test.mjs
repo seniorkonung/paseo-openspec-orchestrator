@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
@@ -17,6 +17,12 @@ const changeId = "resolve-implementation-findings";
 const parentBranch = `change/${changeId}`;
 const branch = parentBranch;
 const findingSubject = "Resolve implementation finding";
+const outsideChangePaths = [
+  "openspec/specs/export/spec.md",
+  "openspec/changes/related-change/specs/export/spec.md",
+  "src/export.ts",
+  "test/export.test.mjs",
+];
 const reviewedBase = "a".repeat(40);
 const reviewedHead = "b".repeat(40);
 const publishInput = {
@@ -301,12 +307,16 @@ async function commitResolution(fixture, {
   findingIds = ["F3"],
   acceptedRisks = [],
   subject = findingSubject,
-  extraPath,
+  extraPaths = [],
   push = false,
 } = {}) {
   await writeFile(fixture.reviewPath, reviewReport(findingIds, acceptedRisks));
   await writeFile(join(fixture.changeRoot, "spec.md"), "# Спецификация\n\nДобавлена remediation.\n");
-  if (extraPath) await writeFile(join(fixture.workspace, extraPath), "посторонний файл\n");
+  for (const path of extraPaths) {
+    const filePath = join(fixture.workspace, path);
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(filePath, "// Исправление замечания.\n");
+  }
   await execFileAsync("git", ["add", "."], { cwd: fixture.workspace });
   await execFileAsync("git", ["commit", "-m", subject], { cwd: fixture.workspace });
   if (push) await execFileAsync("git", ["push", "origin", branch], { cwd: fixture.workspace });
@@ -595,7 +605,7 @@ async function commitScenarioResult(context, kind) {
       subject: kind === "wrong-subject"
         ? "docs(openspec): use wrong implementation subject"
         : findingSubject,
-      extraPath: kind === "outside" ? "outside.md" : undefined,
+      extraPaths: kind === "outside" ? outsideChangePaths : [],
     });
   }
   if (kind === "multiple") {
@@ -605,8 +615,6 @@ async function commitScenarioResult(context, kind) {
       cwd: fixture.workspace,
     });
   }
-  await execFileAsync("git", ["push", "origin", branch], { cwd: fixture.workspace });
-
   const [{ url }] = Object.values(options.config.mcpServers);
   const client = await connectClient(url);
   const result = await client.callTool({
@@ -618,19 +626,31 @@ async function commitScenarioResult(context, kind) {
     controller.abort();
     await assert.rejects(running, /Операция отменена/);
   } else {
-    await running;
+    const resolution = await running;
+    const { stdout: remoteHead } = await execFileAsync(
+      "git", ["rev-parse", `refs/heads/${branch}`], { cwd: fixture.remote },
+    );
+    assert.equal(remoteHead.trim(), resolution.commit);
+    assert.match(fixture.pullRequest.body, /OpenSpec implementation review `F1` — исправлено/u);
+    if (kind === "outside") {
+      for (const path of outsideChangePaths) {
+        const { stdout } = await execFileAsync("git", ["show", `${resolution.commit}:${path}`], {
+          cwd: fixture.remote,
+        });
+        assert.equal(stdout, "// Исправление замечания.\n");
+      }
+    }
   }
   return result;
 }
 
-test("completion tool сохраняет отчёт и границу change при нескольких коммитах с любыми subject", async (context) => {
+test("completion tool требует отчёт и принимает файлы вне change и несколько коммитов с любыми subject", async (context) => {
   const deleted = await commitScenarioResult(context, "deleted-report");
   assert.equal(deleted.isError, true);
   assert.match(firstText(deleted), /implementation-review\.md/);
 
   const outside = await commitScenarioResult(context, "outside");
-  assert.equal(outside.isError, true);
-  assert.match(firstText(outside), /только файлы выбранного change/);
+  assert.equal(outside.isError, undefined);
 
   const multiple = await commitScenarioResult(context, "multiple");
   assert.equal(multiple.isError, undefined);
@@ -659,7 +679,7 @@ test("ошибка checkpoint восстанавливает ntfy и recovery н
     logger: { error() {}, warn() {} },
   });
   const plan = await service.plan(fixture.workspace, changeId, branch);
-  await commitResolution(fixture, { findingIds: [], push: true });
+  await commitResolution(fixture, { findingIds: [], extraPaths: outsideChangePaths });
   const running = service.run({
     workspaceDirectory: fixture.workspace,
     changeId,
@@ -690,12 +710,55 @@ test("ошибка checkpoint восстанавливает ntfy и recovery н
   });
   assert.equal(second.isError, undefined);
   await client.close();
-  await running;
+  const resolution = await running;
+  assert.equal(await remoteHead(fixture), resolution.commit);
+  assert.equal(
+    fixture.pullRequest.body.match(/paseo-openspec-orchestrator:finding:implementation-review:F1:/gu)?.length,
+    1,
+  );
   assert.deepEqual(labels, [
     ["agent-checkpoint", false],
     ["agent-checkpoint", true],
     ["agent-checkpoint", false],
   ]);
+});
+
+test("implementation finding-сессия продолжается после правок вне change и теряет силу при потере baseline", async (context) => {
+  const fixture = await createRepository(context);
+  const { command } = createCommand(fixture);
+  const service = createImplementationFindingResolutionService({
+    command,
+    phaseWork: stubPhaseWork(),
+    async createAgent() {},
+  });
+  const signal = new AbortController().signal;
+  const git = async (...args) =>
+    (await execFileAsync("git", args, { cwd: fixture.workspace })).stdout.trim();
+  const plan = await service.plan(fixture.workspace, changeId, branch);
+  assert.equal(plan.kind, "finding-required");
+  const assess = () => service.assess({
+    workspaceDirectory: fixture.workspace,
+    session: plan.session,
+    taskScope: implementationScope,
+    signal,
+  });
+  assert.deepEqual(await assess(), { kind: "resumable" });
+
+  await writeFile(join(fixture.workspace, "application.ts"), "export const fixed = true;\n");
+  await git("add", ".");
+  await git("commit", "-m", "fix: apply manual correction");
+  assert.deepEqual(await assess(), { kind: "resumable" });
+
+  await commitResolution(fixture, { extraPaths: outsideChangePaths });
+  assert.deepEqual(await assess(), { kind: "resumable" });
+
+  await git("checkout", "--orphan", "rewritten");
+  await git("commit", "-m", "test: rewrite history");
+  await git("branch", "-M", branch);
+  assert.deepEqual(await assess(), {
+    kind: "stale",
+    reason: "Текущий Git HEAD больше не продолжает baseline finding-сессии",
+  });
 });
 
 test("prompt требует одно решение, сохраняет задачи и оставляет push оркестратору", () => {

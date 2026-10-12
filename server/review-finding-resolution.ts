@@ -70,7 +70,6 @@ import {
   assertCleanWorktree,
   assertCurrentBranch,
   assertRemoteHead,
-  describeFindingRangeViolation,
   assertReviewTracked,
   readHeadCommit,
   readLocalResolutionIfReady,
@@ -132,8 +131,7 @@ export interface ReviewFindingResolutionService<
   /**
    * Оценивает сохранённую finding-сессию, не меняя репозиторий. Сессия
    * продолжается, пока устранение можно завершить и подтвердить ею. Она
-   * устарела, когда Git HEAD не продолжает её baseline или после него появились
-   * коммиты вне каталога change: их этап принять не может.
+   * устарела, когда Git HEAD не продолжает её baseline.
    */
   assess(request: {
     readonly workspaceDirectory: string;
@@ -219,12 +217,7 @@ export function createReviewFindingResolutionService<
       signal,
     );
     if (resolution) return { kind: "resolved", resolution };
-    // Этап принимает только коммиты внутри каталога change. Если после
-    // baseline уже есть иные коммиты, завершить эту сессию нельзя: finding
-    // планируется заново от текущего HEAD. Незавершённое устранение
-    // продолжает агент той же сессии.
-    const violation = await describeFindingRangeViolation(command, context, session, signal);
-    return violation === null ? { kind: "unresolved" } : { kind: "stale", reason: violation };
+    return { kind: "unresolved" };
   };
   const scopeCheck = (
     workspaceDirectory: string,

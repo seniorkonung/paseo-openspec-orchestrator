@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
@@ -22,6 +22,12 @@ const changeId = "resolve-review-findings";
 const parentBranch = `change/${changeId}`;
 const branch = parentBranch;
 const findingSubject = "Resolve review finding";
+const outsideChangePaths = [
+  "openspec/specs/export/spec.md",
+  "openspec/changes/related-change/specs/export/spec.md",
+  "src/export.ts",
+  "test/export.test.mjs",
+];
 const publishInput = {
   mode: "publish",
   problem: "Артефакты не фиксировали обязательное поведение.",
@@ -266,12 +272,16 @@ async function commitResolution(fixture, {
   findingIds = ["F3"],
   acceptedRisks = [],
   subject = findingSubject,
-  extraPath,
+  extraPaths = [],
   push = false,
 } = {}) {
   await writeFile(fixture.reviewPath, reviewReport(findingIds, acceptedRisks));
   await writeFile(join(fixture.changeRoot, "proposal.md"), "# Предложение\n\nУточнён контракт.\n");
-  if (extraPath) await writeFile(join(fixture.workspace, extraPath), "посторонний файл\n");
+  for (const path of extraPaths) {
+    const filePath = join(fixture.workspace, path);
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(filePath, "// Исправление замечания.\n");
+  }
   await execFileAsync("git", ["add", "."], { cwd: fixture.workspace });
   await execFileAsync("git", ["commit", "-m", subject], { cwd: fixture.workspace });
   if (push) await execFileAsync("git", ["push", "origin", branch], { cwd: fixture.workspace });
@@ -558,7 +568,7 @@ async function commitScenarioResult(context, kind) {
     subject: kind === "wrong-subject"
       ? "docs(openspec): use wrong finding subject"
       : findingSubject,
-    extraPath: kind === "outside" ? "outside.md" : undefined,
+    extraPaths: kind === "outside" ? outsideChangePaths : [],
   });
   if (kind === "multiple") {
     await writeFile(join(fixture.changeRoot, "design.md"), "# Дизайн\n");
@@ -567,8 +577,6 @@ async function commitScenarioResult(context, kind) {
       cwd: fixture.workspace,
     });
   }
-  await execFileAsync("git", ["push", "origin", branch], { cwd: fixture.workspace });
-
   const [{ url }] = Object.values(options.config.mcpServers);
   const client = await connectClient(url);
   const result = await client.callTool({
@@ -580,15 +588,24 @@ async function commitScenarioResult(context, kind) {
     controller.abort();
     await assert.rejects(running, /Операция отменена/);
   } else {
-    await running;
+    const resolution = await running;
+    assert.equal(await remoteHead(fixture), resolution.commit);
+    assert.match(fixture.pullRequest.body, /OpenSpec review `F1` — исправлено/u);
+    if (kind === "outside") {
+      for (const path of outsideChangePaths) {
+        const { stdout } = await execFileAsync("git", ["show", `${resolution.commit}:${path}`], {
+          cwd: fixture.remote,
+        });
+        assert.equal(stdout, "// Исправление замечания.\n");
+      }
+    }
   }
   return result;
 }
 
-test("completion tool сохраняет границу change и принимает несколько коммитов с любыми subject", async (context) => {
+test("completion tool принимает файлы вне change и несколько коммитов с любыми subject", async (context) => {
   const outside = await commitScenarioResult(context, "outside");
-  assert.equal(outside.isError, true);
-  assert.match(firstText(outside), /только файлы выбранного change/);
+  assert.equal(outside.isError, undefined);
 
   const multiple = await commitScenarioResult(context, "multiple");
   assert.equal(multiple.isError, undefined);
@@ -617,7 +634,7 @@ test("ошибка checkpoint восстанавливает ntfy и повто�
     logger: { error() {}, warn() {} },
   });
   const plan = await service.plan(fixture.workspace, changeId, branch);
-  await commitResolution(fixture, { findingIds: [], push: true });
+  await commitResolution(fixture, { findingIds: [], extraPaths: outsideChangePaths, push: true });
   const running = service.run({
     workspaceDirectory: fixture.workspace,
     changeId,
@@ -656,6 +673,10 @@ test("ошибка checkpoint восстанавливает ntfy и повто�
     ["agent-checkpoint", false],
   ]);
   assert.equal(attempts, 2);
+  assert.equal(
+    fixture.pullRequest.body.match(/paseo-openspec-orchestrator:finding:review:F1:/gu)?.length,
+    1,
+  );
 });
 
 test("полный restart подтверждает уже проверенную PR-запись без повторной публикации", async (context) => {
@@ -691,7 +712,7 @@ test("полный restart подтверждает уже проверенну�
   });
   const plan = await service.plan(fixture.workspace, changeId, branch);
   assert.equal(plan.kind, "finding-required");
-  await commitResolution(fixture, { findingIds: [], push: true });
+  await commitResolution(fixture, { findingIds: [], extraPaths: outsideChangePaths, push: true });
   const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], {
     cwd: fixture.workspace,
   });
@@ -814,30 +835,21 @@ test("оценка finding-сессии различает неначатую, �
   await git("commit", "-m", "docs(openspec): draft resolution");
   assert.deepEqual(await assess(plan.session), { kind: "resumable" });
 
-  // Коммит пользователя с кодом: finding-этап принять его не может.
+  // Коммит пользователя с кодом продолжает ту же finding-сессию.
   await writeFile(join(fixture.workspace, "application.ts"), "export const fixed = true;\n");
   await git("add", ".");
   await git("commit", "-m", "fix: ручная правка кода");
-  assert.deepEqual(await assess(plan.session), {
-    kind: "stale",
-    reason: "После baseline finding-сессии появились коммиты вне каталога change",
-  });
+  assert.deepEqual(await assess(plan.session), { kind: "resumable" });
 
-  // Сессия от текущего HEAD принимает устранение, закоммиченное после него.
-  await git("push", "origin", branch);
-  const replanned = await service.plan(fixture.workspace, changeId, branch);
-  assert.equal(replanned.findingId, "F1");
-  assert.equal(replanned.session.baselineCommit, await git("rev-parse", "HEAD"));
+  // Готовое устранение принимается с исходным baseline, включая правку кода.
   await commitResolution(fixture);
-  assert.deepEqual(await assess(replanned.session), { kind: "resumable" });
-  // Для прежней сессии диапазон содержит код вне change.
-  assert.equal((await assess(plan.session)).kind, "stale");
+  assert.deepEqual(await assess(plan.session), { kind: "resumable" });
 
   // Переписанная история лишает сессию baseline.
   await git("checkout", "--orphan", "rewritten");
   await git("commit", "-m", "переписанная история");
   await git("branch", "-M", branch);
-  assert.deepEqual(await assess(replanned.session), {
+  assert.deepEqual(await assess(plan.session), {
     kind: "stale",
     reason: "Текущий Git HEAD больше не продолжает baseline finding-сессии",
   });
