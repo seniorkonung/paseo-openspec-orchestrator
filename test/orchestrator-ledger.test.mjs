@@ -1,3 +1,4 @@
+import { resolvePaseoHome } from "../server/paseo-home.ts";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,7 +7,6 @@ import test from "node:test";
 import {
   getLedgerPath,
   OrchestratorLedger,
-  resolvePaseoHome,
 } from "../server/orchestrator-ledger.ts";
 import {
   createOrchestratorReporter,

@@ -214,7 +214,7 @@ test("phase planning отклоняет правки кода и принима�
     phaseWork,
     async createAgent(options) {
       [{ url: toolUrl }] = Object.values(options.config.mcpServers);
-      return { id: "phase-agent", async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; }, async waitForFinish() { return { status: "idle" }; } };
+      return { id: "phase-agent", async refresh() { return { agent: { status: "idle", archivedAt: null } }; }, async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; }, async waitForFinish() { return { status: "idle" }; } };
     },
     updateNotificationLabel: async () => {},
     logger: { error() {}, warn() {} },

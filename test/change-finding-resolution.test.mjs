@@ -332,7 +332,7 @@ test("High ждёт scoped MCP, а оркестратор публикует п�
       resolveCreated();
       return {
         id: "agent-finding",
-        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
+        async refresh() { return { agent: { status: "idle", archivedAt: null } }; }, async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() {
           drainCalls += 1;
           return { status: "idle" };
@@ -450,7 +450,7 @@ test("accepted risk удаляет finding из активного списка"
         }
         finally { await client.close(); }
       })();
-      return { id: "agent-risk", async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; }, async waitForFinish() { await runTool; } };
+      return { id: "agent-risk", async refresh() { return { agent: { status: "idle", archivedAt: null } }; }, async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; }, async waitForFinish() { await runTool; } };
     },
     updateNotificationLabel: async () => {},
     logger: { error() {}, warn() {} },
@@ -499,7 +499,7 @@ test("устранение review finding в начальном планиров
           await client.close();
         }
       })();
-      return { id: "agent-task-scope", async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; }, async waitForFinish() { await runTool; } };
+      return { id: "agent-task-scope", async refresh() { return { agent: { status: "idle", archivedAt: null } }; }, async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; }, async waitForFinish() { await runTool; } };
     },
     updateNotificationLabel: async () => {},
     logger: { error() {}, warn() {} },
@@ -544,7 +544,7 @@ async function commitScenarioResult(context, kind) {
     async createAgent(value) {
       options = value;
       resolveCreated();
-      return { id: `agent-${kind}`, async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; }, async waitForFinish() {} };
+      return { id: `agent-${kind}`, async refresh() { return { agent: { status: "idle", archivedAt: null } }; }, async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; }, async waitForFinish() {} };
     },
     updateNotificationLabel: async () => {},
     logger: { error() {}, warn() {} },
@@ -628,7 +628,7 @@ test("ошибка checkpoint восстанавливает ntfy и повто�
     async createAgent(value) {
       options = value;
       resolveCreated();
-      return { id: "agent-checkpoint", async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; }, async waitForFinish() {} };
+      return { id: "agent-checkpoint", async refresh() { return { agent: { status: "idle", archivedAt: null } }; }, async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; }, async waitForFinish() {} };
     },
     updateNotificationLabel: async (agentId, enabled) => labels.push([agentId, enabled]),
     logger: { error() {}, warn() {} },
@@ -703,7 +703,7 @@ test("полный restart подтверждает уже проверенну�
       })();
       return {
         id: "agent-restart",
-        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
+        async refresh() { return { agent: { status: "idle", archivedAt: null } }; }, async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() { await toolResult; },
       };
     },

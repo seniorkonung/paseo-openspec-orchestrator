@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createManagedAgentSession } from "../server/managed-agent-session.ts";
+import { createManagedAgentSession as createSession } from "../server/managed-agent-session.ts";
+
+function createManagedAgentSession(options) {
+  return createSession({
+    async releaseAgent(agent, mode) {
+      if (mode === "archive") await agent.archive();
+      else await agent.stop?.();
+    },
+    ...options,
+  });
+}
 
 test("управляет готовностью, завершением, ntfy и ресурсами одной agent-сессии", async () => {
   const events = [];
@@ -129,6 +139,7 @@ test("cleanup остаётся best-effort после ошибок внешни�
     () => undefined,
   );
 
+  session.complete("готово");
   await session.drainAgent();
   await assert.rejects(session.close(), /освободить ресурсы/iu);
 
@@ -192,6 +203,7 @@ test("одновременные close ожидают одну архиваци�
       await new Promise((resolve) => { finishArchive = resolve; });
     },
   }), () => {});
+  session.complete("готово");
   const first = session.close();
   const second = session.close();
   await new Promise((resolve) => setImmediate(resolve));
@@ -202,7 +214,7 @@ test("одновременные close ожидают одну архиваци�
   assert.equal(hostClosed, true);
 });
 
-test("отмена во время создания освобождает поздно появившегося агента", async () => {
+test("отмена во время создания останавливает поздно появившегося агента без архивации", async () => {
   const controller = new AbortController();
   let finishCreation;
   const events = [];
@@ -219,10 +231,10 @@ test("отмена во время создания освобождает по�
   controller.abort();
   const rejected = assert.rejects(launching, /отменена/iu);
   const closing = session.close();
-  finishCreation({ id: "late-agent", waitForFinish: async () => {}, async archive() { events.push("archive"); } });
+  finishCreation({ id: "late-agent", waitForFinish: async () => {}, async archive() { events.push("archive"); }, async stop() { events.push("stop"); } });
   await rejected;
   await closing;
-  assert.deepEqual(events, ["archive", "host"]);
+  assert.deepEqual(events, ["stop", "host"]);
 });
 
 test("ошибка архивации сообщается после закрытия MCP и host", async () => {
@@ -240,6 +252,7 @@ test("ошибка архивации сообщается после закры
     id: "agent-1", waitForFinish: async () => {},
     async archive() { throw new Error("архивация недоступна"); },
   }), () => {});
+  session.complete("готово");
   await assert.rejects(session.close(), /очист|архивац/iu);
   assert.deepEqual(events, ["scope", "host"]);
 });
@@ -256,7 +269,7 @@ function managedFixture(overrides = {}) {
   });
 }
 
-test("поздний агент архивируется и после истечения срока ожидания создания", async () => {
+test("поздний агент останавливается и после истечения срока ожидания создания", async () => {
   const controller = new AbortController();
   let finishCreation;
   let archived;
@@ -270,7 +283,7 @@ test("поздний агент архивируется и после исте�
   await assert.rejects(launching, /отменена/iu);
   await assert.rejects(session.close(), /ресурсы/iu);
   assert.equal(hostClosed, true);
-  finishCreation({ id: "late", async waitForFinish() {}, async archive() { archived(); } });
+  finishCreation({ id: "late", async waitForFinish() {}, async archive() { assert.fail("Незавершённый агент не архивируется"); }, async stop() { archived(); } });
   await finished;
 });
 
@@ -281,7 +294,7 @@ test("уже отменённый сигнал не запускает аген�
   await session.close();
 });
 
-test("отмена прерывает ожидание финального ответа и не мешает архивации", async () => {
+test("отмена прерывает ожидание финального ответа без архивации незавершённого этапа", async () => {
   const controller = new AbortController();
   let archived = false;
   const session = managedFixture({ signal: controller.signal });
@@ -293,7 +306,30 @@ test("отмена прерывает ожидание финального от
   controller.abort();
   await draining;
   await session.close();
-  assert.equal(archived, true);
+  assert.equal(archived, false);
+});
+
+test("отмена после сохранённого результата не меняет успешный исход этапа", async () => {
+  const controller = new AbortController();
+  const modes = [];
+  const session = managedFixture({ signal: controller.signal,
+    async releaseAgent(_agent, mode) { modes.push(mode); },
+  });
+  await session.launchAgent(async () => ({ id: "agent", async waitForFinish() {}, async archive() {} }), () => {});
+  session.complete("сохранено");
+  controller.abort();
+  await Promise.all([session.close(), session.close()]);
+  assert.deepEqual(modes, ["archive"]);
+});
+
+test("поздний completion не превращает прерванную сессию в успешную", async () => {
+  const modes = [];
+  const session = managedFixture({ async releaseAgent(_agent, mode) { modes.push(mode); } });
+  await session.launchAgent(async () => ({ id: "agent", async waitForFinish() {}, async archive() {} }), () => {});
+  const closing = session.close();
+  assert.throws(() => session.complete("слишком поздно"), /отменена/u);
+  await closing;
+  assert.deepEqual(modes, ["preserve"]);
 });
 
 test("владелец получает повторяемое закрытие MCP, успешные ресурсы повторно не закрываются", async () => {
@@ -303,7 +339,7 @@ test("владелец получает повторяемое закрытие 
   let hostCalls = 0;
   const session = managedFixture({
     host: { async close() { hostCalls++; } },
-    async releaseAgent(agent, closeLocalResources) {
+    async releaseAgent(agent, _mode, closeLocalResources) {
       await agent.archive();
       localCloser = closeLocalResources;
       await closeLocalResources();

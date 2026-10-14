@@ -402,7 +402,7 @@ test("Ultra создаёт один артефакт и завершает ег�
             }
           })();
         },
-        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
+        async refresh() { return { agent: { status: "idle", archivedAt: null } }; }, async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() {
           drainCalls += 1;
           await toolFlow;
@@ -480,7 +480,7 @@ test("отсутствие continue skill останавливает сесси�
         async send() {
           sends += 1;
         },
-        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
+        async refresh() { return { agent: { status: "idle", archivedAt: null } }; }, async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() {
           return { status: "idle" };
         },
@@ -504,7 +504,7 @@ test("отсутствие continue skill останавливает сесси�
     /не загрузил обязательный skill/,
   );
   assert.equal(sends, 0);
-  assert.deepEqual(labels, [["agent-without-skill", false]]);
+  assert.deepEqual(labels, []);
   assert.equal(await fileExists(fixture.riskPath), false);
 });
 
@@ -540,7 +540,7 @@ test("после рестарта с несколькими коммитами �
             }
           })();
         },
-        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
+        async refresh() { return { agent: { status: "idle", archivedAt: null } }; }, async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() {
           await toolFlow;
           return { status: "idle" };
@@ -638,7 +638,7 @@ async function runCommitScenario(context, kind) {
             }
           })();
         },
-        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
+        async refresh() { return { agent: { status: "idle", archivedAt: null } }; }, async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() {
           await toolFlow;
           return { status: "idle" };

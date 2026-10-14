@@ -31,6 +31,7 @@ import {
 import { createOpenSpecWorkflow } from "./workflow/steps/index.ts";
 import { AgentResources } from "./agent-resources.ts";
 import { AgentCleanupError } from "./agent-cleanup-error.ts";
+import type { AgentReleaseMode } from "./agent-resource-registry.ts";
 
 type PaseoApi = PluginHandlerContext["paseo"];
 
@@ -173,8 +174,8 @@ export class OrchestratorController {
       this.#resources.create(workspace, paseo, options);
     const agentLifecycle = {
       createAgent,
-      releaseAgent: (agent: { readonly id: string }, closeLocalResources: () => Promise<void>) =>
-        this.#resources.release(agent.id, paseo, closeLocalResources),
+      releaseAgent: (agent: { readonly id: string }, mode: AgentReleaseMode, closeLocalResources: () => Promise<void>) =>
+        this.#resources.release(agent.id, paseo, mode, closeLocalResources),
     };
     const phaseWork = createPhaseWorkService();
     const rootPullRequest = createRootPullRequestService();

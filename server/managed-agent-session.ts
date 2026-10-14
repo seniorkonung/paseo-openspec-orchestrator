@@ -1,5 +1,7 @@
 import type { AgentNotificationLabelUpdater } from "./paseo-agent-labels.ts";
 import { AgentCleanupError, withCleanupDeadline } from "./agent-cleanup-error.ts";
+import type { AgentReleaseMode } from "./agent-resource-registry.ts";
+import { stopPaseoAgent, type StoppableAgent } from "./paseo-agent-lifecycle.ts";
 import {
   abortError,
   createDeferred,
@@ -13,7 +15,7 @@ interface AsyncClosable {
   close(): Promise<void>;
 }
 
-interface ManagedAgent {
+interface ManagedAgent extends StoppableAgent {
   readonly id: string;
   waitForFinish(timeoutMs: number): Promise<unknown>;
   archive(): Promise<unknown>;
@@ -21,6 +23,7 @@ interface ManagedAgent {
 
 export type AgentResourceReleaser = (
   agent: Pick<ManagedAgent, "id" | "archive">,
+  mode: AgentReleaseMode,
   closeLocalResources: () => Promise<void>,
 ) => Promise<void>;
 
@@ -71,6 +74,8 @@ export function createManagedAgentSession<Result>(
   let scope: AsyncClosable | null = null;
   let notificationsEnabled = false;
   let closed = false;
+  let completed = false;
+  let releaseMode: AgentReleaseMode = "preserve";
   let creation: Promise<ManagedAgent> | null = null;
   let creationWaitExpired = false;
   let closePromise: Promise<void> | null = null;
@@ -86,7 +91,7 @@ export function createManagedAgentSession<Result>(
   if (options.signal.aborted) abortCompletion();
 
   const warn = (
-    operation: "drain-agent" | "disable-notifications" | "archive-agent" | "create-agent" | "close-scope" | "close-host",
+    operation: "drain-agent" | "disable-notifications" | "release-agent" | "create-agent" | "close-scope" | "close-host",
     error: unknown,
   ): void => {
     try {
@@ -131,7 +136,7 @@ export function createManagedAgentSession<Result>(
     const ownedAgent = agent;
     if (!ownedAgent) return Promise.resolve();
     agentClosePromise = (async () => {
-      if (notificationsEnabled) {
+      if (notificationsEnabled && releaseMode === "archive") {
         try {
           await withCleanupDeadline(() => options.updateNotificationLabel(ownedAgent.id, false), options.cleanupTimeoutMs);
           notificationsEnabled = false;
@@ -140,7 +145,11 @@ export function createManagedAgentSession<Result>(
         }
       }
       await withCleanupDeadline(
-        () => options.releaseAgent ? options.releaseAgent(ownedAgent, closeLocalResources) : ownedAgent.archive(),
+        async () => {
+          if (options.releaseAgent) await options.releaseAgent(ownedAgent, releaseMode, closeLocalResources);
+          else if (releaseMode === "archive") await ownedAgent.archive();
+          else await stopPaseoAgent(ownedAgent);
+        },
         options.cleanupTimeoutMs,
       );
     })();
@@ -150,6 +159,7 @@ export function createManagedAgentSession<Result>(
   const close = (): Promise<void> => {
     if (closePromise) return closePromise;
     closed = true;
+    releaseMode = completed ? "archive" : "preserve";
     options.signal.removeEventListener("abort", abortCompletion);
     agentReady.reject(abortError());
     completion.reject(abortError());
@@ -171,7 +181,7 @@ export function createManagedAgentSession<Result>(
         await closeAgent();
       } catch (error) {
         failures.push(error);
-        warn("archive-agent", error);
+        warn("release-agent", error);
       }
       try { await closeLocalResources(); }
       catch (error) { failures.push(error); }
@@ -209,7 +219,7 @@ export function createManagedAgentSession<Result>(
         agent = createdAgent;
         notificationsEnabled = true;
         if (creationWaitExpired) {
-          void closeAgent().catch((error) => warn("archive-agent", error));
+          void closeAgent().catch((error) => warn("release-agent", error));
         }
         return createdAgent;
       });
@@ -239,6 +249,8 @@ export function createManagedAgentSession<Result>(
     },
 
     complete(result) {
+      if (closed || options.signal.aborted) throw abortError();
+      completed = true;
       completion.resolve(result);
     },
 

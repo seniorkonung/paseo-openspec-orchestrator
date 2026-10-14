@@ -7,7 +7,7 @@ import {
   orchestratorNotificationSettingsValuesSchema,
   type OrchestratorNotificationSettingsValues,
 } from "../shared/orchestrator-notifications.ts";
-import { resolvePaseoHome } from "./orchestrator-ledger.ts";
+import { resolvePaseoHome } from "./paseo-home.ts";
 
 const SETTINGS_VERSION = 1;
 const MAX_SETTINGS_BYTES = 16 * 1024;

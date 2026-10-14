@@ -224,7 +224,7 @@ async function runReview(value, action) {
           const client = await connectClient(url);
           try { await action(client, prompt); } finally { await client.close(); }
         },
-        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
+        async refresh() { return { agent: { status: "idle", archivedAt: null } }; }, async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() { return { status: "idle" }; },
       };
     },
@@ -306,7 +306,7 @@ test("High-агент создаёт один task-коммит без task PR",
             await client.close();
           }
         },
-        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
+        async refresh() { return { agent: { status: "idle", archivedAt: null } }; }, async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() { return { status: "idle" }; },
       };
     },
@@ -353,7 +353,7 @@ test("completion отклоняет изменение task-state следующ
             await client.close();
           }
         },
-        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
+        async refresh() { return { agent: { status: "idle", archivedAt: null } }; }, async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() { return { status: "idle" }; },
       };
     },
@@ -403,6 +403,63 @@ test("task checkpoint восстанавливается до push и после
   const second = await verifyCompletedTask(command, value.workspace, value.workspace, plan.session, signal);
   assert.deepEqual(second, first);
   assert.equal(calls.filter((call) => call.startsWith("git push ")).length, 1);
+});
+
+test("прерванная task-сессия завершается вручную, а Retry принимает коммит без повторной реализации", async (context) => {
+  const value = await fixture(context);
+  const controller = new AbortController();
+  let started;
+  const ready = new Promise((resolve) => { started = resolve; });
+  const releases = [];
+  const original = {
+    id: "original-task-agent",
+    async commands() { return { commands: [{ name: "openspec-apply-change" }], error: null }; },
+    async send() { started(); },
+    async waitForFinish() { return { status: "idle" }; },
+    async archive() { assert.fail("Прерванная сессия должна сохраниться"); },
+    async finishManually() { await commitTask(value); },
+  };
+  const service = createChangeTaskExecutionService({ command: value.command,
+    async createAgent() { return original; },
+    async releaseAgent(agent, mode, closeLocalResources) {
+      releases.push([agent.id, mode]);
+      await closeLocalResources();
+    },
+    updateNotificationLabel: async () => {}, logger: { error() {}, warn() {} },
+  });
+  const plan = await service.plan(value.workspace, value.run);
+  const running = service.run({ workspaceDirectory: value.workspace, profile: highProfile(), session: plan.session,
+    signal: controller.signal, onAgentCreated() {}, onTaskCompleted() { assert.fail("Результат ещё не завершён"); } });
+  const interrupted = assert.rejects(running, /отменена/u);
+  await ready;
+  controller.abort();
+  await interrupted;
+  assert.deepEqual(releases, [[original.id, "preserve"]]);
+  await original.finishManually();
+  const manualHead = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: value.workspace })).stdout.trim();
+  const completed = [];
+  const recovery = createChangeTaskExecutionService({ command: value.command,
+    async createAgent(options) {
+      const [{ url }] = Object.values(options.config.mcpServers);
+      return { id: "recovery-agent",
+        async commands() { return { commands: [{ name: "openspec-apply-change" }], error: null }; },
+        async send(prompt) {
+          assert.match(prompt, /already implemented and committed/u);
+          assert.match(prompt, /Do not invoke the apply skill/u);
+          const client = await connectClient(url);
+          try { assert.equal((await client.callTool({ name: "complete_change_task", arguments: {} })).isError, undefined); }
+          finally { await client.close(); }
+        },
+        async waitForFinish() { return { status: "idle" }; }, async archive() {},
+      };
+    },
+    updateNotificationLabel: async () => {}, logger: { error() {}, warn() {} },
+  });
+  await recovery.run({ workspaceDirectory: value.workspace, profile: highProfile(), session: plan.session,
+    signal: new AbortController().signal, onAgentCreated() {}, async onTaskCompleted(result) { completed.push(result); } });
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0].commit, manualHead);
+  assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: value.workspace })).stdout.trim(), manualHead);
 });
 
 test("implementation review получает все коммиты задачи и её завершающий SHA", async (context) => {
@@ -527,7 +584,7 @@ test("implementation review публикует правки кода и арте
             await client.close();
           }
         },
-        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
+        async refresh() { return { agent: { status: "idle", archivedAt: null } }; }, async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
         async waitForFinish() { return { status: "idle" }; },
       };
     },

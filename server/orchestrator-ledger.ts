@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   chmod,
@@ -9,6 +8,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import { z } from "zod";
+import { resolvePaseoHome } from "./paseo-home.ts";
 import {
   lifecycleSchema,
   orchestratorChangeSchema,
@@ -88,18 +88,6 @@ export interface OrchestratorLedgerOptions {
   maximumTotalWaiters?: number;
   writer?: LedgerWriter;
   reader?: LedgerReader;
-}
-
-function expandHome(input: string): string {
-  if (input === "~") return homedir();
-  if (input.startsWith("~/")) return join(homedir(), input.slice(2));
-  return input;
-}
-
-export function resolvePaseoHome(environment: NodeJS.ProcessEnv = process.env): string {
-  // Совпадает с правилом Paseo: PASEO_HOME либо ~/.paseo.
-  // Источник: https://github.com/getpaseo/paseo/blob/main/packages/server/src/server/paseo-home.ts
-  return resolve(expandHome(environment.PASEO_HOME ?? "~/.paseo"));
 }
 
 export function getLedgerPath(workspaceId: string, paseoHome = resolvePaseoHome()): string {

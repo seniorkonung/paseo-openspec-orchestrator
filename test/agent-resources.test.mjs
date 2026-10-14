@@ -13,6 +13,8 @@ async function fixture(context) {
   const snapshots = new Map();
   const archived = [];
   const cleaned = [];
+  const stopped = [];
+  const commands = [];
   let archiveFailure = false;
   let processFailure = false;
   const paseo = { agents: {
@@ -30,16 +32,30 @@ async function fixture(context) {
     }; },
   } };
   const workspace = { id: "workspace-1", agents: { async create(options) {
-    assert.equal((await registry.list()).some(({ agentId }) => agentId === options.agentId), true);
-    snapshots.set(options.agentId, { id: options.agentId, labels: options.labels, workspaceId: "workspace-1", archivedAt: null });
+    assert.equal((await new AgentResourceRegistry(home).list()).some(({ agentId }) => agentId === options.agentId), true);
+    snapshots.set(options.agentId, { id: options.agentId, labels: options.labels, workspaceId: "workspace-1", archivedAt: null, status: "running" });
     return paseo.agents.ref(options.agentId);
   } } };
   const cleanProcesses = async (ids) => {
     cleaned.push([...ids]);
     if (processFailure) throw new Error("Процесс не завершился");
   };
-  const resources = new AgentResources({ registry, cleanProcesses });
-  return { home, registry, resources, paseo, workspace, snapshots, archived, cleaned, cleanProcesses,
+  const command = async (executable, args) => {
+    assert.equal(executable, "paseo");
+    commands.push([...args]);
+    const agent = snapshots.get(args.at(-1));
+    assert.ok(agent, "Команда адресована существующему агенту");
+    if (args[1] === "stop") {
+      stopped.push(agent.id);
+      agent.status = "idle";
+    } else if (args[1] === "update") {
+      const [name, value] = args[3].split("=");
+      agent.labels = { ...agent.labels, [name]: value };
+    } else assert.fail("Неожиданная команда");
+    return { stdout: "{}", stderr: "" };
+  };
+  const resources = new AgentResources({ registry, cleanProcesses, command });
+  return { home, registry, resources, paseo, workspace, snapshots, archived, cleaned, cleanProcesses, stopped, commands, command,
     setArchiveFailure(value) { archiveFailure = value; }, setProcessFailure(value) { processFailure = value; } };
 }
 
@@ -49,7 +65,7 @@ test("сохраняет ID до создания в демоне и удаля�
   const records = await value.registry.list();
   assert.equal(records[0].agentId, agent.id);
   await assert.rejects(value.resources.recover(value.paseo, value.workspace.id), /ресурсы предыдущих/iu);
-  await value.resources.release(agent.id, value.paseo);
+  await value.resources.release(agent.id, value.paseo, "archive");
   assert.deepEqual(value.archived, [agent.id]);
   assert.deepEqual(value.cleaned, [[agent.id]]);
   assert.deepEqual(await value.registry.list(), []);
@@ -61,7 +77,7 @@ test("после ошибки архивации всё равно очищае�
   const value = await fixture(context);
   const agent = await value.resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
   value.setArchiveFailure(true);
-  await assert.rejects(value.resources.release(agent.id, value.paseo), /архивировать/iu);
+  await assert.rejects(value.resources.release(agent.id, value.paseo, "archive"), /архивировать/iu);
   assert.deepEqual(value.cleaned, [[agent.id]]);
   await assert.rejects(value.resources.assertReleased(value.workspace.id), /не освобождены/iu);
   value.setArchiveFailure(false);
@@ -73,7 +89,7 @@ test("повторяет неудавшуюся очистку процессо�
   const value = await fixture(context);
   const agent = await value.resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
   value.setProcessFailure(true);
-  await assert.rejects(value.resources.release(agent.id, value.paseo));
+  await assert.rejects(value.resources.release(agent.id, value.paseo, "archive"));
   assert.ok(value.snapshots.get(agent.id).archivedAt);
   assert.equal((await value.registry.list()).length, 1);
   value.setProcessFailure(false);
@@ -84,11 +100,171 @@ test("повторяет неудавшуюся очистку процессо�
 test("при новом запуске восстанавливает очистку из отдельного реестра", async (context) => {
   const value = await fixture(context);
   const agent = await value.resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
+  await value.registry.beginRelease(agent.id, "archive");
   const recoveredRegistry = new AgentResourceRegistry(value.home);
-  const restarted = new AgentResources({ registry: recoveredRegistry, cleanProcesses: value.cleanProcesses });
+  const restarted = new AgentResources({ command: value.command, registry: recoveredRegistry, cleanProcesses: value.cleanProcesses });
   await restarted.initialize(value.paseo);
   assert.deepEqual(value.archived, [agent.id]);
   assert.deepEqual(await recoveredRegistry.list(), []);
+});
+
+test("после аварии сохраняет незавершённую сессию для ручного продолжения", async (context) => {
+  const value = await fixture(context);
+  const agent = await value.resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
+  const restarted = new AgentResources({ command: value.command, registry: new AgentResourceRegistry(value.home), cleanProcesses: value.cleanProcesses });
+  await restarted.initialize(value.paseo);
+  assert.equal(value.snapshots.get(agent.id).archivedAt, null);
+  assert.deepEqual(value.archived, []);
+  assert.deepEqual(value.stopped, [agent.id]);
+  assert.deepEqual(value.cleaned, [[agent.id]]);
+  assert.equal(value.snapshots.get(agent.id).labels["openspec-preserved"], "true");
+});
+
+test("ручное продолжение и его новые потомки не попадают в повторную очистку", async (context) => {
+  const value = await fixture(context);
+  const agent = await value.resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
+  value.snapshots.set("child", { id: "child", labels: { "parent-agent-id": agent.id }, status: "running", archivedAt: null });
+  await value.resources.release(agent.id, value.paseo, "preserve");
+  assert.deepEqual(new Set(value.stopped), new Set([agent.id, "child"]));
+  value.snapshots.get(agent.id).status = "running";
+  value.snapshots.get("child").status = "running";
+  value.snapshots.set("manual-child", { id: "manual-child", labels: { "parent-agent-id": "child" }, status: "running", archivedAt: null });
+  const cleaned = value.cleaned.length;
+  const restarted = new AgentResources({ registry: new AgentResourceRegistry(value.home), command: value.command, cleanProcesses: value.cleanProcesses });
+  await restarted.initialize(value.paseo);
+  await restarted.onAgentCreated({ id: "manual-child", parentAgentId: "child" }, value.paseo);
+  await restarted.recover(value.paseo, value.workspace.id);
+  await restarted.assertReleased(value.workspace.id);
+  const next = await restarted.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
+  assert.equal(value.cleaned.length, cleaned);
+  assert.equal(value.snapshots.get(agent.id).status, "running");
+  assert.equal(value.snapshots.get("manual-child").status, "running");
+  await restarted.release(next.id, value.paseo, "archive");
+  assert.deepEqual(value.archived, [next.id]);
+});
+
+test("ошибка остановки закрывает MCP и оставляет режим сохранения для Retry", async (context) => {
+  const value = await fixture(context);
+  let stopFails = true;
+  const resources = new AgentResources({ registry: value.registry, cleanProcesses: value.cleanProcesses,
+    command: async (...args) => {
+      if (stopFails && args[1][1] === "stop") throw new Error("Демон не принял остановку");
+      return value.command(...args);
+    },
+  });
+  const agent = await resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
+  let closed = 0;
+  await assert.rejects(resources.release(agent.id, value.paseo, "preserve", async () => { closed++; }));
+  assert.equal(closed, 1);
+  assert.deepEqual(value.cleaned, [[agent.id]]);
+  assert.equal((await value.registry.list())[0].release, "preserve");
+  assert.equal(value.snapshots.get(agent.id).labels["openspec-preserved"], undefined);
+  stopFails = false;
+  // Даже ошибочный повторный запрос не меняет уже сохранённый исход.
+  await resources.release(agent.id, value.paseo, "archive");
+  assert.deepEqual(value.archived, []);
+  assert.deepEqual(await value.registry.list(), []);
+});
+
+test("сбой метки передачи управления сохраняет запись до успешного повторения", async (context) => {
+  const value = await fixture(context);
+  let labelFails = true;
+  const resources = new AgentResources({ registry: value.registry, cleanProcesses: value.cleanProcesses,
+    command: async (...args) => {
+      if (labelFails && args[1][1] === "update") throw new Error("Метка не сохранена");
+      return value.command(...args);
+    },
+  });
+  const agent = await resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
+  await assert.rejects(resources.release(agent.id, value.paseo, "preserve"));
+  assert.equal((await value.registry.list())[0].release, "preserve");
+  labelFails = false;
+  await resources.recover(value.paseo, value.workspace.id);
+  assert.deepEqual(await value.registry.list(), []);
+  assert.deepEqual(value.archived, []);
+});
+
+test("сбой удаления реестра после передачи управления не останавливает ручное продолжение", async (context) => {
+  const value = await fixture(context);
+  const agent = await value.resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
+  const removal = context.mock.method(value.registry, "removeRoot", async () => { throw new Error("Запись реестра прервана"); });
+  await assert.rejects(value.resources.release(agent.id, value.paseo, "preserve"));
+  assert.equal(value.snapshots.get(agent.id).labels["openspec-preserved"], "true");
+  assert.equal((await value.registry.list()).length, 1);
+  value.snapshots.get(agent.id).status = "running";
+  value.snapshots.set("manual-child", { id: "manual-child", labels: { "parent-agent-id": agent.id }, status: "running", archivedAt: null });
+  await value.resources.onAgentCreated({ id: "manual-child", parentAgentId: agent.id }, value.paseo);
+  assert.equal((await value.registry.list()).length, 1);
+  let closed = false;
+  const unavailable = { agents: {
+    async list() { throw new Error("Демон недоступен"); },
+    ref() { return { async refresh() { throw new Error("Демон недоступен"); } }; },
+  } };
+  await assert.rejects(value.resources.release(agent.id, unavailable, "preserve", async () => { closed = true; }));
+  assert.equal(closed, true);
+  assert.deepEqual(value.cleaned, [[agent.id]]);
+  removal.mock.restore();
+  const restarted = new AgentResources({ registry: new AgentResourceRegistry(value.home), command: value.command, cleanProcesses: value.cleanProcesses });
+  await restarted.initialize(value.paseo);
+  assert.deepEqual(value.stopped, [agent.id]);
+  assert.deepEqual(value.cleaned, [[agent.id]]);
+  assert.deepEqual(value.archived, []);
+  assert.equal(value.snapshots.get(agent.id).status, "running");
+  assert.equal(value.snapshots.get("manual-child").status, "running");
+  await restarted.assertReleased(value.workspace.id);
+});
+
+test("миграция версии 1 сохраняет открытые сессии и очищает архивные деревья", async (context) => {
+  const value = await fixture(context);
+  const active = await value.resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
+  const records = [{ agentId: active.id, rootAgentId: active.id, workspaceId: value.workspace.id },
+    { agentId: "archived", rootAgentId: "archived", workspaceId: value.workspace.id }];
+  value.snapshots.set("archived", { id: "archived", labels: {}, status: "idle", archivedAt: "2026-10-14" });
+  const path = join(value.home, "plugin-data", "paseo-openspec-orchestrator", "agent-resources.json");
+  await writeFile(path, JSON.stringify({ version: 1, resources: records }));
+  const registry = new AgentResourceRegistry(value.home);
+  assert.equal((await registry.list()).length, 2);
+  assert.equal(JSON.parse(await readFile(path, "utf8")).version, 2);
+  const restarted = new AgentResources({ registry, command: value.command, cleanProcesses: value.cleanProcesses });
+  await restarted.initialize(value.paseo);
+  assert.equal(value.snapshots.get(active.id).archivedAt, null);
+  assert.deepEqual(value.archived, ["archived"]);
+  assert.deepEqual(await registry.list(), []);
+});
+
+test("поздний потомок без hook останавливается до передачи управления", async (context) => {
+  const value = await fixture(context);
+  let inserted = false;
+  const resources = new AgentResources({ registry: value.registry, command: value.command,
+    cleanProcesses: async (ids) => {
+      await value.cleanProcesses(ids);
+      if (inserted) return;
+      inserted = true;
+      value.snapshots.set("late", { id: "late", labels: { "parent-agent-id": ids[0] }, status: "running", archivedAt: null });
+    },
+  });
+  const agent = await resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
+  await resources.release(agent.id, value.paseo, "preserve");
+  assert.deepEqual(new Set(value.stopped), new Set([agent.id, "late"]));
+  assert.deepEqual(value.archived, []);
+  assert.ok(value.cleaned.some((ids) => ids.includes("late")));
+  assert.deepEqual(await value.registry.list(), []);
+});
+
+test("ошибка записи намерения не архивирует агента и оставляет данные для повторения", async (context) => {
+  const value = await fixture(context);
+  const agent = await value.resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
+  const original = value.registry.beginRelease.bind(value.registry);
+  const mocked = context.mock.method(value.registry, "beginRelease", async () => { throw new Error("Диск недоступен"); });
+  let closed = false;
+  await assert.rejects(value.resources.release(agent.id, value.paseo, "archive", async () => { closed = true; }), /Диск/u);
+  assert.equal(closed, true);
+  assert.deepEqual(value.archived, []);
+  assert.equal((await value.registry.list())[0].release, "managed");
+  mocked.mock.restore();
+  await original(agent.id, "preserve");
+  await value.resources.recover(value.paseo, value.workspace.id);
+  assert.deepEqual(value.archived, []);
 });
 
 test("очищает дочерних агентов по связи с родителем, сохраняя ручные сессии", async (context) => {
@@ -97,7 +273,7 @@ test("очищает дочерних агентов по связи с роди
   value.snapshots.set("child", { id: "child", labels: { "parent-agent-id": agent.id }, archivedAt: null });
   value.snapshots.set("grandchild", { id: "grandchild", labels: { "parent-agent-id": "child" }, archivedAt: null });
   value.snapshots.set("manual", { id: "manual", labels: {}, archivedAt: null });
-  await value.resources.release(agent.id, value.paseo);
+  await value.resources.release(agent.id, value.paseo, "archive");
   assert.deepEqual(new Set(value.archived), new Set([agent.id, "child", "grandchild"]));
   assert.equal(value.snapshots.get("manual").archivedAt, null);
   assert.deepEqual(new Set(value.cleaned[0]), new Set([agent.id, "child", "grandchild"]));
@@ -110,14 +286,15 @@ test("позднее событие создания восстанавлива�
     labels: { "openspec-orchestrator": "paseo-openspec-orchestrator", "openspec-root-agent-id": "late" } });
   await value.resources.onAgentCreated({ id: "late", parentAgentId: null }, value.paseo);
   await value.resources.recover(value.paseo, value.workspace.id);
-  assert.ok(value.snapshots.get("late").archivedAt);
+  assert.equal(value.snapshots.get("late").archivedAt, null);
+  assert.equal(value.snapshots.get("late").labels["openspec-preserved"], "true");
   assert.deepEqual(await value.registry.list(), []);
 });
 
 test("событие позднего дочернего агента находит уже архивированного родителя", async (context) => {
   const value = await fixture(context);
   const agent = await value.resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
-  await value.resources.release(agent.id, value.paseo);
+  await value.resources.release(agent.id, value.paseo, "archive");
   value.snapshots.set("late-child", { id: "late-child", labels: { "parent-agent-id": agent.id }, archivedAt: null });
   await value.resources.onAgentCreated({ id: "late-child", parentAgentId: agent.id }, value.paseo);
   await value.resources.recover(value.paseo, value.workspace.id);
@@ -129,7 +306,7 @@ test("последовательные этапы не накапливают з
   const value = await fixture(context);
   for (let index = 0; index < 12; index++) {
     const agent = await value.resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
-    await Promise.all([value.resources.release(agent.id, value.paseo), value.resources.release(agent.id, value.paseo)]);
+    await Promise.all([value.resources.release(agent.id, value.paseo, "archive"), value.resources.release(agent.id, value.paseo, "archive")]);
     assert.deepEqual(await value.registry.list(), []);
   }
   assert.equal(value.archived.length, 12);
@@ -141,7 +318,7 @@ test("повреждённый реестр блокирует создание 
   await value.registry.add({ agentId: "previous", rootAgentId: "previous", workspaceId: value.workspace.id });
   const path = join(value.home, "plugin-data", "paseo-openspec-orchestrator", "agent-resources.json");
   await writeFile(path, '{"version":999,"resources":[]}');
-  const restarted = new AgentResources({ registry: new AgentResourceRegistry(value.home), cleanProcesses: value.cleanProcesses });
+  const restarted = new AgentResources({ command: value.command, registry: new AgentResourceRegistry(value.home), cleanProcesses: value.cleanProcesses });
   await assert.rejects(restarted.create(value.workspace, value.paseo, { config: { provider: "codex/model" } }), /прочитать реестр/iu);
   assert.equal(value.snapshots.size, 0);
   assert.match(await readFile(path, "utf8"), /999/u);
@@ -158,7 +335,7 @@ test("ошибка создания очищает зарегистрирова�
 test("ребёнок, созданный во время очистки процессов, проходит отдельный полный проход", async (context) => {
   const value = await fixture(context);
   let inserted = false;
-  const resources = new AgentResources({ registry: value.registry, cleanProcesses: async (ids) => {
+  const resources = new AgentResources({ command: value.command, registry: value.registry, cleanProcesses: async (ids) => {
     await value.cleanProcesses(ids);
     if (inserted) return;
     inserted = true;
@@ -166,7 +343,7 @@ test("ребёнок, созданный во время очистки проц
     await resources.onAgentCreated({ id: "racing-child", parentAgentId: ids[0] }, value.paseo);
   } });
   const agent = await resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
-  await resources.release(agent.id, value.paseo);
+  await resources.release(agent.id, value.paseo, "archive");
   await resources.recover(value.paseo, value.workspace.id);
   assert.ok(value.snapshots.get("racing-child").archivedAt);
   assert.ok(value.cleaned.some((ids) => ids.includes("racing-child")));
@@ -176,10 +353,10 @@ test("ребёнок, созданный во время очистки проц
 test("после рестарта находит позднего ребёнка архивированного родителя без hook", async (context) => {
   const value = await fixture(context);
   const agent = await value.resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
-  await value.resources.release(agent.id, value.paseo);
+  await value.resources.release(agent.id, value.paseo, "archive");
   value.snapshots.set("missed-child", { id: "missed-child", labels: { "parent-agent-id": agent.id }, archivedAt: null });
   value.snapshots.set("missed-grandchild", { id: "missed-grandchild", labels: { "parent-agent-id": "missed-child" }, archivedAt: null });
-  const restarted = new AgentResources({ registry: new AgentResourceRegistry(value.home), cleanProcesses: value.cleanProcesses });
+  const restarted = new AgentResources({ command: value.command, registry: new AgentResourceRegistry(value.home), cleanProcesses: value.cleanProcesses });
   await restarted.initialize(value.paseo);
   assert.ok(value.snapshots.get("missed-child").archivedAt);
   assert.ok(value.snapshots.get("missed-grandchild").archivedAt);
@@ -200,7 +377,7 @@ test("одновременное создание в одной рабочей �
   await assert.rejects(value.resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } }), /уже создаётся/u);
   const agent = await first;
   assert.equal(value.snapshots.size, 1);
-  await value.resources.release(agent.id, value.paseo);
+  await value.resources.release(agent.id, value.paseo, "archive");
 });
 
 test("восстановление очищает известные процессы даже при недоступном API демона", async (context) => {
@@ -220,7 +397,7 @@ test("сбой закрытия MCP сохраняет владельца и п�
   const agent = await value.resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
   let attempts = 0;
   let failClose = true;
-  await assert.rejects(value.resources.release(agent.id, value.paseo, async () => {
+  await assert.rejects(value.resources.release(agent.id, value.paseo, "archive", async () => {
     attempts++;
     if (failClose) throw new Error("MCP ещё открыт");
   }));
@@ -228,17 +405,71 @@ test("сбой закрытия MCP сохраняет владельца и п�
   assert.equal(value.snapshots.size, 1);
   failClose = false;
   const next = await value.resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
-  assert.equal(attempts, 3);
-  await value.resources.release(next.id, value.paseo);
+  assert.equal(attempts, 5);
+  await value.resources.release(next.id, value.paseo, "archive");
 });
 
-test("штатное закрытие освобождает активные сессии и запрещает новые", async (context) => {
+test("штатное закрытие останавливает и сохраняет активные сессии и запрещает новые", async (context) => {
   const value = await fixture(context);
   const agent = await value.resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
   await value.resources.close();
-  assert.ok(value.snapshots.get(agent.id).archivedAt);
+  assert.equal(value.snapshots.get(agent.id).archivedAt, null);
+  assert.deepEqual(value.stopped, [agent.id]);
   assert.deepEqual(await value.registry.list(), []);
   await assert.rejects(value.resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } }), /останавливается/u);
+});
+
+test("сброс workflow и выгрузка движка сохраняют сессию и закрывают MCP", async (context) => {
+  const { createManagedAgentSession } = await import("../server/managed-agent-session.ts");
+  const { OpenSpecOrchestratorEngine } = await import("../server/openspec-orchestrator-engine.ts");
+  const { OrchestratorLedger } = await import("../server/orchestrator-ledger.ts");
+  for (const action of ["clear", "dispose"]) {
+    await context.test(action === "clear" ? "Сброс состояния" : "Выгрузка движка", async (subcontext) => {
+      const value = await fixture(subcontext);
+      const ledger = new OrchestratorLedger({ paseoHome: value.home });
+      await ledger.open(value.workspace.id);
+      const engine = new OpenSpecOrchestratorEngine(ledger);
+      subcontext.after(async () => { await engine.dispose(); await ledger.close(); });
+      let started;
+      const ready = new Promise((resolve) => { started = resolve; });
+      const closed = [];
+      let agentId;
+      engine.initialize(value.workspace.id, {
+        workspaceDisplay: { projectName: null, workspaceName: null },
+        refreshWorkspaceDisplay: async () => ({ projectName: null, workspaceName: null }),
+        workflow: { startStepId: "agent", steps: [{ id: "agent", label: "Долгий этап", run: (step) =>
+          value.resources.runStage(value.workspace.id, value.paseo, async () => {
+            const session = createManagedAgentSession({ signal: step.signal,
+              host: { async close() { closed.push("host"); } },
+              releaseAgent: (agent, mode, closer) => value.resources.release(agent.id, value.paseo, mode, closer),
+              updateNotificationLabel: async () => {}, agentDrainTimeoutMs: 10, logContext: "тест", logger: { warn() {} },
+            });
+            await session.openScope(() => ({ async close() { closed.push("scope"); } }));
+            try {
+              await session.launchAgent(() => value.resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } }), (id) => {
+                agentId = id;
+                step.updateActionLinks([{ kind: "agent", agentId: id, label: "Агент" }]);
+              });
+              started();
+              await session.waitForCompletion();
+              return { kind: "complete", summary: "Готово" };
+            } finally { await session.close(); }
+          }),
+        }] },
+      });
+      engine.command(value.workspace.id, "start");
+      await ready;
+      if (action === "clear") engine.command(value.workspace.id, "clear");
+      await engine.dispose();
+      assert.equal(value.snapshots.get(agentId).archivedAt, null);
+      assert.deepEqual(value.stopped, [agentId]);
+      assert.deepEqual(closed, ["scope", "host"]);
+      assert.deepEqual(await value.registry.list(), []);
+      if (action === "dispose") {
+        assert.equal(ledger.get(value.workspace.id).history.at(-1).links[0].agentId, agentId);
+      }
+    });
+  }
 });
 
 test("Retry после ошибки очистки сохраняет checkpoint результата и не повторяет агентную работу", async (context) => {
@@ -263,7 +494,7 @@ test("Retry после ошибки очистки сохраняет checkpoint
           const agent = await value.resources.create(value.workspace, value.paseo, { config: { provider: "codex/model" } });
           await step.checkpointState({ ...step.state, pendingArtifactSession: pending });
           // Доменный шаг мог преобразовать ошибку закрытия в свой halt; общий gate её сохраняет.
-          await value.resources.release(agent.id, value.paseo).catch(() => {});
+          await value.resources.release(agent.id, value.paseo, "archive").catch(() => {});
         }
         return { kind: "continue", next: "next", summary: "Проверенный результат сохранён" };
       }) },
