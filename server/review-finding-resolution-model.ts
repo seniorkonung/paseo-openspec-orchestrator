@@ -149,7 +149,7 @@ export function buildFindingResolutionPrompt(
 1. Explain the finding in Russian to someone who has never seen it: what is wrong, how it affects the product, and what you recommend. Where the resolution depends on a product, contract, architecture, data, security, privacy, or cost choice, give the real options and trade-offs; for an obvious technical correction, explain why product behavior stays the same.
 2. Get one explicit decision from the user about how to resolve this finding before changing any artifact or accepting residual risk. A recommendation is not a decision, and acceptance is never inferred: on acceptance let the skill record it through its own procedure instead of claiming a fix.
 3. Let the skill implement that decision for only this finding and keep later findings intact unless current evidence changes them. If the chosen resolution cannot be implemented or requires a materially different decision, explain the blocker instead of silently changing course. ${taskListRule} ${taskScopeRule(input.taskScope)} The resolution holds only when the agreed outcome is durably owned by the OpenSpec artifacts, any remaining implementation is tracked work, and the finding heading is gone from Findings.
-4. Validate the resulting artifact changes and report state. Then commit only files inside the change root in at least one commit without asking for another approval. Report the changes and validation to the user while continuing through publication and completion without pausing for permission.`;
+4. Validate the changed OpenSpec artifacts, related documentation, and report state. Then commit only the changed artifacts of the selected change and the related repository documentation in at least one commit without asking for another approval. Report the changes and validation to the user while continuing through publication and completion without pausing for permission.`;
   const completion = input.publicationAlreadyCompleted
     ? `Finish by calling the orchestrator MCP tool \`${variant.toolName}\` with \`{"mode":"acknowledge-existing"}\`. If it reports an error, follow its feedback and retry the same tool.`
     : `Call the orchestrator MCP tool \`${variant.toolName}\` with \`{"mode":"publish","problem":"<краткая проблема>","resolution":"<краткий итог>"}\` without asking for additional permission. The orchestrator publishes the verified commits to the root branch and records the result in its pull request. Both summaries are truthful single-line Russian text of at most 500 characters; for an accepted risk describe the acceptance and its rationale in \`resolution\`. If it reports an error, follow its feedback and retry the same tool.`;
@@ -173,7 +173,8 @@ export function buildFindingResolutionPrompt(
       FIXED_BRANCH_RULE,
       "Do not push. The orchestrator verifies and publishes the commit to the existing root Draft pull request.",
       STAGE_SCOPE_RULE,
-      "Change only planning artifacts inside the selected change root: never edit implementation code or tests and never invoke Apply.",
+      "Change only planning artifacts inside the selected change root and related repository documentation outside the selected change root (ADRs, README files, domain documents, and guides), only as needed for the agreed resolution of this finding. All changed files must stay inside the Git root; never edit implementation code, tests, or configuration and never invoke Apply.",
+      "Record requirement changes in the selected change's delta specs; never edit `openspec/specs` directly. The orchestrator synchronizes the main specs when archiving the change.",
     ],
     body: [resolutionInstruction, interactionContract],
     completion,

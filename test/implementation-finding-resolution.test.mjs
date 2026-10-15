@@ -18,6 +18,8 @@ const parentBranch = `change/${changeId}`;
 const branch = parentBranch;
 const findingSubject = "Resolve implementation finding";
 const outsideChangePaths = [
+  "README.md",
+  "docs/adr/0001-export-contract.md",
   "openspec/specs/export/spec.md",
   "openspec/changes/related-change/specs/export/spec.md",
   "src/export.ts",
@@ -315,7 +317,9 @@ async function commitResolution(fixture, {
   for (const path of extraPaths) {
     const filePath = join(fixture.workspace, path);
     await mkdir(dirname(filePath), { recursive: true });
-    await writeFile(filePath, "// Исправление замечания.\n");
+    await writeFile(filePath, path.endsWith(".md")
+      ? "# Исправление замечания\n\nУточнён контракт экспорта.\n"
+      : "// Исправление замечания.\n");
   }
   await execFileAsync("git", ["add", "."], { cwd: fixture.workspace });
   await execFileAsync("git", ["commit", "-m", subject], { cwd: fixture.workspace });
@@ -637,7 +641,7 @@ async function commitScenarioResult(context, kind) {
         const { stdout } = await execFileAsync("git", ["show", `${resolution.commit}:${path}`], {
           cwd: fixture.remote,
         });
-        assert.equal(stdout, "// Исправление замечания.\n");
+        assert.equal(stdout, await readFile(join(fixture.workspace, path), "utf8"));
       }
     }
   }
@@ -773,6 +777,16 @@ test("prompt требует одно решение, сохраняет зада
   });
   assert.match(prompt, /openspec-review-implementation/);
   assert.match(prompt, /F42/);
+  assert.match(prompt, /related repository documentation outside the selected change root/u);
+  assert.match(prompt, /ADRs, README files, domain documents, and guides/u);
+  assert.match(prompt, /only as needed for the agreed resolution of this finding/u);
+  assert.match(prompt, /All changed files must stay inside the Git root/u);
+  assert.match(prompt, /never edit implementation code, tests, or configuration and never invoke Apply/u);
+  assert.match(prompt, /Record requirement changes in the selected change's delta specs; never edit `openspec\/specs` directly/u);
+  assert.match(prompt, /synchronizes the main specs when archiving the change/u);
+  assert.match(prompt, /Validate the changed OpenSpec artifacts, related documentation, and report state/u);
+  assert.match(prompt, /commit only the changed artifacts of the selected change and the related repository documentation/u);
+  assert.doesNotMatch(prompt, /Change only planning artifacts inside the selected change root:|commit only files inside the change root/u);
   assert.match(prompt, /one explicit decision/);
   assert.match(prompt, /without asking for another approval/);
   assert.match(prompt, /never reopen a completed task/);

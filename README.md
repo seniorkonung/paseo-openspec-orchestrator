@@ -123,6 +123,17 @@ changes. Remaining findings are resolved one at a time after an explicit user
 decision. The orchestrator verifies and pushes each commit range and records
 finding outcomes in the managed findings section of the same root PR.
 
+Finding-resolution agents for both OpenSpec and implementation reviews may
+update the selected change's planning artifacts and related documentation
+elsewhere inside the Git root, including ADRs, README files, domain documents,
+and guides, when needed for the agreed resolution. They validate and commit
+those changes together with the review report. They do not edit implementation
+code, tests, or configuration, or invoke Apply; remaining implementation is
+tracked as tasks. Requirement changes belong in the selected change's delta
+specs; main specs in `openspec/specs` are synchronized when archiving the change.
+Planning-artifact creation and focused task planning retain their existing
+artifact boundaries.
+
 The phase inspector reads bounded `plan.md` headings and OpenSpec task
 snapshots. A phase without tasks enters focused task planning. Its agent adds
 only incomplete tasks for that phase, followed by publication, OpenSpec review,
