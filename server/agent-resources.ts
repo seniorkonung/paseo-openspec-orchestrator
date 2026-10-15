@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { PluginHandlerContext, PluginHookAgent } from "@getpaseo/plugin/server";
-import { AgentCleanupError, withCleanupDeadline } from "./agent-cleanup-error.ts";
+import { AgentCleanupError, cleanupErrorDetails, cleanupFailureReason, withCleanupDeadline } from "./agent-cleanup-error.ts";
+import { AgentCleanupBudget, type AgentCleanupClock } from "./agent-cleanup-budget.ts";
 import { AgentResourceRegistry, type AgentResourceIdentity, type AgentReleaseMode } from "./agent-resource-registry.ts";
 import { createAgentProcessCleaner, type AgentProcessCleaner } from "./agent-process-cleanup.ts";
 import { createSerializedExecutor } from "./agent-session-control.ts";
@@ -22,6 +23,9 @@ export interface AgentResourcesOptions {
   readonly registry?: AgentResourceRegistry;
   readonly cleanProcesses?: AgentProcessCleaner;
   readonly cleanupTimeoutMs?: number;
+  readonly cleanupRetryTimeoutMs?: number;
+  readonly clock?: AgentCleanupClock;
+  readonly logger?: Pick<Console, "warn">;
   readonly command?: BoundedCommandRunner;
 }
 
@@ -30,12 +34,16 @@ export class AgentResources {
   readonly #registry: AgentResourceRegistry;
   readonly #cleanProcesses: AgentProcessCleaner;
   readonly #cleanupTimeoutMs: number;
+  readonly #cleanupRetryTimeoutMs: number;
+  readonly #clock: AgentCleanupClock | undefined;
+  readonly #logger: Pick<Console, "warn">;
   readonly #command: BoundedCommandRunner;
   readonly #ownership = createSerializedExecutor();
   readonly #activeRoots = new Set<string>();
   readonly #creatingWorkspaces = new Set<string>();
   readonly #releases = new Map<string, Promise<void>>();
-  readonly #localClosers = new Map<string, () => Promise<void>>();
+  readonly #localClosers = new Map<string, (budget?: AgentCleanupBudget) => Promise<void>>();
+  readonly #releaseFailures = new Map<string, AgentCleanupError>();
   #initialization: Promise<void> | null = null;
   #paseo: PaseoApi | null = null;
   #stopping = false;
@@ -44,6 +52,9 @@ export class AgentResources {
     this.#registry = options.registry ?? new AgentResourceRegistry();
     this.#cleanProcesses = options.cleanProcesses ?? createAgentProcessCleaner();
     this.#cleanupTimeoutMs = options.cleanupTimeoutMs ?? 20_000;
+    this.#cleanupRetryTimeoutMs = options.cleanupRetryTimeoutMs ?? 60_000;
+    this.#clock = options.clock;
+    this.#logger = options.logger ?? console;
     this.#command = options.command ?? runBoundedCommand;
   }
 
@@ -98,17 +109,12 @@ export class AgentResources {
     }
   }
 
-  release(agentId: string, paseo: PaseoApi, mode: AgentReleaseMode, closeLocalResources?: () => Promise<void>): Promise<void> {
+  release(agentId: string, paseo: PaseoApi, mode: AgentReleaseMode, closeLocalResources?: (budget?: AgentCleanupBudget) => Promise<void>): Promise<void> {
     if (closeLocalResources) this.#localClosers.set(agentId, closeLocalResources);
     const existing = this.#releases.get(agentId);
     if (existing) return existing;
     this.#activeRoots.delete(agentId);
-    const releasing = this.#releaseRoot(agentId, paseo, mode).catch(async (error: unknown) => {
-      // Ошибка чтения или записи реестра тоже не должна оставлять MCP открытым.
-      try { await this.#closeLocalResources(agentId); }
-      catch (closeError) { throw new AgentCleanupError("Не удалось освободить агента и закрыть MCP", [error, closeError]); }
-      throw error;
-    });
+    const releasing = this.#releaseWithRetries(agentId, paseo, mode);
     this.#releases.set(agentId, releasing);
     void releasing.finally(() => {
       if (this.#releases.get(agentId) === releasing) this.#releases.delete(agentId);
@@ -116,8 +122,14 @@ export class AgentResources {
     return releasing;
   }
 
-  async #closeLocalResources(rootAgentId: string): Promise<void> {
-    await this.#localClosers.get(rootAgentId)?.();
+  async #closeLocalResources(rootAgentId: string, budget: AgentCleanupBudget): Promise<void> {
+    const close = this.#localClosers.get(rootAgentId);
+    if (close) {
+      // Сессия должна получить истёкший срок тоже, иначе её finally начнёт новое ожидание.
+      const closing = close(budget);
+      void closing.catch(() => undefined);
+      await budget.run(() => closing, budget.remainingMs());
+    }
     this.#localClosers.delete(rootAgentId);
   }
 
@@ -128,12 +140,29 @@ export class AgentResources {
 
   async runStage<Value>(workspaceId: string, paseo: PaseoApi, operation: () => Promise<Value>): Promise<Value> {
     await this.recover(paseo, workspaceId);
+    let failure: { error: unknown } | undefined;
     try { return await operation(); }
-    finally { await this.assertReleased(workspaceId); }
+    catch (error) { failure = { error }; throw error; }
+    finally {
+      try { await this.assertReleased(workspaceId); }
+      catch (error) {
+        if (failure && error instanceof AgentCleanupError && error !== failure.error) {
+          throw new AgentCleanupError(error.message, [error, failure.error]);
+        }
+        throw error;
+      }
+    }
   }
 
   async assertReleased(workspaceId: string): Promise<void> {
-    if ((await this.#registry.list()).some((resource) => resource.workspaceId === workspaceId)) {
+    const roots = (await this.#registry.list()).filter((resource) => resource.workspaceId === workspaceId);
+    await Promise.allSettled(roots.map((resource) => this.#releases.get(resource.rootAgentId)));
+    const remaining = (await this.#registry.list()).filter((resource) => resource.workspaceId === workspaceId);
+    if (remaining.length) {
+      for (const record of remaining) {
+        const failure = this.#releaseFailures.get(record.rootAgentId);
+        if (failure) throw failure;
+      }
       throw new AgentCleanupError("Ресурсы предыдущего агента не освобождены; нажмите «Повторить» для повторной очистки");
     }
   }
@@ -187,15 +216,59 @@ export class AgentResources {
       try { await this.release(root.agentId, paseo, root.release === "managed" ? "preserve" : root.release); }
       catch (error) { failures.push(error); }
     }
-    if (failures.length) throw new AgentCleanupError("Не удалось освободить ресурсы предыдущих агентов; нажмите «Повторить»", failures);
+    if (failures.length) throw new AgentCleanupError(`Не удалось освободить ресурсы предыдущих агентов: ${cleanupFailureReason(failures[0])}; нажмите «Повторить»`, failures);
   }
 
-  async #releaseRoot(rootAgentId: string, paseo: PaseoApi, requested: AgentReleaseMode): Promise<void> {
+  async #releaseWithRetries(rootAgentId: string, paseo: PaseoApi, mode: AgentReleaseMode): Promise<void> {
+    const budget = new AgentCleanupBudget(this.#cleanupRetryTimeoutMs, this.#cleanupTimeoutMs, this.#clock);
+    const failures: unknown[] = [];
+    let lastFailure: unknown;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await budget.run(() => this.#releaseRoot(rootAgentId, paseo, mode, budget, attempt), budget.remainingMs());
+        this.#releaseFailures.delete(rootAgentId);
+        return;
+      } catch (error) {
+        lastFailure = error;
+        failures.push(error);
+        // Ошибка реестра тоже не должна оставлять локальные ресурсы открытыми.
+        try { await this.#closeLocalResources(rootAgentId, budget); }
+        catch (closeError) { failures.push(closeError); }
+        this.#warnCleanup("release-resources", rootAgentId, attempt, error);
+      }
+      await budget.wait(Math.min(1_000 * 2 ** Math.min(attempt - 1, 3), 5_000));
+      if (budget.remainingMs() <= 0) {
+        const failure = new AgentCleanupError(
+          `Ресурсы агента не освобождены за отведённое время: ${cleanupFailureReason(lastFailure)}; нажмите «Повторить»`,
+          failures,
+        );
+        this.#releaseFailures.set(rootAgentId, failure);
+        throw failure;
+      }
+    }
+  }
+
+  #warnCleanup(operation: string, agentId: string, attempt: number, error: unknown): void {
+    try {
+      this.#logger.warn("[OpenSpec] Повторная очистка ресурсов агента", { operation, agentId, attempt, error: cleanupErrorDetails(error) });
+    } catch {
+      // Диагностика не должна прерывать освобождение ресурсов.
+    }
+  }
+
+  async #releaseRoot(rootAgentId: string, paseo: PaseoApi, requested: AgentReleaseMode, budget: AgentCleanupBudget, attempt: number): Promise<void> {
+    const run = async <Value>(operation: string, action: () => Promise<Value>, agentId = rootAgentId): Promise<Value> => {
+      try { return await budget.run(action, budget.remainingMs()); }
+      catch (error) {
+        this.#warnCleanup(operation, agentId, attempt, error);
+        throw new AgentCleanupError(`Не удалось выполнить ${operation}: ${cleanupFailureReason(error)}`, [error]);
+      }
+    };
     const failures: unknown[] = [];
     const registeredRoot = (await this.#registry.list()).find((record) => record.agentId === rootAgentId);
     let rootSnapshot: Awaited<ReturnType<Agent["refresh"]>> | undefined;
     try {
-      rootSnapshot = await withCleanupDeadline(() => paseo.agents.ref(rootAgentId).refresh(), this.#cleanupTimeoutMs);
+      rootSnapshot = await run("refresh-agent", () => budget.run(() => paseo.agents.ref(rootAgentId).refresh()));
     } catch (error) {
       // Запись preserve могла остаться после успешной передачи управления.
       // Без чтения метки нельзя отличить старые процессы от ручного продолжения.
@@ -207,29 +280,29 @@ export class AgentResources {
     if (rootSnapshot?.agent.labels?.[PRESERVED_AGENT_LABEL] === "true") {
       // Метка — завершённая передача управления. Сбой удаления реестра
       // после неё разрешает лишь повторное удаление, но не остановку агента.
-      await this.#closeLocalResources(rootAgentId);
-      await this.#ownership(async () => {
+      await run("close-mcp", () => this.#closeLocalResources(rootAgentId, budget));
+      await run("release-registry", () => this.#ownership(async () => {
         const owned = (await this.#registry.list()).filter((record) => record.rootAgentId === rootAgentId);
         if (!await this.#registry.removeRoot(rootAgentId, owned.map((record) => record.agentId))) {
           throw new AgentCleanupError("Не удалось удалить записи сохранённой сессии; нажмите «Повторить»");
         }
-      });
+      }));
       return;
     }
     // Дочерние агенты могли появиться до доставки lifecycle hook.
-    try { await this.#discover(paseo); } catch (error) { failures.push(error); }
+    try { await run("discover-agents", () => this.#discover(paseo, budget)); } catch (error) { failures.push(error); }
     const root = (await this.#registry.list()).find((record) => record.agentId === rootAgentId);
     // Старые записи не содержат исход этапа. Уже архивированный корень
     // требует прежней очистки, остальные сессии сохраняются.
     if (root?.release === "managed" && requested === "preserve") {
       if (rootSnapshot?.agent.archivedAt) requested = "archive";
     }
-    const mode = await this.#registry.beginRelease(rootAgentId, requested);
+    const mode = await run("register-release", () => budget.run(() => this.#registry.beginRelease(rootAgentId, requested)));
     const released = new Set<string>();
     for (let pass = 0; pass < 32; pass++) {
       const records = (await this.#registry.list()).filter((record) => record.rootAgentId === rootAgentId);
       if (records.length === 0) {
-        await this.#closeLocalResources(rootAgentId);
+        await run("close-mcp", () => this.#closeLocalResources(rootAgentId, budget));
         return;
       }
       for (const record of records) {
@@ -237,35 +310,36 @@ export class AgentResources {
         try {
           const agent = paseo.agents.ref(record.agentId);
           if (mode === "archive") {
-            await withCleanupDeadline(async () => {
-              if (await agent.refresh()) await agent.archive();
-            }, this.#cleanupTimeoutMs);
+            await run("archive-agent", async () => {
+              const snapshot = await budget.run(() => agent.refresh());
+              if (snapshot && !snapshot.agent.archivedAt) await budget.run(() => agent.archive());
+            }, record.agentId);
           } else {
-            await stopPaseoAgent(agent, this.#command, this.#cleanupTimeoutMs);
+            await run("stop-agent", () => stopPaseoAgent(agent, this.#command, budget.timeoutMs()), record.agentId);
           }
           released.add(record.agentId);
         } catch (error) { failures.push(error); }
       }
       // Даже при ошибке SDK освобождаем процессы и локальные ресурсы.
-      try { await this.#cleanProcesses(records.map((record) => record.agentId)); }
+      try { await run("clean-processes", () => this.#cleanProcesses(records.map((record) => record.agentId), budget)); }
       catch (error) { failures.push(error); }
-      try { await this.#closeLocalResources(rootAgentId); }
+      try { await run("close-mcp", () => this.#closeLocalResources(rootAgentId, budget)); }
       catch (error) { failures.push(error); }
       if (failures.length) throw new AgentCleanupError("Не удалось остановить или архивировать агента, завершить его процессы или закрыть MCP; нажмите «Повторить»", failures);
-      const removed = await this.#ownership(async () => {
+      const removed = await run("release-registry", () => this.#ownership(async () => {
         // Проверяем и потомков, чей hook ещё не доставлен. Передача управления
         // и обнаружение сериализованы, чтобы старый снимок не вернул владельца.
-        await this.#discoverOwned(paseo);
+        await this.#discoverOwned(paseo, budget);
         const owned = (await this.#registry.list()).filter((record) => record.rootAgentId === rootAgentId);
         if (owned.some((record) => !released.has(record.agentId))) return false;
         if (mode === "preserve") {
-          const snapshot = await withCleanupDeadline(() => paseo.agents.ref(rootAgentId).refresh(), this.#cleanupTimeoutMs);
+          const snapshot = await budget.run(() => paseo.agents.ref(rootAgentId).refresh());
           if (snapshot && !snapshot.agent.archivedAt) {
-            await markPaseoAgentPreserved(rootAgentId, this.#command, this.#cleanupTimeoutMs);
+            await markPaseoAgentPreserved(rootAgentId, this.#command, budget.timeoutMs());
           }
         }
         return this.#registry.removeRoot(rootAgentId, records.map((record) => record.agentId));
-      });
+      }));
       if (removed) {
         this.#localClosers.delete(rootAgentId);
         return;
@@ -274,18 +348,18 @@ export class AgentResources {
     throw new AgentCleanupError("Во время очистки продолжают появляться дочерние агенты; нажмите «Повторить»");
   }
 
-  async #findRoot(agentId: string, paseo: PaseoApi): Promise<AgentResourceIdentity | undefined> {
+  async #findRoot(agentId: string, paseo: PaseoApi, budget?: AgentCleanupBudget): Promise<AgentResourceIdentity | undefined> {
     const visited = new Set<string>();
     let current: string | null = agentId;
     while (current && visited.size < 32 && !visited.has(current)) {
       visited.add(current);
       const existing = (await this.#registry.list()).find((record) => record.agentId === current);
       if (existing) {
-        const root = await withCleanupDeadline(() => paseo.agents.ref(existing.rootAgentId).refresh(), this.#cleanupTimeoutMs);
+        const root = await this.#readDaemon(() => paseo.agents.ref(existing.rootAgentId).refresh(), budget);
         return root?.agent.labels?.[PRESERVED_AGENT_LABEL] === "true" ? undefined : existing;
       }
       const ancestorId = current;
-      const snapshot: Awaited<ReturnType<Agent["refresh"]>> = await withCleanupDeadline(() => paseo.agents.ref(ancestorId).refresh(), this.#cleanupTimeoutMs);
+      const snapshot: Awaited<ReturnType<Agent["refresh"]>> = await this.#readDaemon(() => paseo.agents.ref(ancestorId).refresh(), budget);
       if (!snapshot) return;
       const agent: AgentSnapshot = snapshot.agent;
       if (agent.labels?.[PRESERVED_AGENT_LABEL] === "true") return;
@@ -297,16 +371,20 @@ export class AgentResources {
     }
   }
 
-  #discover(paseo: PaseoApi): Promise<void> {
-    return this.#ownership(() => this.#discoverOwned(paseo));
+  #readDaemon<Value>(operation: () => Promise<Value>, budget?: AgentCleanupBudget): Promise<Value> {
+    return budget ? budget.run(operation) : withCleanupDeadline(operation, this.#cleanupTimeoutMs);
   }
 
-  async #discoverOwned(paseo: PaseoApi): Promise<void> {
+  #discover(paseo: PaseoApi, budget?: AgentCleanupBudget): Promise<void> {
+    return this.#ownership(() => this.#discoverOwned(paseo, budget));
+  }
+
+  async #discoverOwned(paseo: PaseoApi, budget?: AgentCleanupBudget): Promise<void> {
     let cursor: string | undefined;
     const cursors = new Set<string>();
     const candidates: Awaited<ReturnType<PaseoApi["agents"]["list"]>>["entries"] = [];
     do {
-      const page = await withCleanupDeadline(() => paseo.agents.list({ scope: "active", page: { limit: 200, ...(cursor ? { cursor } : {}) } }), this.#cleanupTimeoutMs);
+      const page = await this.#readDaemon(() => paseo.agents.list({ scope: "active", page: { limit: 200, ...(cursor ? { cursor } : {}) } }), budget);
       candidates.push(...page.entries);
       if (candidates.length > 10_000) throw new AgentCleanupError("Слишком много агентов для проверки принадлежности ресурсов");
       cursor = page.pageInfo.nextCursor ?? undefined;
@@ -331,7 +409,7 @@ export class AgentResources {
       if (records.has(agent.id) || !parentAgentId || preservedRoots.has(agent.id)) continue;
       let parent = records.get(parentAgentId);
       if (!parent) {
-        if (!parents.has(parentAgentId)) parents.set(parentAgentId, await this.#findRoot(parentAgentId, paseo));
+        if (!parents.has(parentAgentId)) parents.set(parentAgentId, await this.#findRoot(parentAgentId, paseo, budget));
         parent = parents.get(parentAgentId);
       }
       if (!parent) continue;

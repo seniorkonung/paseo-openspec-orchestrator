@@ -2,6 +2,7 @@ import { open, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { AgentCleanupError } from "./agent-cleanup-error.ts";
+import type { AgentCleanupBudget } from "./agent-cleanup-budget.ts";
 
 export interface OwnedAgentProcess {
   readonly pid: number;
@@ -13,10 +14,10 @@ export interface OwnedAgentProcess {
 /** Таблица обязана повторно проверить принадлежность и идентичность перед сигналом. */
 export interface AgentProcessTable {
   list(agentIds: ReadonlySet<string>): Promise<readonly OwnedAgentProcess[]>;
-  signal(target: OwnedAgentProcess, signal: "SIGTERM" | "SIGKILL"): Promise<void>;
+  signal(target: OwnedAgentProcess, signal: "SIGTERM" | "SIGKILL", budget?: AgentCleanupBudget): Promise<void>;
 }
 
-export type AgentProcessCleaner = (agentIds: readonly string[]) => Promise<void>;
+export type AgentProcessCleaner = (agentIds: readonly string[], budget?: AgentCleanupBudget) => Promise<void>;
 
 export interface AgentProcessCleanupOptions {
   readonly platform?: NodeJS.Platform;
@@ -34,7 +35,7 @@ export function createAgentProcessCleaner(options: AgentProcessCleanupOptions = 
   const forceTimeoutMs = options.forceTimeoutMs ?? 2_000;
   const pollIntervalMs = options.pollIntervalMs ?? 100;
 
-  return async (agentIds) => {
+  return async (agentIds, budget) => {
     const owners = new Set(agentIds);
     if (owners.size === 0) return;
     const failures: unknown[] = [];
@@ -42,23 +43,24 @@ export function createAgentProcessCleaner(options: AgentProcessCleanupOptions = 
       const signaled = new Set<string>();
       const deadline = performance.now() + timeoutMs;
       do {
-        const remaining = await table.list(owners);
+        const remaining = await (budget ? budget.run(() => table.list(owners)) : table.list(owners));
         if (remaining.length === 0) return;
         for (const target of remaining) {
           const identity = `${target.pid}:${target.startedAt}`;
           if (signaled.has(identity)) continue;
           try {
-            await table.signal(target, signal);
+            if (budget) await budget.run(() => table.signal(target, signal, budget));
+            else await table.signal(target, signal);
             signaled.add(identity);
           } catch (error) {
             failures.push(error);
           }
         }
-        const waitMs = Math.min(pollIntervalMs, deadline - performance.now());
+        const waitMs = Math.min(pollIntervalMs, deadline - performance.now(), budget?.remainingMs() ?? Infinity);
         if (waitMs > 0) await delay(waitMs);
       } while (performance.now() < deadline);
     }
-    const remaining = await table.list(owners);
+    const remaining = await (budget ? budget.run(() => table.list(owners)) : table.list(owners));
     if (remaining.length > 0) {
       throw new AgentCleanupError(`Не завершились процессы агента: ${remaining.map(({ pid }) => pid).join(", ")}`, failures);
     }
@@ -130,10 +132,11 @@ export function createLinuxAgentProcessTable(options: LinuxProcessTableOptions =
       }));
       return owned;
     },
-    async signal(target, signal) {
+    async signal(target, signal, budget) {
       if (target.pid <= 1 || target.pid === process.pid) return;
       const current = await inspect(target.pid);
       if (!current || current.uid !== target.uid || current.startedAt !== target.startedAt || current.agentId !== target.agentId) return;
+      budget?.timeoutMs();
       try {
         sendSignal(target.pid, signal);
       } catch (error) {

@@ -312,9 +312,16 @@ archiving an agent; retries cannot change that mode. Version 1 is migrated
 atomically: unarchived sessions are preserved, while already archived trees
 finish cleanup. Parent links identify descendant Paseo agents,
 including late children of already archived parents. Failed cleanup retains
-the records, reports the failure in the workflow lifecycle, and blocks the next
-stage until Retry completes cleanup. MCP scope and host closure are attempted
-even when agent archive or process cleanup fails.
+the records and blocks the next stage. Cleanup automatically retries within one
+60-second budget, waiting 1, 2, 4, then 5 seconds between attempts. The workflow
+stays active during recovery without asking the user to Retry or repeating the
+completed agent stage. Already archived agents and successfully closed MCP
+resources are not closed again. If the budget expires, the workflow reports the
+underlying failure and offers Retry; the registry and checkpoint remain available
+for recovery. Concurrent release calls share the same retries, and nested cleanup
+operations use the remaining budget. MCP scope and host closure are attempted
+even when agent archive or process cleanup fails. Cleanup logs identify the agent,
+operation, attempt, and nested failure causes.
 
 Preservation interrupts active turns through `paseo agent stop`, verifies the
 daemon state, and never calls archive. Both release modes close scoped MCP

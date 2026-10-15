@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { createAgentProcessCleaner, createLinuxAgentProcessTable } from "../server/agent-process-cleanup.ts";
+import { AgentCleanupBudget } from "../server/agent-cleanup-budget.ts";
 
 const execFileAsync = promisify(execFile);
 const linux = process.platform === "linux";
@@ -76,6 +77,16 @@ test("повторно проверяет время запуска и метк�
   await value.update("100", "owned-agent");
   await value.table.signal(target, "SIGTERM");
   assert.deepEqual(value.signals, [[value.pid, "SIGTERM"]]);
+});
+
+test("после исчерпания общего срока не посылает сигнал известному процессу", { skip: !linux }, async (context) => {
+  const value = await procFixture(context);
+  const [target] = await value.table.list(new Set(["owned-agent"]));
+  let elapsed = 0;
+  const budget = new AgentCleanupBudget(60_000, 20_000, { now: () => elapsed, async sleep() {} });
+  elapsed = 60_000;
+  await assert.rejects(value.table.signal(target, "SIGTERM", budget), /Истёк общий срок/u);
+  assert.deepEqual(value.signals, []);
 });
 
 test("пропускает чужой UID и требует точного значения ID", { skip: !linux }, async (context) => {

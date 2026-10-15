@@ -357,3 +357,18 @@ test("владелец получает повторяемое закрытие 
   assert.equal(hostCalls, 1);
   assert.equal(scopeCalls, 3);
 });
+
+test("сессия ожидает автоматическое восстановление владельца дольше отдельного тайм-аута", async () => {
+  let closed = false;
+  const session = managedFixture({ cleanupTimeoutMs: 5,
+    async releaseAgent(_agent, _mode, closeLocalResources) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await closeLocalResources();
+      closed = true;
+    },
+  });
+  await session.launchAgent(async () => ({ id: "agent", async waitForFinish() {}, async archive() {} }), () => {});
+  session.complete("Готово");
+  await session.close();
+  assert.equal(closed, true);
+});

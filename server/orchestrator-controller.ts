@@ -31,7 +31,7 @@ import {
 import { createOpenSpecWorkflow } from "./workflow/steps/index.ts";
 import { AgentResources } from "./agent-resources.ts";
 import { AgentCleanupError } from "./agent-cleanup-error.ts";
-import type { AgentReleaseMode } from "./agent-resource-registry.ts";
+import type { AgentResourceReleaser } from "./managed-agent-session.ts";
 
 type PaseoApi = PluginHandlerContext["paseo"];
 
@@ -172,11 +172,9 @@ export class OrchestratorController {
     // Источник: https://paseo.sh/docs/sdk/workspaces#start-an-agent-in-a-workspace
     const createAgent = (options: Parameters<typeof workspace.agents.create>[0]) =>
       this.#resources.create(workspace, paseo, options);
-    const agentLifecycle = {
-      createAgent,
-      releaseAgent: (agent: { readonly id: string }, mode: AgentReleaseMode, closeLocalResources: () => Promise<void>) =>
-        this.#resources.release(agent.id, paseo, mode, closeLocalResources),
-    };
+    const releaseAgent: AgentResourceReleaser = (agent, mode, closeLocalResources) =>
+      this.#resources.release(agent.id, paseo, mode, closeLocalResources);
+    const agentLifecycle = { createAgent, releaseAgent };
     const phaseWork = createPhaseWorkService();
     const rootPullRequest = createRootPullRequestService();
     const changeFindingResolution = createChangeFindingResolutionService({ ...agentLifecycle, phaseWork });

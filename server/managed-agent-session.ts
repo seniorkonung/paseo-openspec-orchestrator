@@ -1,5 +1,6 @@
 import type { AgentNotificationLabelUpdater } from "./paseo-agent-labels.ts";
-import { AgentCleanupError, withCleanupDeadline } from "./agent-cleanup-error.ts";
+import { AgentCleanupError, cleanupFailureReason, withCleanupDeadline } from "./agent-cleanup-error.ts";
+import type { AgentCleanupBudget } from "./agent-cleanup-budget.ts";
 import type { AgentReleaseMode } from "./agent-resource-registry.ts";
 import { stopPaseoAgent, type StoppableAgent } from "./paseo-agent-lifecycle.ts";
 import {
@@ -24,7 +25,7 @@ interface ManagedAgent extends StoppableAgent {
 export type AgentResourceReleaser = (
   agent: Pick<ManagedAgent, "id" | "archive">,
   mode: AgentReleaseMode,
-  closeLocalResources: () => Promise<void>,
+  closeLocalResources: (budget?: AgentCleanupBudget) => Promise<void>,
 ) => Promise<void>;
 
 export interface ManagedAgentSessionOptions {
@@ -81,6 +82,7 @@ export function createManagedAgentSession<Result>(
   let closePromise: Promise<void> | null = null;
   let agentClosePromise: Promise<void> | null = null;
   let localClosePromise: Promise<void> | null = null;
+  let releaseBudget: AgentCleanupBudget | undefined;
   const closedLocalResources = new Set<AsyncClosable>();
   const runExclusive = createSerializedExecutor();
   const abortCompletion = () => {
@@ -108,14 +110,16 @@ export function createManagedAgentSession<Result>(
     }
   };
 
-  const closeLocalResources = (): Promise<void> => {
+  const closeLocalResources = (budget = releaseBudget): Promise<void> => {
+    releaseBudget = budget;
     if (localClosePromise) return localClosePromise;
     const closing = (async () => {
       const failures: unknown[] = [];
       for (const [operation, resource] of [["close-scope", scope], ["close-host", options.host]] as const) {
         if (!resource || closedLocalResources.has(resource)) continue;
         try {
-          await withCleanupDeadline(() => resource.close(), options.cleanupTimeoutMs);
+          if (budget) await budget.run(() => resource.close(), options.cleanupTimeoutMs);
+          else await withCleanupDeadline(() => resource.close(), options.cleanupTimeoutMs);
           closedLocalResources.add(resource);
         } catch (error) {
           failures.push(error);
@@ -144,14 +148,15 @@ export function createManagedAgentSession<Result>(
           warn("disable-notifications", error);
         }
       }
-      await withCleanupDeadline(
-        async () => {
-          if (options.releaseAgent) await options.releaseAgent(ownedAgent, releaseMode, closeLocalResources);
-          else if (releaseMode === "archive") await ownedAgent.archive();
-          else await stopPaseoAgent(ownedAgent);
-        },
-        options.cleanupTimeoutMs,
-      );
+      if (options.releaseAgent) {
+        // Владелец ресурсов задаёт общий срок вместе с автоматическими повторами.
+        await options.releaseAgent(ownedAgent, releaseMode, closeLocalResources);
+      } else {
+        await withCleanupDeadline(
+          () => releaseMode === "archive" ? ownedAgent.archive() : stopPaseoAgent(ownedAgent),
+          options.cleanupTimeoutMs,
+        );
+      }
     })();
     return agentClosePromise;
   };
@@ -186,7 +191,7 @@ export function createManagedAgentSession<Result>(
       try { await closeLocalResources(); }
       catch (error) { failures.push(error); }
       if (failures.length > 0) {
-        throw new AgentCleanupError("Не удалось освободить ресурсы агента; нажмите «Повторить» для повторной очистки", failures);
+        throw new AgentCleanupError(`Не удалось освободить ресурсы агента: ${cleanupFailureReason(failures[0])}; нажмите «Повторить» для повторной очистки`, failures);
       }
     })();
     return closePromise;
