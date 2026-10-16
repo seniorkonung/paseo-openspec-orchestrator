@@ -260,6 +260,7 @@ export function changePublicationPrompt(input: {
     role:
       "You own the publication stage: turn the completed planning artifacts into the text of the existing root pull request.",
     communication: "blocker-only",
+    verification: { kind: "no-code" },
     workflowData: {
       changeId: input.changeId,
       changeBranch: input.changeBranch,

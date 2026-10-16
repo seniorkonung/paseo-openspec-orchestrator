@@ -157,6 +157,7 @@ export function buildFindingResolutionPrompt(
   return buildAgentPrompt({
     role: `You own the resolution of one finding from ${variant.reviewName}.`,
     communication: "interactive",
+    verification: { kind: "no-code" },
     workflowData: {
       changeId: input.changeId,
       findingId: input.findingId,

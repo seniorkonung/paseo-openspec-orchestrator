@@ -790,31 +790,41 @@ test("implementation review не публикует правки без обно
   }
 });
 
+const promptTaskSession = {
+  changeId,
+  schemaName: "spec-driven",
+  taskId: "internal-a",
+  taskNumber: "1.1",
+  taskDescription: "1.1 Первая задача",
+  changeBranch,
+  implementationBranch,
+  rootBaselineCommit: "a".repeat(40),
+  baselineCommit: "b".repeat(40),
+  tasksBeforeDigest: "c".repeat(64),
+  tasksAfterDigest: "d".repeat(64),
+  progressTotal: 2,
+  progressComplete: 0,
+  repositoryHost: "github.com",
+  repositoryNameWithOwner: "example/project",
+  repositoryUrl: "https://github.com/example/project",
+};
+
 test("recovery prompt не повторяет apply и запрещает GitHub-операции", () => {
-  const prompt = changeTaskExecutionPrompt({
-    session: {
-      changeId,
-      schemaName: "spec-driven",
-      taskId: "internal-a",
-      taskNumber: "1.1",
-      taskDescription: "1.1 Первая задача",
-      changeBranch,
-      implementationBranch,
-      rootBaselineCommit: "a".repeat(40),
-      baselineCommit: "b".repeat(40),
-      tasksBeforeDigest: "c".repeat(64),
-      tasksAfterDigest: "d".repeat(64),
-      progressTotal: 2,
-      progressComplete: 0,
-      repositoryHost: "github.com",
-      repositoryNameWithOwner: "example/project",
-      repositoryUrl: "https://github.com/example/project",
-    },
-    alreadyCommitted: true,
-  });
+  const prompt = changeTaskExecutionPrompt({ session: promptTaskSession, alreadyCommitted: true });
   assert.doesNotMatch(prompt, /\$openspec-apply-change/u);
+  assert.match(prompt, /changes no implementation code and does not complete a plan\.md phase: never run tests, builds, or project checks/u);
   assert.match(prompt, /Never invoke `gh`/u);
   assert.match(prompt, new RegExp(implementationBranch, "u"));
+});
+
+test("задача не завершает фазу и не запускает полные проверки даже последней в фазе", () => {
+  const prompt = changeTaskExecutionPrompt({
+    session: { ...promptTaskSession, progressComplete: 1 },
+    alreadyCommitted: false,
+  });
+  assert.match(prompt, /\$openspec-apply-change/u);
+  assert.match(prompt, /does not complete a plan\.md phase, even when no incomplete task remains after it: never run the full checks/u);
+  assert.match(prompt, /run only the focused verification the repository requires for that change/u);
 });
 
 test("оценка task-сессии различает неначатую, выполненную и устаревшую", async (context) => {

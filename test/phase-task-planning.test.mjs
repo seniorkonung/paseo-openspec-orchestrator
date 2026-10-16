@@ -47,6 +47,7 @@ test("prompt прямо поручает openspec-update-change только о�
   assert.match(prompt, /Do not inspect the command catalog first/u);
   assert.match(prompt, /interactive confirmation/u);
   assert.match(prompt, /at least one incomplete task numbered 2\.\*/u);
+  assert.match(prompt, /changes no implementation code and does not complete a plan\.md phase: never run tests, builds, or project checks/u);
   assert.match(prompt, /strictly in file order\. List the new tasks in the order they must run/u);
   assert.doesNotMatch(prompt, /agent\.commands|commands\(\)/u);
 });

@@ -777,6 +777,9 @@ test("prompt требует одно решение, сохраняет зада
   });
   assert.match(prompt, /openspec-review-implementation/);
   assert.match(prompt, /F42/);
+  // Устранение finding после implementation review правит только артефакты и фазу не завершает.
+  assert.match(prompt, /changes no implementation code and does not complete a plan\.md phase: never run tests, builds, or project checks/u);
+  assert.doesNotMatch(prompt, /so this session completes that plan\.md phase/u);
   assert.match(prompt, /related repository documentation outside the selected change root/u);
   assert.match(prompt, /ADRs, README files, domain documents, and guides/u);
   assert.match(prompt, /only as needed for the agreed resolution of this finding/u);

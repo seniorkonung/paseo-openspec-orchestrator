@@ -769,6 +769,7 @@ test("prompt требует одно решение, сохраняет зада
     taskScope: initialScope,
   });
   assert.match(prompt, /F42/);
+  assert.match(prompt, /changes no implementation code and does not complete a plan\.md phase: never run tests, builds, or project checks/u);
   assert.match(prompt, /related repository documentation outside the selected change root/u);
   assert.match(prompt, /ADRs, README files, domain documents, and guides/u);
   assert.match(prompt, /only as needed for the agreed resolution of this finding/u);
@@ -823,6 +824,7 @@ test("prompt требует одно решение, сохраняет зада
   assert.match(planningPrompt, /Add new tasks only to Phase 2\./u);
   assert.match(planningPrompt, /Never describe an execution order that differs from file order/u);
   assert.match(planningPrompt, /"phaseNumber":2/u);
+  assert.match(planningPrompt, /changes no implementation code and does not complete a plan\.md phase: never run tests, builds, or project checks/u);
 });
 
 test("оценка finding-сессии различает неначатую, устранённую и устаревшую", async (context) => {

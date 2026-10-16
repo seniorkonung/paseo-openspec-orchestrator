@@ -176,6 +176,8 @@ test("review prompt разрешает правки и сохраняет зап
     assert.match(prompt, /Do not push/u);
     assert.match(prompt, /change\/complete-review-workflow/u);
     assert.match(prompt, /Follow the review skill/u);
+    // Ревью планирования может править код, но фазу не завершает.
+    assert.match(prompt, /does not complete a plan\.md phase, even when no incomplete task remains after it: never run the full checks/u);
     assert.doesNotMatch(prompt, /never fix findings|Leave every other pre-existing file|commit only those files/u);
     if (phaseNumber !== null) assert.match(prompt, /Phase 2/u);
     assert.match(

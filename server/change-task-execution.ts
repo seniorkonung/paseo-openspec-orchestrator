@@ -335,6 +335,7 @@ Stop the apply loop right after task ${session.taskNumber}: implement its full s
   return buildAgentPrompt({
     role: "You own exactly one OpenSpec implementation task.",
     communication: "blocker-only",
+    verification: { kind: input.alreadyCommitted ? "no-code" : "code" },
     workflowData: {
       changeId: session.changeId,
       taskNumber: session.taskNumber,

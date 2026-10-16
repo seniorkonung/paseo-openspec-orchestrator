@@ -384,6 +384,7 @@ export function changeReviewPrompt(input: {
   return buildAgentPrompt({
     role: "You own the review stage of one OpenSpec change.",
     communication: "interactive",
+    verification: { kind: input.alreadyCommitted ? "no-code" : "code" },
     workflowData: {
       changeId: input.changeId,
       parentBranch: input.parentBranch,

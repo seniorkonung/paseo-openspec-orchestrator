@@ -95,10 +95,44 @@ export function taskScopeWorkflowData(
     : { phaseNumber: scope.phaseNumber };
 }
 
+/**
+ * Место сессии агента относительно завершения фазы plan.md.
+ *
+ * Агент не знает, какая стадия workflow завершает фазу, и иначе применяет
+ * правила репозитория о полных проверках «перед завершением фазы» к концу
+ * любой стадии, включая правку одних артефактов. Фазу завершает только
+ * implementation review: оно начинается, когда все задачи фазы выполнены,
+ * и его исправления — последние правки кода перед переходом к следующей фазе.
+ *
+ * - `no-code` — сессия не меняет код: артефакты, документация, восстановление;
+ * - `code` — сессия может менять код, но фазу не завершает;
+ * - `phase-completion` — сессия завершает фазу `phaseNumber`.
+ */
+export type StageVerification =
+  | { readonly kind: "no-code" }
+  | { readonly kind: "code" }
+  | { readonly kind: "phase-completion"; readonly phaseNumber: number };
+
+const PHASE_COMPLETION_FACT =
+  "Only the implementation review that starts after the last task of a plan.md phase completes that phase.";
+
+export function stageVerificationRule(verification: StageVerification): string {
+  switch (verification.kind) {
+    case "no-code":
+      return `This session changes no implementation code and does not complete a plan.md phase: never run tests, builds, or project checks. ${PHASE_COMPLETION_FACT}`;
+    case "code":
+      return `This session does not complete a plan.md phase, even when no incomplete task remains after it: never run the full checks the repository requires before completing a phase. When you change code, run only the focused verification the repository requires for that change. ${PHASE_COMPLETION_FACT}`;
+    case "phase-completion":
+      return `Every task of Phase ${verification.phaseNumber} is complete, so this session completes that plan.md phase: after your last code correction, run the full checks the repository requires before completing a phase.`;
+  }
+}
+
 export interface AgentPromptSpec {
   /** Одно предложение о зоне ответственности агента. */
   readonly role: string;
   readonly communication: AgentCommunicationMode;
+  /** Какие проверки уместны в этой сессии; рендерится последним правилом. */
+  readonly verification: StageVerification;
   /** Параметры стадии; передаются агенту как JSON. */
   readonly workflowData: Readonly<Record<string, unknown>>;
   /** Общие и стадийные правила; рендерятся одним абзацем. */
@@ -113,7 +147,7 @@ export function buildAgentPrompt(spec: AgentPromptSpec): string {
   return [
     spec.role,
     `${COMMUNICATION[spec.communication]} Workflow data: ${JSON.stringify(spec.workflowData)}`,
-    spec.rules.join(" "),
+    [...spec.rules, stageVerificationRule(spec.verification)].join(" "),
     ...spec.body,
     spec.completion,
   ]

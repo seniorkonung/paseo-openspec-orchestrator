@@ -117,6 +117,7 @@ test("архив проверяет задачи, артефакты, перен
   assert.match(changeArchivePrompt(session, "fresh"), /openspec-archive-change/u);
   assert.match(changeArchivePrompt(session, "committed"), /Do not invoke the skill/u);
   assert.match(changeArchivePrompt(session, "fresh"), /Never choose 'Archive without syncing'/u);
+  assert.match(changeArchivePrompt(session, "fresh"), /changes no implementation code and does not complete a plan\.md phase: never run tests, builds, or project checks/u);
 });
 
 test("архив принимает несколько коммитов с произвольными сообщениями и отклоняет отсутствие коммита", async (context) => {

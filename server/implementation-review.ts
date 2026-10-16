@@ -487,6 +487,9 @@ export function implementationReviewPrompt(input: {
   return buildAgentPrompt({
     role: "You own one bounded implementation-review stage.",
     communication: "blocker-only",
+    verification: input.alreadyCommitted
+      ? { kind: "no-code" }
+      : { kind: "phase-completion", phaseNumber: input.phaseNumber },
     workflowData: {
       changeId: session.changeId,
       branch: session.implementationBranch,

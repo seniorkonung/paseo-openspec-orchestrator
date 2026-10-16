@@ -180,6 +180,15 @@ and findings never add tasks to other existing phases, so a phase without
 tasks is still planned by the orchestrator. The orchestrator checks this rule
 again before it saves the run's task progress.
 
+Every agent prompt states the stage's place relative to phase completion, so
+repository rules that require full checks before completing a phase apply only
+where a phase actually ends. The implementation review completes the phase: it
+starts once every task of the phase is complete and runs the full checks after
+its last correction. Task execution and the OpenSpec review may change code but
+run only focused verification, even after the last task. Artifact creation,
+publication, task planning, finding resolution, archiving, and recovery sessions
+change no code and run no tests, builds, or project checks.
+
 Agents do not push task, review, or finding commits themselves. Their scoped
 MCP completion tools verify the stage contract, then the orchestrator
 publishes the commits to `change/<id>`. A stage needs at least one new commit;

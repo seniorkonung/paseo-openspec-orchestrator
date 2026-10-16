@@ -407,6 +407,7 @@ function artifactCreationPrompt(input: {
   return buildAgentPrompt({
     role: "You own one OpenSpec planning-artifact stage.",
     communication: "interactive",
+    verification: { kind: "no-code" },
     workflowData: {
       changeId: input.changeId,
       artifactId: input.artifactId,

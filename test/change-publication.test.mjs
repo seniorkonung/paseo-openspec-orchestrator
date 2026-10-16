@@ -104,4 +104,5 @@ test("prompt публикации оставляет push и изменение 
   });
   assert.match(prompt, /Do not push/u);
   assert.match(prompt, /Never invoke `gh`/u);
+  assert.match(prompt, /changes no implementation code and does not complete a plan\.md phase: never run tests, builds, or project checks/u);
 });

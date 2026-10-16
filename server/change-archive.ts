@@ -169,6 +169,7 @@ export function changeArchivePrompt(session: PendingArchiveSession, recovery: "f
   return buildAgentPrompt({
     role: "You own the final archive stage of one completed OpenSpec change.",
     communication: "blocker-only",
+    verification: { kind: "no-code" },
     workflowData: {
       changeId: session.changeId,
       branch: session.branch,

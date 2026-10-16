@@ -66,6 +66,18 @@ test("ревью имплементации добавляет задачи то
   assert.doesNotMatch(prompt(true), /Add new tasks only/u);
 });
 
+test("ревью имплементации завершает фазу и только оно запускает полные проверки", () => {
+  const result = prompt(false);
+
+  assert.match(result, /Every task of Phase 2 is complete, so this session completes that plan\.md phase/u);
+  assert.match(result, /after your last code correction, run the full checks the repository requires before completing a phase/u);
+  assert.doesNotMatch(result, /never run tests|never run the full checks/u);
+
+  const recovered = prompt(true);
+  assert.match(recovered, /changes no implementation code and does not complete a plan\.md phase: never run tests, builds, or project checks/u);
+  assert.doesNotMatch(recovered, /so this session completes that plan\.md phase/u);
+});
+
 test("восстановление ревью имплементации не запускает повторный анализ", () => {
   const result = prompt(true);
 

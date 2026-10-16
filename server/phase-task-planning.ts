@@ -365,6 +365,7 @@ export function phaseTaskPlanningPrompt(
   return buildAgentPrompt({
     role: "You own task planning for exactly one phase of an existing OpenSpec change.",
     communication: "interactive",
+    verification: { kind: "no-code" },
     workflowData: {
       changeId: session.changeId,
       phaseNumber: session.phaseNumber,
