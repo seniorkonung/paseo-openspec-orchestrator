@@ -346,7 +346,7 @@ recover unfinished cleanup from the previous plugin process. A graceful plugin
 shutdown waits for active work to stop and preserves unfinished sessions.
 After a crash, cleanup resumes on the next initialization: unfinished agents
 are preserved, while a recorded successful-stage archive is completed.
-The integration targets installed Paseo 0.10; other operating systems use
+The integration targets installed Paseo 0.11; other operating systems use
 Paseo interruption or SDK archive without the extra Linux process scan.
 A process that clears its environment marker and detaches, or whose environment
 is inaccessible before ownership can be confirmed, cannot be identified this

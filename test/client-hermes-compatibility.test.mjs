@@ -30,6 +30,8 @@ test("клиентский бандл компилируется в байтко
     jsx: "automatic",
     platform: "neutral",
     target: "es2020",
+    // Paseo 0.11 читает те же поля package.json при сборке клиентского бандла.
+    mainFields: ["module", "main"],
     supported: { "async-await": false },
     external: [
       "@getpaseo/plugin",
