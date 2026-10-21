@@ -46,6 +46,7 @@ import {
   updateAgentNotificationLabel,
   type AgentNotificationLabelUpdater,
 } from "./paseo-agent-labels.ts";
+import { RootBranchDeliveryError } from "./root-branch-delivery.ts";
 
 export { ChangePublicationError } from "./change-publication-model.ts";
 export type { PublishedPullRequest } from "./change-publication-model.ts";
@@ -176,7 +177,10 @@ export function createChangePublicationService(
                     signal,
                   });
                 } catch (error) {
-                  if (error instanceof ChangePublicationError) {
+                  if (
+                    error instanceof ChangePublicationError ||
+                    error instanceof RootBranchDeliveryError
+                  ) {
                     throw new McpToolError(error.message);
                   }
                   if (signal.aborted) throw error;

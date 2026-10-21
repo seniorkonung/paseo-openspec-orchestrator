@@ -55,6 +55,7 @@ import {
   updateAgentNotificationLabel,
   type AgentNotificationLabelUpdater,
 } from "./paseo-agent-labels.ts";
+import { RootBranchDeliveryError } from "./root-branch-delivery.ts";
 import {
   RESUMABLE_SESSION,
   staleSession,
@@ -280,7 +281,8 @@ export function createChangeReviewService(
                 } catch (error) {
                   if (
                     error instanceof ChangeReviewError ||
-                    error instanceof ChangeReviewPublicationError
+                    error instanceof ChangeReviewPublicationError ||
+                    error instanceof RootBranchDeliveryError
                   ) {
                     throw new McpToolError(error.message);
                   }

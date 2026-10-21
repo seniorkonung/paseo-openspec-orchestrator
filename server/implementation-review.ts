@@ -48,7 +48,7 @@ import {
   ImplementationReviewReportError,
   readImplementationReviewReport,
 } from "./implementation-review-report.ts";
-import { deliverRootCommit } from "./root-branch-delivery.ts";
+import { deliverRootCommit, RootBranchDeliveryError } from "./root-branch-delivery.ts";
 import { createRootPullRequestService } from "./root-pull-request.ts";
 import { readReviewPullRequest } from "./review-publication-gateway.ts";
 import { repositoryArgument } from "./review-publication-model.ts";
@@ -368,7 +368,8 @@ export function createImplementationReviewService(
               } catch (error) {
                 if (
                   error instanceof ImplementationReviewError ||
-                  error instanceof ChangeReviewPublicationError
+                  error instanceof ChangeReviewPublicationError ||
+                  error instanceof RootBranchDeliveryError
                 ) {
                   throw new McpToolError(error.message);
                 }

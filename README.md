@@ -82,7 +82,11 @@ The root PR service validates repository identity, branch, base, head, Draft
 state, and final merge state. `server/root-branch-delivery.ts` publishes a
 stage's verified commit range as a fast-forward: origin may point to any
 ancestor of the verified head, and the exact root PR must still be open and
-Draft. Origin is never rewritten. The GitHub REST mutation
+Draft. Origin is never rewritten. GitHub applies a push to the PR
+asynchronously, so delivery rereads the PR with growing pauses for up to 30
+seconds until its head matches the published commit. A later call waits again
+without pushing twice, and a completion tool returns the delivery failure
+cause to its agent. The GitHub REST mutation
 gateway owns PR title and body updates. The generated summary and finding
 outcomes occupy managed body sections so later updates preserve other text.
 

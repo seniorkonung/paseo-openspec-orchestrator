@@ -11,7 +11,7 @@ import { createManagedAgentSession, type AgentResourceReleaser } from "./managed
 import { McpToolError, OrchestratorMcpToolHost, defineMcpTool } from "./orchestrator-mcp-tool-host.ts";
 import { updateAgentNotificationLabel, type AgentNotificationLabelUpdater } from "./paseo-agent-labels.ts";
 import type { RootPullRequestIdentity, RootPullRequestService } from "./root-pull-request.ts";
-import { deliverRootCommit } from "./root-branch-delivery.ts";
+import { deliverRootCommit, RootBranchDeliveryError } from "./root-branch-delivery.ts";
 import { RESUMABLE_SESSION, staleSession, type SessionAssessment } from "./session-assessment.ts";
 
 type PaseoApi = PluginHandlerContext["paseo"];
@@ -109,7 +109,9 @@ export function createChangeArchiveService(options: {
                 if (pr.kind !== "open" || !pr.isDraft || pr.head !== verified.commit) throw new ChangeArchiveError("Архивный коммит не подтверждён в Draft PR");
               } catch (error) {
                 if (combined.signal.aborted) throw error;
-                if (error instanceof ChangeArchiveError) throw new McpToolError(error.message);
+                if (error instanceof ChangeArchiveError || error instanceof RootBranchDeliveryError) {
+                  throw new McpToolError(error.message);
+                }
                 logger.error("[OpenSpec] Не удалось проверить архивный коммит", { changeId: session.changeId, code: errorCode(error) });
                 throw new McpToolError("Не удалось проверить или опубликовать архивный коммит");
               }

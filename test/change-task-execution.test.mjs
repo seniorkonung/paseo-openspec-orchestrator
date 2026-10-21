@@ -109,6 +109,8 @@ async function fixture(context, { existingReview = false } = {}) {
     };
   };
   const calls = [];
+  // Состояние корневого PR, которое тест может изменить до вызова completion tool.
+  const pullRequest = { isDraft: true };
   const command = async (executable, arguments_, options) => {
     calls.push(`${executable} ${arguments_.join(" ")}`);
     if (executable === "mise") {
@@ -139,7 +141,7 @@ async function fixture(context, { existingReview = false } = {}) {
       const remoteHead = output.trim().split(/\s/u)[0];
       const pr = {
         number: 41, url: "https://github.com/example/project/pull/41", state: "OPEN",
-        isDraft: true, isCrossRepository: false, baseRefName: "main",
+        isDraft: pullRequest.isDraft, isCrossRepository: false, baseRefName: "main",
         headRefName: changeBranch, headRefOid: remoteHead,
         title: "Change", body: "Описание",
       };
@@ -171,7 +173,7 @@ async function fixture(context, { existingReview = false } = {}) {
     },
   };
   const taskBaseline = phaseDecision(phaseWork.tasks, null).progress;
-  return { workspace, remote, tasksPath, baseline, command, run, calls, phaseWork, taskBaseline };
+  return { workspace, remote, tasksPath, baseline, command, run, calls, phaseWork, taskBaseline, pullRequest };
 }
 
 async function commitTask(value, { markSecond = false } = {}) {
@@ -374,6 +376,56 @@ test("completion отклоняет изменение task-state следующ
   assert.equal(toolResult.isError, true);
   assert.match(toolResult.content[0].text, /единственным изменением task-state/u);
   controller.abort();
+  await assert.rejects(pending, /abort/iu);
+});
+
+test("completion передаёт агенту причину, по которой коммит не опубликован в корневой PR", async (context) => {
+  const value = await fixture(context);
+  let toolResult;
+  const errors = [];
+  const service = createChangeTaskExecutionService({
+    command: value.command,
+    async createAgent(options) {
+      const [{ url }] = Object.values(options.config.mcpServers);
+      return {
+        id: "delivery-rejected-agent",
+        async commands() { return { commands: [{ name: "openspec-apply-change" }], error: null }; },
+        async send() {
+          await commitTask(value);
+          value.pullRequest.isDraft = false;
+          const client = await connectClient(url);
+          try {
+            toolResult = await client.callTool({ name: "complete_change_task", arguments: {} });
+          } finally {
+            await client.close();
+          }
+        },
+        async refresh() { return { agent: { status: "idle", archivedAt: null } }; }, async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
+        async waitForFinish() { return { status: "idle" }; },
+      };
+    },
+    updateNotificationLabel: async () => {},
+    logger: { error(...args) { errors.push(args); }, warn() {} },
+  });
+  const plan = await service.plan(value.workspace, value.run);
+  const controller = new AbortController();
+  const pending = service.run({
+    workspaceDirectory: value.workspace,
+    profile: highProfile(),
+    session: plan.session,
+    signal: controller.signal,
+    onAgentCreated() {},
+    onTaskCompleted: async () => {},
+  });
+  try {
+    while (!toolResult) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(toolResult.isError, true);
+    assert.equal(toolResult.content[0].text, "Корневой PR изменился или уже не находится в Draft");
+    assert.deepEqual(errors, [], "известная причина не превращается в обезличенную ошибку");
+    assert.equal(value.calls.some((call) => call.startsWith("git push")), false);
+  } finally {
+    controller.abort();
+  }
   await assert.rejects(pending, /abort/iu);
 });
 

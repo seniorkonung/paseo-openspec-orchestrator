@@ -9,7 +9,7 @@ import { runBoundedCommand, type BoundedCommandRunner } from "./bounded-command.
 import { commitHashSchema } from "./change-artifact-model.ts";
 import { changeBranchFor } from "./change-branch.ts";
 import { isCommitAncestor } from "./git-ancestry.ts";
-import { deliverRootCommit } from "./root-branch-delivery.ts";
+import { deliverRootCommit, RootBranchDeliveryError } from "./root-branch-delivery.ts";
 import {
   assertActiveReviewPullRequest,
   findingCompletionInputSchema,
@@ -434,7 +434,10 @@ export function createReviewFindingResolutionService<
                   signal,
                 );
               } catch (error) {
-                if (error instanceof ReviewFindingResolutionError) {
+                if (
+                  error instanceof ReviewFindingResolutionError ||
+                  error instanceof RootBranchDeliveryError
+                ) {
                   throw new McpToolError(error.message);
                 }
                 if (signal.aborted) throw error;
