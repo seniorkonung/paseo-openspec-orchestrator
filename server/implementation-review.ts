@@ -5,6 +5,7 @@ import {
   FIXED_BRANCH_RULE,
   NO_GITHUB_RULE,
   OPENSPEC_CLI_RULE,
+  STAGE_SCOPE_RULE,
   buildAgentPrompt,
   completionInstruction,
   taskHistoryRule,
@@ -73,8 +74,6 @@ import {
 
 const REVIEW_SKILL = "openspec-review-implementation";
 const DEFAULT_AGENT_DRAIN_TIMEOUT_MS = 15_000;
-const REVIEW_STAGE_SCOPE_RULE =
-  "Stay inside this stage: never create or archive workspaces or changes, and never invoke another workflow.";
 
 export const pendingImplementationReviewSessionSchema = z
   .object({
@@ -512,7 +511,7 @@ export function implementationReviewPrompt(input: {
       OPENSPEC_CLI_RULE,
       NO_GITHUB_RULE,
       FIXED_BRANCH_RULE,
-      REVIEW_STAGE_SCOPE_RULE,
+      STAGE_SCOPE_RULE,
     ],
     body: [
       reviewInstruction,

@@ -43,7 +43,7 @@ test("ревью имплементации допускает субагент�
   assert.match(delegation, /They may only inspect and report findings/u);
   assert.match(delegation, /Only you may write the report, create the review commit, and call `complete_implementation_review`/u);
   assert.match(result, /Do not push or create a pull request/u);
-  assert.match(result, /never create or archive workspaces or changes, and never invoke another workflow/u);
+  assert.match(result, /Stay within this stage's role: do only the work this prompt assigns[^.]*\. Never create or archive workspaces or changes, and never invoke another workflow/u);
   assert.doesNotMatch(result, /never spawn or archive agents/u);
   assert.match(result, /Follow the review skill/u);
   assert.doesNotMatch(result, /Modify only|never fix findings|never change task state|commit only the report/u);
@@ -85,6 +85,6 @@ test("восстановление ревью имплементации не з
   assert.match(result, /Do not invoke the review skill, edit files, or create or amend a commit/u);
   assert.doesNotMatch(result, /You may spawn review subagents/u);
   assert.doesNotMatch(result, /never spawn or archive agents/u);
-  assert.match(result, /never create or archive workspaces or changes, and never invoke another workflow/u);
+  assert.match(result, /Stay within this stage's role: do only the work this prompt assigns[^.]*\. Never create or archive workspaces or changes, and never invoke another workflow/u);
   assert.match(result, /complete_implementation_review/u);
 });

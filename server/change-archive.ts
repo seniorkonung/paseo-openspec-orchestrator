@@ -2,7 +2,7 @@ import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { dirname } from "node:path";
 import { z } from "zod";
 import type { CompleteRequiredAgentProfile } from "./agent-profiles.ts";
-import { FIXED_BRANCH_RULE, NO_GITHUB_RULE, OPENSPEC_CLI_RULE, buildAgentPrompt, completionInstruction } from "./agent-prompt.ts";
+import { FIXED_BRANCH_RULE, NO_GITHUB_RULE, OPENSPEC_CLI_RULE, STAGE_ROLE_RULE, buildAgentPrompt, completionInstruction } from "./agent-prompt.ts";
 import { combineAbortSignals, throwIfSignalAborted } from "./agent-session-control.ts";
 import { runBoundedCommand, type BoundedCommandRunner } from "./bounded-command.ts";
 import { archivedChangeSchema, ChangeArchiveError, pendingArchiveSessionSchema, type ArchivedChange, type PendingArchiveSession, type VerifiedChangeArchive } from "./change-archive-model.ts";
@@ -181,7 +181,7 @@ export function changeArchivePrompt(session: PendingArchiveSession, recovery: "f
       mainSpecsRoot: specRoot,
       recovery,
     },
-    rules: [OPENSPEC_CLI_RULE, NO_GITHUB_RULE, FIXED_BRANCH_RULE, "Never spawn or archive agents or workspaces, and never invoke another workflow except the inline spec-sync workflow required by the archive skill."],
+    rules: [OPENSPEC_CLI_RULE, NO_GITHUB_RULE, FIXED_BRANCH_RULE, `${STAGE_ROLE_RULE} Never create or archive workspaces, and never invoke another workflow except the inline spec-sync workflow required by the archive skill.`],
     body: [
       action,
       "The user has already chosen mandatory delta-spec synchronization. If delta specs exist, sync and verify every capability before moving the change. Never choose 'Archive without syncing' or proceed with incomplete artifacts, tasks, or a sync blocker. If already synced, archive directly. Report a genuine blocker in Russian.",

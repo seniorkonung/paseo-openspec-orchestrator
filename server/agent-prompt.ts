@@ -33,9 +33,28 @@ export const NO_GITHUB_RULE =
 export const GITHUB_CLI_RULE =
   "Use `gh` only non-interactively with `--repo`; never use `gh pr edit`, because pull-request field mutations belong to the orchestrator; never run `gh auth login`, `gh auth refresh`, or anything that prints a token.";
 
-/** Границы одной стадии: агент не расширяет workflow. */
+/**
+ * Роль одной стадии. Оркестратор детерминированно запускает сессии по ролям и
+ * сам выполняет шаги между ними, поэтому результат сессии должен быть
+ * предсказуемым: агент делает только порученную работу и не берёт на себя
+ * чужие шаги. Субагенты внутри сессии этим правилом не запрещены.
+ */
+export const STAGE_ROLE_RULE =
+  "Stay within this stage's role: do only the work this prompt assigns, because the orchestrator itself runs every step between stages.";
+
+/** Роль стадии и границы, общие для всех стадий, кроме архивирования. */
 export const STAGE_SCOPE_RULE =
-  "Stay inside this stage: never spawn or archive agents, workspaces, or changes, and never invoke another workflow.";
+  `${STAGE_ROLE_RULE} Never create or archive workspaces or changes, and never invoke another workflow.`;
+
+/**
+ * Выбор модели субагентов. Субагенты по умолчанию наследуют модель и
+ * reasoning effort сессии, а стадии могут работать на самой дорогой модели с
+ * максимальным effort. Правило сформулировано условно, чтобы само по себе не
+ * побуждать агента делегировать работу и не оправдывать лишних субагентов, и
+ * не называет модель: её выбирает агент по линейке своего провайдера.
+ */
+const SUBAGENT_MODEL_RULE =
+  "This rule never asks you to delegate. Only if delegating part of this stage to in-session subagents is worth its token cost, do not let them inherit your model and reasoning effort: for each subagent, choose the model and reasoning effort from your provider with the best price-to-quality fit for its task.";
 
 /** Фазы, которые этап может пополнять задачами; структурно совместимо с PhaseTaskScope. */
 export type TaskScopePromptInput =
@@ -147,7 +166,7 @@ export function buildAgentPrompt(spec: AgentPromptSpec): string {
   return [
     spec.role,
     `${COMMUNICATION[spec.communication]} Workflow data: ${JSON.stringify(spec.workflowData)}`,
-    [...spec.rules, stageVerificationRule(spec.verification)].join(" "),
+    [...spec.rules, SUBAGENT_MODEL_RULE, stageVerificationRule(spec.verification)].join(" "),
     ...spec.body,
     spec.completion,
   ]

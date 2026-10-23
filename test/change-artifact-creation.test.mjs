@@ -444,7 +444,8 @@ test("Ultra создаёт один артефакт и завершает ег�
   assert.match(prompts[0], /openspec-continue-change.*exactly once/);
   assert.match(prompts[0], /expected artifact is `risk-map`/);
   assert.match(prompts[0], /explicitly approve/);
-  assert.match(prompts[0], /never spawn or archive agents/);
+  assert.match(prompts[0], /Stay within this stage's role: do only the work this prompt assigns/u);
+  assert.doesNotMatch(prompts[0], /never spawn or archive agents/u);
   assert.match(prompts[0], /complete_artifact/);
   assert.match(prompts[0], /changes no implementation code and does not complete a plan\.md phase: never run tests, builds, or project checks/u);
   assert.equal(toolResults[0].isError, true);
