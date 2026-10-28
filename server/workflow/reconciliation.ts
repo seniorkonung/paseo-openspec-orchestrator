@@ -2,6 +2,7 @@ import type { PendingArtifactSession } from "../change-artifact-creation.ts";
 import type { PendingArchiveSession } from "../change-archive-model.ts";
 import { changeIdFromBranch } from "../change-branch.ts";
 import type { PendingFindingResolutionSession } from "../change-finding-resolution.ts";
+import type { PendingFindingDecisionSession } from "../review-finding-resolution-model.ts";
 import type { PendingChangeInitializationSession } from "../change-initialization.ts";
 import { ChangeReviewPublicationError } from "../change-review-publication.ts";
 import type { PendingReviewSession } from "../change-review.ts";
@@ -53,9 +54,17 @@ export interface WorkflowSessionAssessors {
     signal: AbortSignal,
   ): Promise<SessionAssessment>;
   review(session: PendingReviewSession, signal: AbortSignal): Promise<SessionAssessment>;
+  findingDecision(
+    session: PendingFindingDecisionSession,
+    signal: AbortSignal,
+  ): Promise<SessionAssessment>;
   findingResolution(
     session: PendingFindingResolutionSession,
     taskScope: PhaseTaskScope,
+    signal: AbortSignal,
+  ): Promise<SessionAssessment>;
+  implementationFindingDecision(
+    session: PendingFindingDecisionSession,
     signal: AbortSignal,
   ): Promise<SessionAssessment>;
   implementationFindingResolution(
@@ -164,7 +173,9 @@ const STAGE_SESSION_FIELDS = [
   "pendingImplementationBranchSession",
   "pendingArtifactSession",
   "pendingReviewSession",
+  "pendingFindingDecisionSession",
   "pendingFindingResolutionSession",
+  "pendingImplementationFindingDecisionSession",
   "pendingImplementationFindingResolutionSession",
   "pendingTaskExecutionSession",
   "pendingImplementationReviewSession",
@@ -357,9 +368,17 @@ export function createWorkflowReconciler(
         label: "сессия review change",
         assess: () => sessions.review(session, signal),
       }),
+      pendingFindingDecisionSession: (session) => ({
+        label: "сессия решений по findings review",
+        assess: () => sessions.findingDecision(session, signal),
+      }),
       pendingFindingResolutionSession: (session) => ({
         label: `сессия finding «${session.findingId}»`,
         assess: () => sessions.findingResolution(session, taskScope(), signal),
+      }),
+      pendingImplementationFindingDecisionSession: (session) => ({
+        label: "сессия решений по findings implementation review",
+        assess: () => sessions.implementationFindingDecision(session, signal),
       }),
       pendingImplementationFindingResolutionSession: (session) => ({
         label: `сессия implementation finding «${session.findingId}»`,
@@ -665,7 +684,9 @@ function clearPendingSessions(state: WorkflowState): WorkflowState {
     pendingPlanningBranchSession: null,
     pendingImplementationBranchSession: null,
     pendingReviewSession: null,
+    pendingFindingDecisionSession: null,
     pendingFindingResolutionSession: null,
+    pendingImplementationFindingDecisionSession: null,
     pendingImplementationFindingResolutionSession: null,
     pendingTaskExecutionSession: null,
     pendingImplementationReviewSession: null,

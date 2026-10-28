@@ -269,3 +269,189 @@ test("implementation finding выносит remediation в новую фазу �
     ],
   );
 });
+
+const highProfiles = async () => [{
+  id: "profile-high",
+  name: "High",
+  provider: "codex",
+  model: "gpt-6-astra",
+  modeId: "default",
+  thinkingOptionId: "high",
+}];
+
+const decisionSession = {
+  changeId,
+  branch: implementationBranch,
+  findingIds: ["F1", "F2"],
+  baselineCommit: hashes.c,
+};
+
+function stepWith(findingResolution, phaseInspections = []) {
+  return createResolveImplementationReviewFindingsStep({
+    workspaceDirectory: "/repo",
+    readAgentProfiles: highProfiles,
+    findingResolution,
+    implementationRunVerification: { async assertCurrent() { return hashes.c; } },
+    phaseWork: {
+      async inspect(_workspace, _changeId, previous) {
+        phaseInspections.push(previous);
+        return classifyPhaseWork(snapshot([task("1.1", true)]), previous);
+      },
+    },
+  });
+}
+
+function stepContext(state, checkpoints, links = []) {
+  return {
+    signal: new AbortController().signal,
+    state: {
+      ...createInitialWorkflowState(),
+      change: { id: changeId },
+      changeBranch,
+      activeBranch: implementationBranch,
+      phaseProgress: initialProgress,
+      implementationRun,
+      ...state,
+    },
+    updateActionLinks(value) { links.push(value); },
+    async checkpointState(value) { checkpoints.push(value); },
+    async notify() { return true; },
+  };
+}
+
+test("findings без решений запускают одну сессию решений и возвращаются к исполнению", async () => {
+  const checkpoints = [];
+  const links = [];
+  const decideRequests = [];
+  const step = stepWith({
+    async plan() {
+      return { kind: "decisions-required", session: decisionSession };
+    },
+    async run() {
+      throw new Error("исполнение не должно начинаться до записи решений");
+    },
+    async decide(request) {
+      decideRequests.push(request);
+      request.onAgentCreated("agent-decisions");
+      await request.onDecisionsRecorded();
+      return {
+        changeId,
+        commit: hashes.c,
+        decisions: [
+          { findingId: "F1", heading: "F1 · High — Проблема", decision: { kind: "remediate", instruction: "Исправить." } },
+          {
+            findingId: "F2",
+            heading: "F2 · Low — Риск",
+            decision: { kind: "accept-risk", rationale: "Дёшево.", scope: "Только тест.", reopenWhen: "Никогда." },
+          },
+        ],
+      };
+    },
+  });
+
+  const result = await step.run(stepContext({}, checkpoints, links));
+
+  assert.equal(result.kind, "continue");
+  assert.equal(result.next, "resolve-implementation-review-findings");
+  assert.deepEqual(result.state, { pendingImplementationFindingDecisionSession: null });
+  assert.equal(
+    result.summary,
+    "Записаны решения по findings implementation review (устранить: F1; принять риск: F2)",
+  );
+  assert.equal(decideRequests.length, 1);
+  assert.deepEqual(decideRequests[0].session, decisionSession);
+  assert.equal(decideRequests[0].taskScope.kind, "implementation");
+  assert.deepEqual(
+    checkpoints.map(({ pendingImplementationFindingDecisionSession }) => pendingImplementationFindingDecisionSession),
+    [decisionSession, null],
+  );
+  assert.deepEqual(links, [[{ kind: "agent", agentId: "agent-decisions", label: "Решения по implementation findings" }]]);
+});
+
+test("сохранённая сессия решений продолжается без нового планирования", async () => {
+  let plans = 0;
+  let decided = 0;
+  const step = stepWith({
+    async plan() {
+      plans += 1;
+      throw new Error("план не нужен");
+    },
+    async run() {
+      throw new Error("исполнение не нужно");
+    },
+    async decide(request) {
+      decided += 1;
+      assert.deepEqual(request.session, decisionSession);
+      return { changeId, commit: hashes.c, decisions: [] };
+    },
+  });
+  const result = await step.run(
+    stepContext({ pendingImplementationFindingDecisionSession: decisionSession }, []),
+  );
+  assert.equal(result.kind, "continue");
+  assert.equal(result.next, "resolve-implementation-review-findings");
+  assert.equal(plans, 0);
+  assert.equal(decided, 1);
+});
+
+test("препятствие возвращает implementation finding к решению без завершения пакета", async () => {
+  const phaseInspections = [];
+  const step = stepWith({
+    async plan() {
+      return { kind: "finding-required", findingId: "F1", session: { findingId: "F1" } };
+    },
+    async run(request) {
+      await request.onFindingResolved();
+      return {
+        changeId,
+        findingId: "F1",
+        commit: hashes.c,
+        remainingFindingIds: ["F1"],
+        outcome: "blocked",
+        reason: "Решение требует изменить публичный контракт.",
+      };
+    },
+    async decide() {
+      throw new Error("решения не нужны");
+    },
+  }, phaseInspections);
+
+  const result = await step.run(stepContext({}, []));
+
+  assert.equal(result.kind, "continue");
+  assert.equal(result.next, "resolve-implementation-review-findings");
+  assert.deepEqual(result.state, { pendingImplementationFindingResolutionSession: null });
+  assert.equal(
+    result.summary,
+    "Implementation finding F1 возвращена к решению пользователя: Решение требует изменить публичный контракт.",
+  );
+  assert.equal(phaseInspections.length, 0);
+});
+
+test("длинная причина препятствия укорачивается до лимита истории", async () => {
+  const reason = `Нужно новое решение: ${"а".repeat(480)}`;
+  const step = stepWith({
+    async plan() {
+      return { kind: "finding-required", findingId: "F1", session: { findingId: "F1" } };
+    },
+    async run(request) {
+      await request.onFindingResolved();
+      return {
+        changeId,
+        findingId: "F1",
+        commit: hashes.c,
+        remainingFindingIds: ["F1"],
+        outcome: "blocked",
+        reason,
+      };
+    },
+    async decide() {
+      throw new Error("решения не нужны");
+    },
+  });
+  const result = await step.run(stepContext({}, []));
+  assert.equal(result.kind, "continue");
+  assert.equal(result.summary.length, 500);
+  assert.match(result.summary, /^Implementation finding F1 возвращена к решению пользователя: Нужно новое решение/u);
+  assert.match(result.summary, /…$/u);
+});

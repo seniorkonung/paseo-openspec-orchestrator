@@ -11,9 +11,11 @@ import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import { implementationBranchSchema, planningBranchSchema } from "./change-branch.ts";
 import {
   ReviewFindingResolutionError,
+  buildFindingDecisionPrompt,
   buildFindingResolutionPrompt,
   createReviewFindingResolutionService,
   type CompletedReviewFindingResolution,
+  type FindingDecisionPromptInput,
   type ReviewFindingPromptInput,
   type ReviewFindingResolutionPlan,
   type ReviewFindingResolutionRequest,
@@ -81,6 +83,17 @@ export function createImplementationFindingResolutionService(
       completionLabel: "Implementation finding",
       prompt: implementationFindingResolutionPrompt,
     },
+    decisions: {
+      toolName: "submit_implementation_review_finding_decisions",
+      toolDescription:
+        "Записать решения пользователя по всем findings сессии, закоммитить и опубликовать их в корневой ветке",
+      title: "Решения по findings implementation review",
+      logLabel: "решения по findings implementation review",
+      commitSubject: "docs(openspec): record implementation review finding decisions",
+      blockedCommitSubject: (findingId) =>
+        `docs(openspec): return implementation review finding ${findingId} for decision`,
+      prompt: implementationFindingDecisionPrompt,
+    },
     publication: {
       kind: "implementation-review",
     },
@@ -95,6 +108,19 @@ export function implementationFindingResolutionPrompt(
       reviewName: "an OpenSpec implementation review",
       skill: "openspec-review-implementation",
       toolName: "complete_implementation_review_finding",
+    },
+    input,
+  );
+}
+
+export function implementationFindingDecisionPrompt(
+  input: FindingDecisionPromptInput,
+): string {
+  return buildFindingDecisionPrompt(
+    {
+      reviewName: "an OpenSpec implementation review",
+      skill: "openspec-review-implementation",
+      toolName: "submit_implementation_review_finding_decisions",
     },
     input,
   );

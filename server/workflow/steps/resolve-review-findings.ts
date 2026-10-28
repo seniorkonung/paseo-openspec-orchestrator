@@ -6,6 +6,7 @@ import {
 import {
   ChangeFindingResolutionError,
   type ChangeFindingResolutionService,
+  type PendingFindingResolutionSession,
 } from "../../change-finding-resolution.ts";
 import {
   ImplementationRunVerificationError,
@@ -17,6 +18,10 @@ import {
   type PhaseTaskScope,
   type PhaseWorkService,
 } from "../../phase-work.ts";
+import { summarizeFindingDecisions } from "../../review-finding-decision-model.ts";
+import { RootBranchDeliveryError } from "../../root-branch-delivery.ts";
+import { ORCHESTRATOR_LIMITS } from "../../../shared/orchestrator.ts";
+import type { FindingWork } from "../../review-finding-resolution-model.ts";
 import { ensureInitialPlannedPhases, workflowTaskScope } from "../task-scope.ts";
 import type {
   WorkflowState,
@@ -28,7 +33,7 @@ import type {
 export interface ResolveReviewFindingsDependencies {
   readonly workspaceDirectory: string;
   readonly readAgentProfiles: AgentProfileReader;
-  readonly findingResolution: Pick<ChangeFindingResolutionService, "plan" | "run">;
+  readonly findingResolution: Pick<ChangeFindingResolutionService, "plan" | "run" | "decide">;
   readonly implementationRunVerification: Pick<ImplementationRunVerifier, "assertCurrent">;
   readonly phaseWork: Pick<PhaseWorkService, "inspect">;
 }
@@ -48,6 +53,7 @@ async function resolveReviewFindingsStep(
   if (
     context.state.pendingArtifactSession ||
     context.state.pendingReviewSession ||
+    context.state.pendingImplementationFindingDecisionSession ||
     context.state.pendingImplementationFindingResolutionSession
   ) {
     return {
@@ -74,8 +80,15 @@ async function resolveReviewFindingsStep(
     return findingFailure(context, error, "Не удалось определить фазы с задачами для findings");
   }
 
-  let session = state.pendingFindingResolutionSession;
-  if (!session) {
+  // Сначала исполняются уже принятые решения; сессия решений собирает
+  // решения сразу по всем открытым findings, у которых их нет.
+  let work: FindingWork<PendingFindingResolutionSession> | null =
+    state.pendingFindingDecisionSession
+      ? { kind: "decisions", session: state.pendingFindingDecisionSession }
+      : state.pendingFindingResolutionSession
+        ? { kind: "resolution", session: state.pendingFindingResolutionSession }
+        : null;
+  if (!work) {
     try {
       if (state.implementationRun) {
         await dependencies.implementationRunVerification.assertCurrent(
@@ -90,20 +103,24 @@ async function resolveReviewFindingsStep(
         activeBranch,
         context.signal,
       );
-      if (plan.kind === "no-findings") {
-        return await continueAfterReviewFindings(
-          dependencies,
-          context,
-          change.id,
-          taskScope,
-          `В review нет нерешённых findings: ${plan.reviewPath}`,
-        );
+      switch (plan.kind) {
+        case "no-findings":
+          return await continueAfterReviewFindings(
+            dependencies,
+            context,
+            change.id,
+            taskScope,
+            `В review нет нерешённых findings: ${plan.reviewPath}`,
+          );
+        case "decisions-required":
+          work = { kind: "decisions", session: plan.session };
+          await context.checkpointState({ ...state, pendingFindingDecisionSession: plan.session });
+          break;
+        case "finding-required":
+          work = { kind: "resolution", session: plan.session };
+          await context.checkpointState({ ...state, pendingFindingResolutionSession: plan.session });
+          break;
       }
-      session = plan.session;
-      await context.checkpointState({
-        ...state,
-        pendingFindingResolutionSession: session,
-      });
     } catch (error) {
       return findingFailure(context, error, "Не удалось определить следующую finding");
     }
@@ -135,13 +152,57 @@ async function resolveReviewFindingsStep(
     };
   }
 
+  const assertRunCurrent = async (): Promise<void> => {
+    if (state.implementationRun) {
+      await dependencies.implementationRunVerification.assertCurrent(
+        dependencies.workspaceDirectory,
+        state.implementationRun,
+        context.signal,
+      );
+    }
+  };
+
+  if (work.kind === "decisions") {
+    try {
+      const recorded = await dependencies.findingResolution.decide({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        changeId: change.id,
+        branch: activeBranch,
+        profile: resolution.profile,
+        session: work.session,
+        taskScope,
+        signal: context.signal,
+        onAgentCreated: (agentId) => {
+          context.updateActionLinks([
+            { kind: "agent", agentId, label: "Решения по findings" },
+          ]);
+        },
+        onDecisionsRecorded: async () => {
+          await assertRunCurrent();
+          await context.checkpointState({ ...state, pendingFindingDecisionSession: null });
+        },
+      });
+      return {
+        kind: "continue",
+        next: "resolve-review-findings",
+        state: { pendingFindingDecisionSession: null },
+        summary: boundedSummary(
+          `Записаны решения по findings review (${summarizeFindingDecisions(recorded.decisions)})`,
+        ),
+      };
+    } catch (error) {
+      return findingFailure(context, error, "Не удалось записать решения по findings");
+    }
+  }
+  const resolutionSession = work.session;
+
   try {
     const completed = await dependencies.findingResolution.run({
       workspaceDirectory: dependencies.workspaceDirectory,
       changeId: change.id,
       branch: activeBranch,
       profile: resolution.profile,
-      session,
+      session: resolutionSession,
       taskScope,
       signal: context.signal,
       onAgentCreated: (agentId) => {
@@ -149,18 +210,12 @@ async function resolveReviewFindingsStep(
           {
             kind: "agent",
             agentId,
-            label: `Finding ${session.findingId}`,
+            label: `Finding ${resolutionSession.findingId}`,
           },
         ]);
       },
       onFindingResolved: async () => {
-        if (state.implementationRun) {
-          await dependencies.implementationRunVerification.assertCurrent(
-            dependencies.workspaceDirectory,
-            state.implementationRun,
-            context.signal,
-          );
-        }
+        await assertRunCurrent();
         await context.checkpointState({
           ...state,
           pendingFindingResolutionSession: null,
@@ -168,6 +223,16 @@ async function resolveReviewFindingsStep(
       },
     });
 
+    if (completed.outcome === "blocked") {
+      return {
+        kind: "continue",
+        next: "resolve-review-findings",
+        state: { pendingFindingResolutionSession: null },
+        summary: boundedSummary(
+          `Finding ${completed.findingId} возвращена к решению пользователя: ${completed.reason}`,
+        ),
+      };
+    }
     if (completed.remainingFindingIds.length === 0) {
       return await continueAfterReviewFindings(
         dependencies,
@@ -204,7 +269,7 @@ async function continueAfterReviewFindings(
     return {
       kind: "continue",
       next: "resolve-implementation-review-findings",
-      state: { pendingFindingResolutionSession: null },
+      state: { pendingFindingDecisionSession: null, pendingFindingResolutionSession: null },
       summary,
     };
   }
@@ -218,7 +283,11 @@ async function continueAfterReviewFindings(
   return {
     kind: "continue",
     next: "inspect-phase-work",
-    state: { pendingFindingResolutionSession: null, initialPlannedPhases: null },
+    state: {
+      pendingFindingDecisionSession: null,
+      pendingFindingResolutionSession: null,
+      initialPlannedPhases: null,
+    },
     summary,
   };
 }
@@ -235,6 +304,7 @@ function findingFailure(
   const summary =
     error instanceof ChangeFindingResolutionError ||
       error instanceof ImplementationRunVerificationError ||
+      error instanceof RootBranchDeliveryError ||
       error instanceof PhaseWorkError
       ? error.message
       : fallback;
@@ -243,6 +313,12 @@ function findingFailure(
     summary,
     message: `${summary}; исправьте состояние и нажмите «Повторить»`,
   };
+}
+
+/** Текст действия в ledger ограничен по длине. */
+function boundedSummary(text: string): string {
+  const maximum = ORCHESTRATOR_LIMITS.actionText;
+  return text.length <= maximum ? text : `${text.slice(0, maximum - 1)}…`;
 }
 
 function errorCode(error: unknown): string {

@@ -12,15 +12,26 @@ import { isCommitAncestor } from "./git-ancestry.ts";
 import { deliverRootCommit, RootBranchDeliveryError } from "./root-branch-delivery.ts";
 import {
   assertActiveReviewPullRequest,
-  findingCompletionInputSchema,
+  findingAcknowledgeInputSchema,
+  findingCompletionSummarySchema,
+  findingPublishInputSchema,
   inspectReviewFindingPublication,
-  parseFindingCompletionInput,
   publishReviewFindingOutcome,
-  reviewFindingOutcomeSchema,
   type CompletedFindingPullRequest,
-  type ReviewFindingOutcome,
   type ReviewFindingPublicationKind,
 } from "./review-finding-publication.ts";
+import {
+  createFindingDecisionSessions,
+  type FindingDecisionAssessmentRequest,
+  type FindingDecisionRequest,
+} from "./review-finding-decision.ts";
+import { findingDecisionsRepositoryPath } from "./review-finding-decision-git.ts";
+import {
+  FindingDecisionsError,
+  findingHeadingSchema,
+  openDecisionsChanged,
+  selectFindingWork,
+} from "./review-finding-decision-model.ts";
 import { ChangeReviewPublicationError } from "./review-publication-model.ts";
 import {
   reviewFindingIdSchema,
@@ -57,8 +68,11 @@ import {
   ReviewFindingResolutionError,
   findingResolutionBranchSchema,
   parseFindingResolutionBranch,
+  pendingFindingDecisionSessionSchema,
   type ActiveReviewFindingReport,
   type CompletedReviewFindingResolution,
+  type FindingResolutionRecovery,
+  type RecordedFindingDecisions,
   type ReviewFindingPromptInput,
   type ReviewFindingReportLocation,
   type ReviewFindingResolutionBehavior,
@@ -71,19 +85,27 @@ import {
   assertCurrentBranch,
   assertRemoteHead,
   assertReviewTracked,
+  readDecisions,
+  readFindingDecision,
   readHeadCommit,
   readLocalResolutionIfReady,
+  recordBlockedFindingDecision,
   verifyCompletedResolution,
 } from "./review-finding-verification.ts";
 
 export {
   ReviewFindingResolutionError,
+  buildFindingDecisionPrompt,
   buildFindingResolutionPrompt,
   findingResolutionBranchSchema,
+  pendingFindingDecisionSessionSchema,
 } from "./review-finding-resolution-model.ts";
 export type {
   ActiveReviewFindingReport,
   CompletedReviewFindingResolution,
+  FindingDecisionPromptInput,
+  PendingFindingDecisionSession,
+  RecordedFindingDecisions,
   ReviewFindingPromptInput,
   ReviewFindingPromptVariant,
   ReviewFindingReportLocation,
@@ -95,6 +117,8 @@ export type {
 type PaseoApi = PluginHandlerContext["paseo"];
 type PaseoWorkspace = ReturnType<PaseoApi["workspaces"]["ref"]>;
 type PaseoAgent = Awaited<ReturnType<PaseoWorkspace["agents"]["create"]>>;
+
+export type { FindingDecisionAssessmentRequest, FindingDecisionRequest };
 
 export type ReviewFindingResolutionPaseoAgentCreator = (
   options: Parameters<PaseoWorkspace["agents"]["create"]>[0],
@@ -131,7 +155,8 @@ export interface ReviewFindingResolutionService<
   /**
    * Оценивает сохранённую finding-сессию, не меняя репозиторий. Сессия
    * продолжается, пока устранение можно завершить и подтвердить ею. Она
-   * устарела, когда Git HEAD не продолжает её baseline.
+   * устарела, когда Git HEAD не продолжает её baseline или в baseline нет
+   * решения пользователя по её finding.
    */
   assess(request: {
     readonly workspaceDirectory: string;
@@ -142,6 +167,13 @@ export interface ReviewFindingResolutionService<
   run(
     request: ReviewFindingResolutionRequest<Session>,
   ): Promise<CompletedReviewFindingResolution>;
+  /**
+   * Собирает решения пользователя по всем открытым findings в одной
+   * интерактивной сессии и записывает их в файл решений.
+   */
+  decide(request: FindingDecisionRequest): Promise<RecordedFindingDecisions>;
+  /** Оценивает сохранённую сессию решений, не меняя репозиторий. */
+  assessDecisions(request: FindingDecisionAssessmentRequest): Promise<SessionAssessment>;
 }
 
 /**
@@ -191,6 +223,17 @@ export function createReviewFindingResolutionService<
   const agentDrainTimeoutMs =
     options.agentDrainTimeoutMs ?? DEFAULT_AGENT_DRAIN_TIMEOUT_MS;
   const logger = options.logger ?? console;
+  const decisionSessions = createFindingDecisionSessions({
+    command,
+    contextReader,
+    behavior,
+    options,
+    updateNotificationLabel,
+    mcpHost,
+    agentDrainTimeoutMs,
+    logger,
+    ...(options.inspectPath == null ? {} : { inspectPath: options.inspectPath }),
+  });
 
   const inspectSession = async (
     context: Awaited<ReturnType<typeof contextReader.readContext>>,
@@ -207,6 +250,14 @@ export function createReviewFindingResolutionService<
         reason: "Текущий Git HEAD больше не продолжает baseline finding-сессии",
       };
     }
+    try {
+      await readFindingDecision(command, context, session, behavior, signal);
+    } catch (error) {
+      if (error instanceof ReviewFindingResolutionError) {
+        return { kind: "stale", reason: error.message };
+      }
+      throw error;
+    }
     const resolution = await readLocalResolutionIfReady(
       command,
       context,
@@ -217,6 +268,27 @@ export function createReviewFindingResolutionService<
       signal,
     );
     if (resolution) return { kind: "resolved", resolution };
+    // Пользователь мог изменить решения после начала сессии: агент исполнял
+    // бы устаревшее решение, а проверка отклоняла бы любой его коммит.
+    try {
+      const head = await readHeadCommit(command, context.gitRoot, signal);
+      const [baselineRecords, headRecords, report] = await Promise.all([
+        readDecisions(command, context, behavior, session.baselineCommit, signal),
+        readDecisions(command, context, behavior, head, signal),
+        contextReader.readReport(context, signal),
+      ]);
+      if (openDecisionsChanged(baselineRecords, headRecords, session.findingId, report.findings)) {
+        return {
+          kind: "stale",
+          reason: "Решения по открытым findings изменились после начала finding-сессии",
+        };
+      }
+    } catch (error) {
+      if (error instanceof ReviewFindingResolutionError) {
+        return { kind: "stale", reason: error.message };
+      }
+      throw error;
+    }
     return { kind: "unresolved" };
   };
   const scopeCheck = (
@@ -294,25 +366,51 @@ export function createReviewFindingResolutionService<
 
       await assertReviewTracked(command, context, behavior.report.fileName, signal);
       const report = await contextReader.readReport(context, signal);
-      const firstFinding = report.findings[0];
-      if (!firstFinding) {
-        return {
-          kind: "no-findings",
-          reviewPath: context.reviewRepositoryPath,
-          headCommit: head,
-        };
+      // Решение записывается под заголовком finding: непригодный заголовок
+      // обнаруживается до сессии решений, а не после разговора с пользователем.
+      for (const finding of report.findings) {
+        const heading = findingHeadingSchema.safeParse(finding.heading);
+        if (!heading.success) {
+          throw new ReviewFindingResolutionError(
+            `Заголовок finding «${finding.id}» в ${behavior.report.fileName} нельзя связать с решением: ${heading.error.issues[0]?.message ?? "некорректный заголовок"}`,
+          );
+        }
       }
-      return {
-        kind: "finding-required",
-        findingId: firstFinding.id,
-        session: behavior.sessionSchema.parse({
-          changeId: context.changeId,
-          branch: parsedBranch,
-          findingId: firstFinding.id,
-          baselineCommit: head,
-        }),
-      };
+      const records = await readDecisions(command, context, behavior, head, signal);
+      const selection = selectFindingWork(report.findings, records);
+      switch (selection.kind) {
+        case "no-findings":
+          return {
+            kind: "no-findings",
+            reviewPath: context.reviewRepositoryPath,
+            headCommit: head,
+          };
+        case "decisions":
+          return {
+            kind: "decisions-required",
+            session: pendingFindingDecisionSessionSchema.parse({
+              changeId: context.changeId,
+              branch: parsedBranch,
+              findingIds: selection.findings.map(({ id }) => id),
+              baselineCommit: head,
+            }),
+          };
+        case "resolution":
+          return {
+            kind: "finding-required",
+            findingId: selection.record.findingId,
+            session: behavior.sessionSchema.parse({
+              changeId: context.changeId,
+              branch: parsedBranch,
+              findingId: selection.record.findingId,
+              baselineCommit: head,
+            }),
+          };
+      }
     },
+
+    decide: (request) => decisionSessions.decide(request),
+    assessDecisions: (request) => decisionSessions.assess(request),
 
     async run(request) {
       throwIfSignalAborted(request.signal);
@@ -335,6 +433,7 @@ export function createReviewFindingResolutionService<
       // Устаревшую сессию сбрасывает согласование перед шагом; здесь она
       // возможна только при изменении репозитория после него.
       if (recovery.kind === "stale") throw new ReviewFindingResolutionError(recovery.reason);
+      const decision = await readFindingDecision(command, context, session, behavior, request.signal);
       const existingLocalResolution = recovery.kind === "resolved" ? recovery.resolution : null;
       if (existingLocalResolution) {
         await deliverRootCommit(
@@ -345,6 +444,12 @@ export function createReviewFindingResolutionService<
           request.signal,
           command,
         );
+        if (existingLocalResolution.outcome === "blocked") {
+          // Препятствие уже записано оркестратором: агент не нужен.
+          const blocked: CompletedReviewFindingResolution = existingLocalResolution;
+          await request.onFindingResolved(blocked);
+          return blocked;
+        }
       }
       let publicationAlreadyCompleted: boolean;
       try {
@@ -378,12 +483,17 @@ export function createReviewFindingResolutionService<
           "Review pull request содержит результат finding без корректного локального коммита",
         );
       }
+      const promptRecovery: FindingResolutionRecovery = publicationAlreadyCompleted
+        ? { kind: "published" }
+        : existingLocalResolution
+          ? { kind: "committed" }
+          : { kind: "none" };
       const host = await mcpHost.listen();
       let completedResolution: CompletedReviewFindingResolution | null = null;
       const agentSession =
         createManagedAgentSession<CompletedReviewFindingResolution>({
           signal: request.signal,
-        releaseAgent: options.releaseAgent,
+          releaseAgent: options.releaseAgent,
           host,
           updateNotificationLabel,
           agentDrainTimeoutMs,
@@ -391,24 +501,9 @@ export function createReviewFindingResolutionService<
           logger,
         });
 
-      const completedResolutionSchema = z
-        .object({
-          changeId: openSpecChangeIdSchema,
-          findingId: reviewFindingIdSchema,
-          remainingFindingIds: z.array(reviewFindingIdSchema).max(256),
-          commit: commitHashSchema,
-          outcome: reviewFindingOutcomeSchema,
-          pullRequest: z
-            .object({
-              number: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-              url: z.string().url().max(2_048),
-            })
-            .strict(),
-        })
-        .strict();
       const tool = defineMcpTool({
         description: behavior.agent.toolDescription,
-        inputSchema: findingCompletionInputSchema,
+        inputSchema: resolutionCompletionInputSchema,
         outputSchema: completedResolutionSchema,
         execute: (input, toolContext) =>
           agentSession.runExclusive(async () => {
@@ -424,6 +519,31 @@ export function createReviewFindingResolutionService<
               const activeAgent = await agentSession.waitForAgent(signal);
               let localResolution: VerifiedReviewFindingResolution;
               try {
+                if (input.mode === "blocked") {
+                  // Повторный вызов после сбоя публикации не пишет препятствие
+                  // второй раз: оно уже есть в проверенном диапазоне.
+                  const recorded = await readLocalResolutionIfReady(
+                    command,
+                    context,
+                    session,
+                    behavior,
+                    contextReader.readReport,
+                    assertTaskScope,
+                    signal,
+                  );
+                  if (!recorded) {
+                    await recordBlockedFindingDecision(
+                      command,
+                      context,
+                      session,
+                      behavior,
+                      contextReader.readReport,
+                      input.reason,
+                      signal,
+                      options.inspectPath,
+                    );
+                  }
+                }
                 localResolution = await verifyCompletedResolution(
                   command,
                   context,
@@ -436,7 +556,8 @@ export function createReviewFindingResolutionService<
               } catch (error) {
                 if (
                   error instanceof ReviewFindingResolutionError ||
-                  error instanceof RootBranchDeliveryError
+                  error instanceof RootBranchDeliveryError ||
+                  error instanceof FindingDecisionsError
                 ) {
                   throw new McpToolError(error.message);
                 }
@@ -452,36 +573,50 @@ export function createReviewFindingResolutionService<
               }
 
               let verified: CompletedReviewFindingResolution;
-              try {
-                const pullRequest = await publishReviewFindingOutcome(
-                  {
-                    workspaceDirectory: context.gitRoot,
-                    changeId,
-                    branch,
-                    findingId: session.findingId,
-                    baselineCommit: session.baselineCommit,
-                    expectedHead: localResolution.commit,
-                    kind: behavior.publication.kind,
-                    outcome: localResolution.outcome,
-                    input: parseFindingCompletionInput(input),
-                    signal,
-                  },
-                  command,
-                );
-                verified = { ...localResolution, pullRequest };
-              } catch (error) {
-                if (error instanceof ChangeReviewPublicationError) {
-                  throw new McpToolError(error.message);
+              if (localResolution.outcome === "blocked") {
+                if (input.mode !== "blocked") {
+                  throw new McpToolError(
+                    `Решение по finding «${session.findingId}» уже возвращено пользователю; вызовите инструмент с mode "blocked"`,
+                  );
                 }
-                if (signal.aborted) throw error;
-                logger.error(`[OpenSpec] Не удалось опубликовать ${behavior.agent.logLabel}`, {
-                  changeId,
-                  findingId: session.findingId,
-                  code: errorCode(error),
-                });
-                throw new McpToolError(
-                  "Не удалось обновить корневой PR результатом finding",
-                );
+                verified = localResolution;
+              } else {
+                if (input.mode === "blocked") {
+                  throw new McpToolError(
+                    `Finding «${session.findingId}» уже закрыта коммитом ${localResolution.commit}; опубликуйте её итог с mode "publish"`,
+                  );
+                }
+                try {
+                  const pullRequest = await publishReviewFindingOutcome(
+                    {
+                      workspaceDirectory: context.gitRoot,
+                      changeId,
+                      branch,
+                      findingId: session.findingId,
+                      baselineCommit: session.baselineCommit,
+                      expectedHead: localResolution.commit,
+                      kind: behavior.publication.kind,
+                      outcome: localResolution.outcome,
+                      input,
+                      signal,
+                    },
+                    command,
+                  );
+                  verified = { ...localResolution, outcome: localResolution.outcome, pullRequest };
+                } catch (error) {
+                  if (error instanceof ChangeReviewPublicationError) {
+                    throw new McpToolError(error.message);
+                  }
+                  if (signal.aborted) throw error;
+                  logger.error(`[OpenSpec] Не удалось опубликовать ${behavior.agent.logLabel}`, {
+                    changeId,
+                    findingId: session.findingId,
+                    code: errorCode(error),
+                  });
+                  throw new McpToolError(
+                    "Не удалось обновить корневой PR результатом finding",
+                  );
+                }
               }
 
               try {
@@ -547,10 +682,16 @@ export function createReviewFindingResolutionService<
               prompt: behavior.agent.prompt({
                 changeId,
                 findingId: session.findingId,
+                baselineCommit: session.baselineCommit,
+                findingHeading: decision.heading,
+                decision: decision.decision,
                 branch,
                 reviewRepositoryPath: context.reviewRepositoryPath,
-                alreadyCommitted: existingLocalResolution !== null,
-                publicationAlreadyCompleted,
+                decisionsRepositoryPath: findingDecisionsRepositoryPath(
+                  context.changeRepositoryPath,
+                  behavior.publication.kind,
+                ),
+                recovery: promptRecovery,
                 taskScope: request.taskScope,
               }),
               labels: { ntfy: "true" },
@@ -569,26 +710,54 @@ export function createReviewFindingResolutionService<
   };
 }
 
+/** Вход инструмента завершения: итог закрытой finding либо препятствие. */
+const resolutionCompletionInputSchema = z.discriminatedUnion("mode", [
+  findingPublishInputSchema,
+  findingAcknowledgeInputSchema,
+  z.object({ mode: z.literal("blocked"), reason: findingCompletionSummarySchema }).strict(),
+]);
+
+const completedResolutionSchema = z
+  .object({
+    changeId: openSpecChangeIdSchema,
+    findingId: reviewFindingIdSchema,
+    remainingFindingIds: z.array(reviewFindingIdSchema).max(256),
+    commit: commitHashSchema,
+    outcome: z.enum(["resolved", "accepted-risk", "blocked"]),
+    pullRequest: z
+      .object({
+        number: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+        url: z.string().url().max(2_048),
+      })
+      .strict()
+      .nullable(),
+    reason: z.string().max(2_000).nullable(),
+  })
+  .strict();
+
 function completionToolResult(
   resolution: CompletedReviewFindingResolution,
   completionLabel: string,
 ): {
   readonly text: string;
-  readonly data: {
-    readonly changeId: string;
-    readonly findingId: ReviewFindingId;
-    readonly remainingFindingIds: ReviewFindingId[];
-    readonly commit: string;
-    readonly outcome: ReviewFindingOutcome;
-    readonly pullRequest: CompletedFindingPullRequest;
-  };
+  readonly data: z.input<typeof completedResolutionSchema>;
 } {
+  const base = {
+    changeId: resolution.changeId,
+    findingId: resolution.findingId,
+    remainingFindingIds: [...resolution.remainingFindingIds],
+    commit: resolution.commit,
+    outcome: resolution.outcome,
+  };
+  if (resolution.outcome === "blocked") {
+    return {
+      text: `${completionLabel} «${resolution.findingId}» возвращена пользователю для нового решения`,
+      data: { ...base, pullRequest: null, reason: resolution.reason },
+    };
+  }
   return {
     text: `${completionLabel} «${resolution.findingId}» обработана и опубликована в PR #${resolution.pullRequest.number}`,
-    data: {
-      ...resolution,
-      remainingFindingIds: [...resolution.remainingFindingIds],
-    },
+    data: { ...base, pullRequest: resolution.pullRequest, reason: null },
   };
 }
 

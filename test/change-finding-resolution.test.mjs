@@ -16,6 +16,7 @@ import {
   reviewPullRequestTitle,
 } from "../server/change-review-publication.ts";
 import { publishReviewFindingOutcome } from "../server/review-finding-publication.ts";
+import { renderFindingDecisions } from "../server/review-finding-decision-model.ts";
 
 const execFileAsync = promisify(execFile);
 const changeId = "resolve-review-findings";
@@ -92,8 +93,35 @@ async function remoteHead(fixture) {
 
 const initialScope = { kind: "initial-planning", plannedPhases: [1] };
 
+function findingHeading(id) {
+  return `${id} · High — Проблема ${id}`;
+}
+
+function decision(kind) {
+  return kind === "accept-risk"
+    ? {
+        kind,
+        rationale: "Отдельный путь для legacy удваивает стоимость поддержки.",
+        scope: "Только legacy tenants до конца миграции.",
+        reopenWhen: "Срок миграции будет продлён.",
+      }
+    : { kind: "remediate", instruction: "Зафиксировать проверяемый контракт в спецификации." };
+}
+
+// Файл решений с решением по каждой finding; kinds задаёт вид решения.
+function decisionsSource(findingIds, kinds = {}) {
+  return renderFindingDecisions(
+    "review",
+    findingIds.map((id) => ({
+      findingId: id,
+      heading: findingHeading(id),
+      decision: typeof kinds[id] === "object" ? kinds[id] : decision(kinds[id]),
+    })),
+  );
+}
+
 function finding(id) {
-  return `### ${id} · High — Проблема ${id}
+  return `### ${findingHeading(id)}
 
 - **Evidence:** Артефакт не определяет обязательное поведение.
 - **Impact:** Реализация может выбрать несовместимое поведение.
@@ -157,7 +185,10 @@ function firstText(result) {
   return content.text;
 }
 
-async function createRepository(context, findingIds = ["F1", "F3"]) {
+async function createRepository(context, findingIds = ["F1", "F3"], {
+  decided = findingIds,
+  kinds = {},
+} = {}) {
   const root = await mkdtemp(join(tmpdir(), "openspec-finding-resolution-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const workspace = join(root, "workspace");
@@ -171,6 +202,8 @@ async function createRepository(context, findingIds = ["F1", "F3"]) {
   const reviewPath = join(changeRoot, "review.md");
   await writeFile(join(changeRoot, "proposal.md"), "# Предложение\n");
   await writeFile(reviewPath, reviewReport(findingIds));
+  const decisionsPath = join(changeRoot, "review-decisions.md");
+  if (decided.length > 0) await writeFile(decisionsPath, decisionsSource(decided, kinds));
   await execFileAsync("git", ["add", "openspec"], { cwd: workspace });
   await execFileAsync("git", ["commit", "-m", "docs(openspec): add change review"], { cwd: workspace });
   const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace });
@@ -183,6 +216,8 @@ async function createRepository(context, findingIds = ["F1", "F3"]) {
     remote,
     changeRoot,
     reviewPath,
+    decisionsPath,
+    decisionKinds: kinds,
     baselineCommit,
     pullRequest: {
       number: 43,
@@ -270,6 +305,11 @@ function createCommand(fixture) {
   return { command, calls };
 }
 
+// Сессия исполнения удаляет из файла решений раздел закрытой finding.
+async function writeRemainingDecisions(fixture, findingIds) {
+  await writeFile(fixture.decisionsPath, decisionsSource(findingIds, fixture.decisionKinds));
+}
+
 async function commitResolution(fixture, {
   findingIds = ["F3"],
   acceptedRisks = [],
@@ -278,6 +318,7 @@ async function commitResolution(fixture, {
   push = false,
 } = {}) {
   await writeFile(fixture.reviewPath, reviewReport(findingIds, acceptedRisks));
+  await writeRemainingDecisions(fixture, findingIds);
   await writeFile(join(fixture.changeRoot, "proposal.md"), "# Предложение\n\nУточнён контракт.\n");
   for (const path of extraPaths) {
     const filePath = join(fixture.workspace, path);
@@ -370,8 +411,9 @@ test("High ждёт scoped MCP, а оркестратор публикует п�
   assert.deepEqual(createdOptions.labels, { ntfy: "true" });
   assert.equal("cwd" in createdOptions, false);
   assert.match(createdOptions.prompt, /openspec-review-change/);
-  assert.match(createdOptions.prompt, /one explicit decision/);
-  assert.match(createdOptions.prompt, /without asking for another approval/);
+  assert.match(createdOptions.prompt, /Do not ask the user for a decision or an approval/);
+  assert.match(createdOptions.prompt, /"decision":\{"kind":"remediate"/);
+  assert.match(createdOptions.prompt, /without asking for approval/);
   assert.match(createdOptions.prompt, /never reopen a completed task/);
   assert.equal(
     calls.some(({ executable, arguments: arguments_ }) =>
@@ -392,7 +434,7 @@ test("High ждёт scoped MCP, а оркестратор публикует п�
 
   let result = await client.callTool({ name: "complete_review_finding", arguments: publishInput });
   assert.equal(result.isError, true);
-  assert.match(firstText(result), /F1.*всё ещё присутствует/);
+  assert.match(firstText(result), /F1.*требуется хотя бы один новый Git-коммит/);
 
   const untrackedPath = join(fixture.workspace, "untracked.txt");
   await writeFile(untrackedPath, "незакоммиченный файл\n");
@@ -406,6 +448,16 @@ test("High ждёт scoped MCP, а оркестратор публикует п�
   assert.equal(result.isError, true);
   assert.match(firstText(result), /незакоммиченные или неотслеживаемые/);
 
+  // Решение закрытой finding должно уйти из файла решений в том же диапазоне.
+  await execFileAsync("git", ["add", "openspec"], { cwd: fixture.workspace });
+  await execFileAsync("git", ["commit", "-m", findingSubject], {
+    cwd: fixture.workspace,
+  });
+  result = await client.callTool({ name: "complete_review_finding", arguments: publishInput });
+  assert.equal(result.isError, true);
+  assert.match(firstText(result), /Удалите из .*review-decisions\.md раздел finding «F1» и разделы findings/u);
+
+  await writeRemainingDecisions(fixture, ["F3"]);
   await execFileAsync("git", ["add", "openspec"], { cwd: fixture.workspace });
   await execFileAsync("git", ["commit", "-m", findingSubject], {
     cwd: fixture.workspace,
@@ -429,7 +481,7 @@ test("High ждёт scoped MCP, а оркестратор публикует п�
 });
 
 test("accepted risk удаляет finding из активного списка", async (context) => {
-  const fixture = await createRepository(context, ["F1"]);
+  const fixture = await createRepository(context, ["F1"], { kinds: { F1: "accept-risk" } });
   const { command } = createCommand(fixture);
   let createdOptions;
   let runTool;
@@ -471,7 +523,8 @@ test("accepted risk удаляет finding из активного списка"
     onAgentCreated() {},
     async onFindingResolved() {},
   });
-  assert.match(createdOptions.prompt, /accepting residual risk/);
+  assert.match(createdOptions.prompt, /accept only finding `F1` as residual risk/);
+  assert.match(createdOptions.prompt, /acceptance authority/);
   assert.equal((await runTool).isError, undefined);
   assert.deepEqual(result.remainingFindingIds, []);
   assert.equal(result.outcome, "accepted-risk");
@@ -655,7 +708,7 @@ test("ошибка checkpoint восстанавливает ntfy и повто�
   });
   await created;
   assert.match(options.prompt, /This is a recovery session/);
-  assert.match(options.prompt, /do not request the user's decision again/);
+  assert.match(options.prompt, /Do not invoke the skill and do not create or amend a commit/);
   const [{ url }] = Object.values(options.config.mcpServers);
   const client = await connectClient(url);
   const first = await client.callTool({
@@ -758,30 +811,46 @@ test("полный restart подтверждает уже проверенну�
   );
 });
 
-test("prompt требует одно решение, сохраняет задачи и оставляет push оркестратору", () => {
-  const prompt = changeFindingResolutionPrompt({
+function promptInput(overrides = {}) {
+  return {
     changeId,
     findingId: "F42",
+    baselineCommit: "c".repeat(40),
+    findingHeading: findingHeading("F42"),
+    decision: decision("remediate"),
     branch,
     reviewRepositoryPath: `openspec/changes/${changeId}/review.md`,
-    alreadyCommitted: false,
-    publicationAlreadyCompleted: false,
+    decisionsRepositoryPath: `openspec/changes/${changeId}/review-decisions.md`,
+    recovery: { kind: "none" },
     taskScope: initialScope,
-  });
+    ...overrides,
+  };
+}
+
+test("prompt исполняет записанное решение без пользователя, сохраняет задачи и оставляет push оркестратору", () => {
+  const prompt = changeFindingResolutionPrompt(promptInput());
   assert.match(prompt, /F42/);
+  assert.match(prompt, /You carry out the user's recorded decision on one finding/u);
+  assert.match(prompt, /only when a genuine blocker stops you/u);
+  assert.match(prompt, /"decision":\{"kind":"remediate","instruction":"Зафиксировать/u);
+  assert.match(prompt, /"decisionsPath":"openspec\/changes\/resolve-review-findings\/review-decisions\.md"/u);
+  assert.match(prompt, /Do not ask the user for a decision or an approval/u);
+  assert.match(prompt, /address only finding `F42` as the recorded decision states/u);
+  assert.match(prompt, /Never accept residual risk for a finding the user decided to remediate/u);
+  assert.match(prompt, /delete this finding's whole section/u);
   assert.match(prompt, /changes no implementation code and does not complete a plan\.md phase: never run tests, builds, or project checks/u);
   assert.match(prompt, /related repository documentation outside the selected change root/u);
   assert.match(prompt, /ADRs, README files, domain documents, and guides/u);
-  assert.match(prompt, /only as needed for the agreed resolution of this finding/u);
+  assert.match(prompt, /only as needed for the recorded decision on this finding/u);
   assert.match(prompt, /All changed files must stay inside the Git root/u);
   assert.match(prompt, /never edit implementation code, tests, or configuration and never invoke Apply/u);
   assert.match(prompt, /Record requirement changes in the selected change's delta specs; never edit `openspec\/specs` directly/u);
   assert.match(prompt, /synchronizes the main specs when archiving the change/u);
   assert.match(prompt, /Validate the changed OpenSpec artifacts, related documentation, and report state/u);
-  assert.match(prompt, /commit only the changed artifacts of the selected change and the related repository documentation/u);
+  assert.match(prompt, /commit only the changed artifacts of the selected change, the decisions file, and the related repository documentation/u);
   assert.doesNotMatch(prompt, /Change only planning artifacts inside the selected change root:|commit only files inside the change root/u);
-  assert.match(prompt, /one explicit decision/);
-  assert.match(prompt, /without asking for another approval/);
+  assert.doesNotMatch(prompt, /one explicit decision|Get one explicit decision/u);
+  assert.match(prompt, /without asking for approval/);
   assert.match(prompt, /never reopen a completed task/);
   // При планировании новые задачи встают в порядке выполнения, а не в конец.
   assert.match(prompt, /add new unfinished tasks/);
@@ -791,36 +860,40 @@ test("prompt требует одно решение, сохраняет зада
   assert.match(prompt, /Add new tasks only to phases that already have tasks: Phase 1\./u);
   assert.match(prompt, /The orchestrator plans every phase that has no tasks/u);
   assert.match(prompt, /"plannedPhases":\[1\]/u);
-  assert.doesNotMatch(prompt, /second explicit permission|third permission/);
   assert.match(prompt, /Do not push/u);
   assert.match(prompt, /complete_review_finding/);
   assert.match(prompt, /"mode":"publish"/);
+  assert.match(prompt, /"mode":"blocked","reason"/);
+  assert.match(prompt, /without committing anything/);
+  assert.match(prompt, /discard your own uncommitted edits with `git restore`/u);
+  assert.match(prompt, /the skill needs a choice the decision does not settle/u);
+  assert.match(prompt, /user's confirmation of every planning write/u);
   assert.doesNotMatch(prompt, /gh pr/);
 
-  const recoveredPrompt = changeFindingResolutionPrompt({
-    changeId,
-    findingId: "F42",
-    branch,
-    reviewRepositoryPath: `openspec/changes/${changeId}/review.md`,
-    alreadyCommitted: true,
-    publicationAlreadyCompleted: true,
-    taskScope: initialScope,
-  });
+  const riskPrompt = changeFindingResolutionPrompt(promptInput({ decision: decision("accept-risk") }));
+  assert.match(riskPrompt, /accept only finding `F42` as residual risk/u);
+  assert.match(
+    riskPrompt,
+    /citing the decision entry in `decisionsPath` at commit `c{40}` as the acceptance authority/u,
+  );
+  assert.match(riskPrompt, /"decisionCommit":"c{40}"/u);
+
+  const recoveredPrompt = changeFindingResolutionPrompt(promptInput({ recovery: { kind: "published" } }));
   assert.match(recoveredPrompt, /"mode":"acknowledge-existing"/);
-  assert.match(recoveredPrompt, /do not invoke the skill, request the user's decision, commit, or push/);
+  assert.match(recoveredPrompt, /Change nothing: do not invoke the skill, commit, or push/);
   assert.doesNotMatch(recoveredPrompt, /git push --set-upstream/);
   assert.doesNotMatch(recoveredPrompt, /Invoke the `openspec-review-change` skill/);
   assert.doesNotMatch(recoveredPrompt, /Add new tasks only/u);
+  assert.doesNotMatch(recoveredPrompt, /"mode":"blocked"/u);
 
-  const planningPrompt = changeFindingResolutionPrompt({
-    changeId,
-    findingId: "F42",
-    branch,
-    reviewRepositoryPath: `openspec/changes/${changeId}/review.md`,
-    alreadyCommitted: false,
-    publicationAlreadyCompleted: false,
+  const committedPrompt = changeFindingResolutionPrompt(promptInput({ recovery: { kind: "committed" } }));
+  assert.match(committedPrompt, /already absent from a valid committed resolution/u);
+  assert.match(committedPrompt, /"mode":"publish"/u);
+  assert.doesNotMatch(committedPrompt, /"mode":"blocked"/u);
+
+  const planningPrompt = changeFindingResolutionPrompt(promptInput({
     taskScope: { kind: "phase-planning", phaseNumber: 2 },
-  });
+  }));
   assert.match(planningPrompt, /Add new tasks only to Phase 2\./u);
   assert.match(planningPrompt, /Never describe an execution order that differs from file order/u);
   assert.match(planningPrompt, /"phaseNumber":2/u);
@@ -869,4 +942,564 @@ test("оценка finding-сессии различает неначатую, �
     kind: "stale",
     reason: "Текущий Git HEAD больше не продолжает baseline finding-сессии",
   });
+});
+
+function idleAgent(id, waitForFinish = async () => {}) {
+  return {
+    id,
+    async refresh() { return { agent: { status: "idle", archivedAt: null } }; },
+    async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
+    waitForFinish,
+  };
+}
+
+async function headCommit(fixture) {
+  const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: fixture.workspace });
+  return String(stdout).trim();
+}
+
+const remediateF1 = {
+  findingId: "F1",
+  kind: "remediate",
+  instruction: "Описать отмену экспорта в спецификации и добавить задачу на проверку отмены.",
+};
+const acceptF3 = {
+  findingId: "F3",
+  kind: "accept-risk",
+  rationale: "Legacy-топология выводится из эксплуатации до релиза.",
+  scope: "Только legacy tenants до конца миграции.",
+  reopenWhen: "Миграция legacy tenants будет отложена.",
+};
+
+test("plan сначала исполняет принятые решения и собирает решения, только когда их не осталось", async (context) => {
+  const fixture = await createRepository(context, ["F1", "F3", "F5"], { decided: ["F3"] });
+  const { command } = createCommand(fixture);
+  const service = createChangeFindingResolutionService({ command, phaseWork: stubPhaseWork(), async createAgent() {} });
+
+  // F1 идёт в отчёте раньше, но решение есть только у F3.
+  const decided = await service.plan(fixture.workspace, changeId, branch);
+  assert.equal(decided.kind, "finding-required");
+  assert.equal(decided.findingId, "F3");
+
+  // Решение привязано к заголовку: повторный аудит, переформулировавший F3,
+  // лишает его силы, и нужна сессия решений по всем открытым findings.
+  const reworded = reviewReport(["F1", "F3", "F5"]).replace("Проблема F3", "Другая проблема F3");
+  await writeFile(fixture.reviewPath, reworded);
+  await execFileAsync("git", ["commit", "-am", "docs(openspec): reword finding"], { cwd: fixture.workspace });
+  await execFileAsync("git", ["push", "origin", branch], { cwd: fixture.workspace });
+  const undecided = await service.plan(fixture.workspace, changeId, branch);
+  assert.equal(undecided.kind, "decisions-required");
+  assert.deepEqual(undecided.session, {
+    changeId,
+    branch,
+    findingIds: ["F1", "F3", "F5"],
+    baselineCommit: await headCommit(fixture),
+  });
+});
+
+test("plan останавливается на повреждённом файле решений с объяснением", async (context) => {
+  const fixture = await createRepository(context, ["F1"]);
+  const { command } = createCommand(fixture);
+  const service = createChangeFindingResolutionService({ command, phaseWork: stubPhaseWork(), async createAgent() {} });
+  await writeFile(
+    fixture.decisionsPath,
+    decisionsSource(["F1"]).replace("- **Решение:** Устранить", "- **Решение:** Подумать"),
+  );
+  await execFileAsync("git", ["commit", "-am", "docs(openspec): edit decisions"], { cwd: fixture.workspace });
+  await execFileAsync("git", ["push", "origin", branch], { cwd: fixture.workspace });
+  await assert.rejects(
+    service.plan(fixture.workspace, changeId, branch),
+    /review-decisions\.md: в решении F1 поле «Решение» должно быть одним из/u,
+  );
+});
+
+test("сессия решений собирает решения по всем findings, а оркестратор коммитит и публикует их", async (context) => {
+  const fixture = await createRepository(context, ["F1", "F3"], { decided: [] });
+  const { command } = createCommand(fixture);
+  const labels = [];
+  const recordedCalls = [];
+  let options;
+  let toolResults;
+  const service = createChangeFindingResolutionService({
+    command,
+    phaseWork: stubPhaseWork(),
+    async createAgent(value) {
+      options = value;
+      toolResults = (async () => {
+        const [{ url }] = Object.values(value.config.mcpServers);
+        const client = await connectClient(url);
+        try {
+          const call = (decisions) =>
+            client.callTool({ name: "submit_review_finding_decisions", arguments: { decisions } });
+          const missing = await call([remediateF1]);
+          const foreign = await call([remediateF1, acceptF3, { ...remediateF1, findingId: "F9" }]);
+          const english = await call([{ ...remediateF1, instruction: "Fix it" }, acceptF3]);
+          await writeFile(join(fixture.changeRoot, "proposal.md"), "# Предложение\n\nПравка агента.\n");
+          const dirty = await call([remediateF1, acceptF3]);
+          await execFileAsync("git", ["checkout", "--", "."], { cwd: fixture.workspace });
+          const accepted = await call([remediateF1, acceptF3]);
+          const repeated = await call([remediateF1, acceptF3]);
+          return { missing, foreign, english, dirty, accepted, repeated };
+        } finally {
+          await client.close();
+        }
+      })();
+      return idleAgent("agent-decisions", async () => { await toolResults; });
+    },
+    updateNotificationLabel: async (agentId, enabled) => labels.push([agentId, enabled]),
+    logger: { error() {}, warn() {} },
+  });
+
+  const plan = await service.plan(fixture.workspace, changeId, branch);
+  assert.equal(plan.kind, "decisions-required");
+  assert.deepEqual(await service.assessDecisions({
+    workspaceDirectory: fixture.workspace,
+    session: plan.session,
+    signal: new AbortController().signal,
+  }), { kind: "resumable" });
+
+  const recorded = await service.decide({
+    workspaceDirectory: fixture.workspace,
+    changeId,
+    branch,
+    profile: highProfile(),
+    session: plan.session,
+    taskScope: initialScope,
+    signal: new AbortController().signal,
+    onAgentCreated() {},
+    async onDecisionsRecorded(value) { recordedCalls.push(value); },
+  });
+  const results = await toolResults;
+
+  assert.match(options.title, /Решения по findings review/u);
+  assert.deepEqual(options.labels, { ntfy: "true" });
+  assert.match(options.prompt, /You collect the user's decisions on all open findings/u);
+  assert.match(options.prompt, /Do all of this without asking the user anything/u);
+  assert.match(options.prompt, /in one message/u);
+  assert.match(options.prompt, /A recommendation is not a decision/u);
+  assert.match(options.prompt, /Change no file and create no commit/u);
+  assert.match(options.prompt, /"findingIds":\["F1","F3"\]/u);
+  assert.match(options.prompt, /Add new tasks only to phases that already have tasks: Phase 1\./u);
+  assert.match(options.prompt, /submit_review_finding_decisions/u);
+  assert.doesNotMatch(options.prompt, /blockers`, an earlier session/u);
+
+  assert.equal(results.missing.isError, true);
+  assert.match(firstText(results.missing), /Нет решения пользователя по findings: F3/u);
+  assert.equal(results.foreign.isError, true);
+  assert.match(firstText(results.foreign), /вне этой сессии: F9/u);
+  assert.equal(results.english.isError, true);
+  assert.equal(results.dirty.isError, true);
+  assert.match(firstText(results.dirty), /Сессия решений не должна менять файлы/u);
+  assert.equal(results.accepted.isError, undefined);
+  assert.equal(results.repeated.isError, undefined);
+
+  const head = await headCommit(fixture);
+  assert.equal(recorded.commit, head);
+  assert.equal(await remoteHead(fixture), head);
+  assert.deepEqual(recordedCalls, [recorded]);
+  assert.deepEqual(recorded.decisions.map(({ findingId, decision: { kind } }) => [findingId, kind]), [
+    ["F1", "remediate"],
+    ["F3", "accept-risk"],
+  ]);
+  assert.deepEqual(labels, [["agent-decisions", false]]);
+  const { stdout: subject } = await execFileAsync("git", ["log", "-1", "--format=%s"], { cwd: fixture.workspace });
+  assert.equal(String(subject).trim(), "docs(openspec): record review finding decisions");
+  const written = await readFile(fixture.decisionsPath, "utf8");
+  assert.match(written, /^# Решения по findings OpenSpec review\n/u);
+  assert.match(written, /## F1 · High — Проблема F1\n\n- \*\*Решение:\*\* Устранить\n- \*\*Как устранить:\*\* Описать отмену/u);
+  assert.match(written, /## F3 · High — Проблема F3\n\n- \*\*Решение:\*\* Принять остаточный риск\n- \*\*Обоснование:\*\* Legacy/u);
+
+  // Записанные решения сразу исполняются: первой идёт F1.
+  const next = await service.plan(fixture.workspace, changeId, branch);
+  assert.equal(next.kind, "finding-required");
+  assert.equal(next.findingId, "F1");
+});
+
+test("сессия решений восстанавливается без агента и устаревает при посторонних коммитах", async (context) => {
+  const fixture = await createRepository(context, ["F1"], { decided: [] });
+  const { command } = createCommand(fixture);
+  let agents = 0;
+  const service = createChangeFindingResolutionService({
+    command,
+    phaseWork: stubPhaseWork(),
+    async createAgent() {
+      agents += 1;
+      return idleAgent("agent-unexpected");
+    },
+    logger: { error() {}, warn() {} },
+  });
+  const signal = new AbortController().signal;
+  const plan = await service.plan(fixture.workspace, changeId, branch);
+  assert.equal(plan.kind, "decisions-required");
+
+  // Коммит решений создан, но процесс упал до публикации и checkpoint.
+  await writeFile(fixture.decisionsPath, decisionsSource(["F1"]));
+  await execFileAsync("git", ["add", "openspec"], { cwd: fixture.workspace });
+  await execFileAsync("git", ["commit", "-m", "docs(openspec): record review finding decisions"], { cwd: fixture.workspace });
+  const assess = () =>
+    service.assessDecisions({ workspaceDirectory: fixture.workspace, session: plan.session, signal });
+  assert.deepEqual(await assess(), { kind: "resumable" });
+
+  const recordedCalls = [];
+  const recorded = await service.decide({
+    workspaceDirectory: fixture.workspace,
+    changeId,
+    branch,
+    profile: highProfile(),
+    session: plan.session,
+    taskScope: initialScope,
+    signal,
+    onAgentCreated() {},
+    async onDecisionsRecorded(value) { recordedCalls.push(value); },
+  });
+  assert.equal(agents, 0);
+  assert.equal(await remoteHead(fixture), recorded.commit);
+  assert.deepEqual(recordedCalls, [recorded]);
+
+  // Посторонняя правка после baseline делает сессию решений устаревшей.
+  await writeFile(join(fixture.changeRoot, "proposal.md"), "# Предложение\n\nПравка пользователя.\n");
+  await execFileAsync("git", ["commit", "-am", "docs(openspec): manual edit"], { cwd: fixture.workspace });
+  const stale = await assess();
+  assert.equal(stale.kind, "stale");
+  assert.match(stale.reason, /изменены файлы, кроме .*review-decisions\.md/u);
+});
+
+test("препятствие возвращает finding к решению пользователя через коммит оркестратора", async (context) => {
+  const fixture = await createRepository(context, ["F1", "F3"], { decided: ["F1"] });
+  const { command } = createCommand(fixture);
+  const blockedReason = "Решение требует удалить публичный API, на который опираются интеграции.";
+  let toolResults;
+  const service = createChangeFindingResolutionService({
+    command,
+    phaseWork: stubPhaseWork(),
+    async createAgent(value) {
+      toolResults = (async () => {
+        const [{ url }] = Object.values(value.config.mcpServers);
+        const client = await connectClient(url);
+        try {
+          const call = (argumentsValue) =>
+            client.callTool({ name: "complete_review_finding", arguments: argumentsValue });
+          const publishWithoutFix = await call(publishInput);
+          const blocked = await call({ mode: "blocked", reason: blockedReason });
+          const publishAfterBlock = await call(publishInput);
+          return { publishWithoutFix, blocked, publishAfterBlock };
+        } finally {
+          await client.close();
+        }
+      })();
+      return idleAgent("agent-blocked", async () => { await toolResults; });
+    },
+    updateNotificationLabel: async () => {},
+    logger: { error() {}, warn() {} },
+  });
+  const plan = await service.plan(fixture.workspace, changeId, branch);
+  assert.equal(plan.findingId, "F1");
+  const bodyBefore = fixture.pullRequest.body;
+  const completed = [];
+  const result = await service.run({
+    workspaceDirectory: fixture.workspace,
+    changeId,
+    branch,
+    profile: highProfile(),
+    session: plan.session,
+    taskScope: initialScope,
+    signal: new AbortController().signal,
+    onAgentCreated() {},
+    async onFindingResolved(value) { completed.push(value); },
+  });
+  const results = await toolResults;
+  assert.equal(results.publishWithoutFix.isError, true);
+  assert.equal(results.blocked.isError, undefined);
+  // После успешного завершения повторный вызов возвращает тот же итог.
+  assert.equal(results.publishAfterBlock.isError, undefined);
+
+  assert.equal(result.outcome, "blocked");
+  assert.equal(result.reason, blockedReason);
+  assert.deepEqual(result.remainingFindingIds, ["F1", "F3"]);
+  assert.deepEqual(completed, [result]);
+  assert.equal(await remoteHead(fixture), result.commit);
+  assert.equal(fixture.pullRequest.body, bodyBefore);
+  const written = await readFile(fixture.decisionsPath, "utf8");
+  assert.match(written, /## F1 · High — Проблема F1\n\n- \*\*Решение:\*\* Нужно новое решение\n- \*\*Препятствие:\*\* Решение требует/u);
+  const { stdout: subject } = await execFileAsync("git", ["log", "-1", "--format=%s"], { cwd: fixture.workspace });
+  assert.equal(String(subject).trim(), "docs(openspec): return review finding F1 for decision");
+
+  // Восстановление после записи препятствия не запускает агента повторно.
+  let agents = 0;
+  const recovery = createChangeFindingResolutionService({
+    command,
+    phaseWork: stubPhaseWork(),
+    async createAgent() {
+      agents += 1;
+      return idleAgent("agent-unexpected");
+    },
+  });
+  const recovered = await recovery.run({
+    workspaceDirectory: fixture.workspace,
+    changeId,
+    branch,
+    profile: highProfile(),
+    session: plan.session,
+    taskScope: initialScope,
+    signal: new AbortController().signal,
+    onAgentCreated() {},
+    async onFindingResolved() {},
+  });
+  assert.equal(agents, 0);
+  assert.equal(recovered.outcome, "blocked");
+  assert.equal(recovered.reason, blockedReason);
+
+  // Других решений нет: следующий раунд решений получает препятствие F1.
+  const next = await service.plan(fixture.workspace, changeId, branch);
+  assert.equal(next.kind, "decisions-required");
+  assert.deepEqual(next.session.findingIds, ["F1", "F3"]);
+  let decisionPrompt;
+  const decisionService = createChangeFindingResolutionService({
+    command,
+    phaseWork: stubPhaseWork(),
+    async createAgent(value) {
+      decisionPrompt = value.prompt;
+      throw new Error("агент недоступен");
+    },
+    logger: { error() {}, warn() {} },
+  });
+  await assert.rejects(decisionService.decide({
+    workspaceDirectory: fixture.workspace,
+    changeId,
+    branch,
+    profile: highProfile(),
+    session: next.session,
+    taskScope: initialScope,
+    signal: new AbortController().signal,
+    onAgentCreated() {},
+    async onDecisionsRecorded() {},
+  }));
+  assert.match(decisionPrompt, /"blockers":\{"F1":"Решение требует удалить публичный API/u);
+  assert.match(decisionPrompt, /an earlier session could not carry out the previous decision/u);
+});
+
+test("completion tool отклоняет чужие правки решений и непринятый риск", async (context) => {
+  for (const scenario of ["foreign-decision", "unrequested-risk"]) {
+    const fixture = await createRepository(context, ["F1", "F3"]);
+    const { command } = createCommand(fixture);
+    const controller = new AbortController();
+    let toolResult;
+    const service = createChangeFindingResolutionService({
+      command,
+      phaseWork: stubPhaseWork(),
+      async createAgent(value) {
+        toolResult = (async () => {
+          if (scenario === "foreign-decision") {
+            await writeFile(fixture.reviewPath, reviewReport(["F3"]));
+            await writeFile(fixture.decisionsPath, decisionsSource(["F3"], { F3: "accept-risk" }));
+          } else {
+            await writeFile(fixture.reviewPath, reviewReport(["F3"], [acceptedRisk("AR1", "F1")]));
+            await writeFile(fixture.decisionsPath, decisionsSource(["F3"]));
+          }
+          await execFileAsync("git", ["add", "openspec"], { cwd: fixture.workspace });
+          await execFileAsync("git", ["commit", "-m", findingSubject], { cwd: fixture.workspace });
+          const [{ url }] = Object.values(value.config.mcpServers);
+          const client = await connectClient(url);
+          try {
+            return await client.callTool({ name: "complete_review_finding", arguments: publishInput });
+          } finally {
+            await client.close();
+            controller.abort();
+          }
+        })();
+        return idleAgent(`agent-${scenario}`);
+      },
+      updateNotificationLabel: async () => {},
+      logger: { error() {}, warn() {} },
+    });
+    const plan = await service.plan(fixture.workspace, changeId, branch);
+    const running = service.run({
+      workspaceDirectory: fixture.workspace,
+      changeId,
+      branch,
+      profile: highProfile(),
+      session: plan.session,
+      taskScope: initialScope,
+      signal: controller.signal,
+      onAgentCreated() {},
+      async onFindingResolved() {},
+    });
+    await assert.rejects(running, /Операция отменена/);
+    const result = await toolResult;
+    assert.equal(result.isError, true);
+    assert.match(
+      firstText(result),
+      scenario === "foreign-decision"
+        ? /Удалите из .*review-decisions\.md раздел finding «F1» и разделы findings, которых больше нет в review\.md; решения по открытым findings не меняйте/u
+        : /Пользователь решил устранить finding «F1», а не принять её риск/u,
+    );
+    assert.equal(await remoteHead(fixture), fixture.baselineCommit);
+  }
+});
+
+test("finding-сессия без записанного решения устаревает", async (context) => {
+  const fixture = await createRepository(context, ["F1"], { decided: [] });
+  const { command } = createCommand(fixture);
+  const service = createChangeFindingResolutionService({ command, phaseWork: stubPhaseWork(), async createAgent() {} });
+  const assessment = await service.assess({
+    workspaceDirectory: fixture.workspace,
+    session: { changeId, branch, findingId: "F1", baselineCommit: fixture.baselineCommit },
+    taskScope: initialScope,
+    signal: new AbortController().signal,
+  });
+  assert.deepEqual(assessment, {
+    kind: "stale",
+    reason: "Для finding «F1» не записано решение пользователя",
+  });
+});
+
+test("исправление может попутно закрыть другую finding и удалить её решение", async (context) => {
+  const fixture = await createRepository(context, ["F1", "F3", "F5"]);
+  const { command } = createCommand(fixture);
+  let toolResult;
+  const service = createChangeFindingResolutionService({
+    command,
+    phaseWork: stubPhaseWork(),
+    async createAgent(value) {
+      toolResult = (async () => {
+        // Исправление F1 устранило и F3; решение по F5 остаётся.
+        await commitResolution(fixture, { findingIds: ["F5"] });
+        // Решение по закрытой попутно F3 нельзя оставить в файле.
+        await writeRemainingDecisions(fixture, ["F3", "F5"]);
+        await execFileAsync("git", ["commit", "-am", findingSubject], { cwd: fixture.workspace });
+        const [{ url }] = Object.values(value.config.mcpServers);
+        const client = await connectClient(url);
+        try {
+          const kept = await client.callTool({ name: "complete_review_finding", arguments: publishInput });
+          await writeRemainingDecisions(fixture, ["F5"]);
+          await execFileAsync("git", ["commit", "-am", findingSubject], { cwd: fixture.workspace });
+          const accepted = await client.callTool({ name: "complete_review_finding", arguments: publishInput });
+          return { kept, accepted };
+        } finally {
+          await client.close();
+        }
+      })();
+      return idleAgent("agent-co-resolved", async () => { await toolResult; });
+    },
+    updateNotificationLabel: async () => {},
+    logger: { error() {}, warn() {} },
+  });
+  const plan = await service.plan(fixture.workspace, changeId, branch);
+  const result = await service.run({
+    workspaceDirectory: fixture.workspace,
+    changeId,
+    branch,
+    profile: highProfile(),
+    session: plan.session,
+    taskScope: initialScope,
+    signal: new AbortController().signal,
+    onAgentCreated() {},
+    async onFindingResolved() {},
+  });
+  const { kept, accepted } = await toolResult;
+  assert.equal(kept.isError, true);
+  assert.match(firstText(kept), /разделы findings, которых больше нет в review\.md/u);
+  assert.equal(accepted.isError, undefined);
+  assert.equal(result.outcome, "resolved");
+  assert.deepEqual(result.remainingFindingIds, ["F5"]);
+  const next = await service.plan(fixture.workspace, changeId, branch);
+  assert.equal(next.findingId, "F5");
+});
+
+test("правка решений пользователем во время finding-сессии делает её устаревшей", async (context) => {
+  const fixture = await createRepository(context, ["F1", "F3"]);
+  const { command } = createCommand(fixture);
+  const service = createChangeFindingResolutionService({ command, phaseWork: stubPhaseWork(), async createAgent() {} });
+  const plan = await service.plan(fixture.workspace, changeId, branch);
+  const assess = () => service.assess({
+    workspaceDirectory: fixture.workspace,
+    session: plan.session,
+    taskScope: initialScope,
+    signal: new AbortController().signal,
+  });
+  assert.deepEqual(await assess(), { kind: "resumable" });
+
+  await writeFile(fixture.decisionsPath, decisionsSource(["F1", "F3"], {
+    F1: { kind: "remediate", instruction: "Пользователь выбрал другой способ устранения." },
+  }));
+  await execFileAsync("git", ["commit", "-am", "docs(openspec): change decision"], { cwd: fixture.workspace });
+  assert.deepEqual(await assess(), {
+    kind: "stale",
+    reason: "Решения по открытым findings изменились после начала finding-сессии",
+  });
+});
+
+test("plan останавливается до сессии решений, если заголовок finding нельзя связать с решением", async (context) => {
+  const fixture = await createRepository(context, ["F1"], { decided: [] });
+  const { command } = createCommand(fixture);
+  const service = createChangeFindingResolutionService({ command, phaseWork: stubPhaseWork(), async createAgent() {} });
+  await writeFile(
+    fixture.reviewPath,
+    reviewReport(["F1"]).replace("Проблема F1", `Проблема F1 ${"а".repeat(4_000)}`),
+  );
+  await execFileAsync("git", ["commit", "-am", "docs(openspec): long heading"], { cwd: fixture.workspace });
+  await execFileAsync("git", ["push", "origin", branch], { cwd: fixture.workspace });
+  await assert.rejects(
+    service.plan(fixture.workspace, changeId, branch),
+    /Заголовок finding «F1» в review\.md нельзя связать с решением: Заголовок finding длиннее 4000 символов/u,
+  );
+});
+
+test("отклонённый hook коммит решений не оставляет следов и сообщает причину", async (context) => {
+  const fixture = await createRepository(context, ["F1"], { decided: [] });
+  const { command } = createCommand(fixture);
+  const hookPath = join(fixture.workspace, ".git", "hooks", "pre-commit");
+  await writeFile(hookPath, "#!/bin/sh\necho 'markdownlint: строка длиннее 80 символов' >&2\nexit 1\n", { mode: 0o755 });
+  let toolResults;
+  const service = createChangeFindingResolutionService({
+    command,
+    phaseWork: stubPhaseWork(),
+    async createAgent(value) {
+      toolResults = (async () => {
+        const [{ url }] = Object.values(value.config.mcpServers);
+        const client = await connectClient(url);
+        try {
+          const call = () => client.callTool({
+            name: "submit_review_finding_decisions",
+            arguments: { decisions: [remediateF1] },
+          });
+          const rejected = await call();
+          const { stdout: status } = await execFileAsync(
+            "git",
+            ["status", "--porcelain=v1", "--untracked-files=all"],
+            { cwd: fixture.workspace },
+          );
+          await rm(hookPath);
+          const accepted = await call();
+          return { rejected, status: String(status), accepted };
+        } finally {
+          await client.close();
+        }
+      })();
+      return idleAgent("agent-hook", async () => { await toolResults; });
+    },
+    updateNotificationLabel: async () => {},
+    logger: { error() {}, warn() {} },
+  });
+  const plan = await service.plan(fixture.workspace, changeId, branch);
+  const recorded = await service.decide({
+    workspaceDirectory: fixture.workspace,
+    changeId,
+    branch,
+    profile: highProfile(),
+    session: plan.session,
+    taskScope: initialScope,
+    signal: new AbortController().signal,
+    onAgentCreated() {},
+    async onDecisionsRecorded() {},
+  });
+  const { rejected, status, accepted } = await toolResults;
+  assert.equal(rejected.isError, true);
+  assert.match(
+    firstText(rejected),
+    /Не удалось закоммитить review-decisions\.md: markdownlint: строка длиннее 80 символов/u,
+  );
+  assert.equal(status, "");
+  assert.equal(accepted.isError, undefined);
+  assert.equal(await remoteHead(fixture), recorded.commit);
 });

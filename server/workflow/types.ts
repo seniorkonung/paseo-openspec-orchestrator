@@ -3,6 +3,10 @@ import {
   type PendingFindingResolutionSession,
 } from "../change-finding-resolution.ts";
 import {
+  pendingFindingDecisionSessionSchema,
+  type PendingFindingDecisionSession,
+} from "../review-finding-resolution-model.ts";
+import {
   pendingImplementationFindingResolutionSessionSchema,
   type PendingImplementationFindingResolutionSession,
 } from "../implementation-finding-resolution.ts";
@@ -101,7 +105,11 @@ export interface WorkflowState {
   readonly pendingImplementationBranchSession: PendingImplementationBranchSession | null;
   readonly pendingArtifactSession: PendingArtifactSession | null;
   readonly pendingReviewSession: PendingReviewSession | null;
+  /** Сессия решений пользователя по findings OpenSpec review. */
+  readonly pendingFindingDecisionSession: PendingFindingDecisionSession | null;
   readonly pendingFindingResolutionSession: PendingFindingResolutionSession | null;
+  /** Сессия решений пользователя по findings implementation review. */
+  readonly pendingImplementationFindingDecisionSession: PendingFindingDecisionSession | null;
   readonly pendingImplementationFindingResolutionSession:
     | PendingImplementationFindingResolutionSession
     | null;
@@ -153,7 +161,13 @@ export const workflowStateSchema = z
       .default(null),
     pendingArtifactSession: pendingArtifactSessionSchema.nullable().default(null),
     pendingReviewSession: pendingReviewSessionSchema.nullable().default(null),
+    pendingFindingDecisionSession: pendingFindingDecisionSessionSchema
+      .nullable()
+      .default(null),
     pendingFindingResolutionSession: pendingFindingResolutionSessionSchema
+      .nullable()
+      .default(null),
+    pendingImplementationFindingDecisionSession: pendingFindingDecisionSessionSchema
       .nullable()
       .default(null),
     pendingImplementationFindingResolutionSession:
@@ -174,7 +188,9 @@ export const workflowStateSchema = z
       state.pendingImplementationBranchSession,
       state.pendingArtifactSession,
       state.pendingReviewSession,
+      state.pendingFindingDecisionSession,
       state.pendingFindingResolutionSession,
+      state.pendingImplementationFindingDecisionSession,
       state.pendingImplementationFindingResolutionSession,
       state.pendingTaskExecutionSession,
       state.pendingImplementationReviewSession,
@@ -301,7 +317,12 @@ export const workflowStateSchema = z
       });
     }
     for (const [path, finding] of [
+      ["pendingFindingDecisionSession", state.pendingFindingDecisionSession],
       ["pendingFindingResolutionSession", state.pendingFindingResolutionSession],
+      [
+        "pendingImplementationFindingDecisionSession",
+        state.pendingImplementationFindingDecisionSession,
+      ],
       [
         "pendingImplementationFindingResolutionSession",
         state.pendingImplementationFindingResolutionSession,
@@ -420,13 +441,23 @@ export const workflowStateSchema = z
         message: "Implementation review session не соответствует текущему run-пакету",
       });
     }
-    const implementationFinding = state.pendingImplementationFindingResolutionSession;
-    if (implementationFinding && !run && !state.planningRun) {
-      context.addIssue({
-        code: "custom",
-        path: ["pendingImplementationFindingResolutionSession"],
-        message: "Implementation finding session требует implementation- или planning-run",
-      });
+    for (const [path, implementationFinding] of [
+      [
+        "pendingImplementationFindingDecisionSession",
+        state.pendingImplementationFindingDecisionSession,
+      ],
+      [
+        "pendingImplementationFindingResolutionSession",
+        state.pendingImplementationFindingResolutionSession,
+      ],
+    ] as const) {
+      if (implementationFinding && !run && !state.planningRun) {
+        context.addIssue({
+          code: "custom",
+          path: [path],
+          message: "Implementation finding session требует implementation- или planning-run",
+        });
+      }
     }
     const planningRun = state.planningRun;
     if (
@@ -585,7 +616,9 @@ export function createInitialWorkflowState(): WorkflowState {
     pendingImplementationBranchSession: null,
     pendingArtifactSession: null,
     pendingReviewSession: null,
+    pendingFindingDecisionSession: null,
     pendingFindingResolutionSession: null,
+    pendingImplementationFindingDecisionSession: null,
     pendingImplementationFindingResolutionSession: null,
     pendingTaskExecutionSession: null,
     pendingImplementationReviewSession: null,

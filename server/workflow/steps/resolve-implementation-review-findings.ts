@@ -6,7 +6,12 @@ import {
 import {
   ImplementationFindingResolutionError,
   type ImplementationFindingResolutionService,
+  type PendingImplementationFindingResolutionSession,
 } from "../../implementation-finding-resolution.ts";
+import { summarizeFindingDecisions } from "../../review-finding-decision-model.ts";
+import { RootBranchDeliveryError } from "../../root-branch-delivery.ts";
+import { ORCHESTRATOR_LIMITS } from "../../../shared/orchestrator.ts";
+import type { FindingWork } from "../../review-finding-resolution-model.ts";
 import type {
   WorkflowStepContext,
   WorkflowStepDefinition,
@@ -33,7 +38,7 @@ export interface ResolveImplementationReviewFindingsDependencies {
   readonly readAgentProfiles: AgentProfileReader;
   readonly findingResolution: Pick<
     ImplementationFindingResolutionService,
-    "plan" | "run"
+    "plan" | "run" | "decide"
   >;
   readonly implementationRunVerification: Pick<ImplementationRunVerifier, "assertCurrent">;
   readonly phaseWork: Pick<PhaseWorkService, "inspect">;
@@ -56,6 +61,7 @@ async function resolveImplementationReviewFindingsStep(
   if (
     context.state.pendingArtifactSession ||
     context.state.pendingReviewSession ||
+    context.state.pendingFindingDecisionSession ||
     context.state.pendingFindingResolutionSession
   ) {
     return {
@@ -72,44 +78,56 @@ async function resolveImplementationReviewFindingsStep(
     return findingFailure(context, error, "Не удалось определить фазу для новых задач");
   }
 
-  let session = context.state.pendingImplementationFindingResolutionSession;
-  if (!session) {
+  const assertRunCurrent = async (): Promise<void> => {
+    if (implementationRun) {
+      await dependencies.implementationRunVerification.assertCurrent(
+        dependencies.workspaceDirectory,
+        implementationRun,
+        context.signal,
+      );
+    }
+  };
+
+  // Сначала исполняются уже принятые решения; сессия решений собирает
+  // решения сразу по всем открытым findings, у которых их нет.
+  let work: FindingWork<PendingImplementationFindingResolutionSession> | null =
+    context.state.pendingImplementationFindingDecisionSession
+      ? { kind: "decisions", session: context.state.pendingImplementationFindingDecisionSession }
+      : context.state.pendingImplementationFindingResolutionSession
+        ? { kind: "resolution", session: context.state.pendingImplementationFindingResolutionSession }
+        : null;
+  if (!work) {
     try {
-      if (implementationRun) {
-        await dependencies.implementationRunVerification.assertCurrent(
-          dependencies.workspaceDirectory,
-          implementationRun,
-          context.signal,
-        );
-      }
+      await assertRunCurrent();
       const plan = await dependencies.findingResolution.plan(
         dependencies.workspaceDirectory,
         change.id,
         activeBranch,
         context.signal,
       );
-      if (plan.kind === "no-findings") {
-        if (implementationRun) {
-          return await continueImplementationAfterFindings(
+      switch (plan.kind) {
+        case "no-findings":
+          return await finishFindings(
             dependencies,
             context,
-            implementationRun,
             plan.headCommit,
             `В implementation review нет нерешённых findings: ${plan.reviewPath}`,
           );
-        }
-        return {
-          kind: "continue",
-          next: "validate-phase-planning",
-          state: { pendingImplementationFindingResolutionSession: null },
-          summary: `В implementation review нет нерешённых findings: ${plan.reviewPath}`,
-        };
+        case "decisions-required":
+          work = { kind: "decisions", session: plan.session };
+          await context.checkpointState({
+            ...context.state,
+            pendingImplementationFindingDecisionSession: plan.session,
+          });
+          break;
+        case "finding-required":
+          work = { kind: "resolution", session: plan.session };
+          await context.checkpointState({
+            ...context.state,
+            pendingImplementationFindingResolutionSession: plan.session,
+          });
+          break;
       }
-      session = plan.session;
-      await context.checkpointState({
-        ...context.state,
-        pendingImplementationFindingResolutionSession: session,
-      });
     } catch (error) {
       return findingFailure(
         context,
@@ -146,6 +164,47 @@ async function resolveImplementationReviewFindingsStep(
     };
   }
 
+  if (work.kind === "decisions") {
+    try {
+      const recorded = await dependencies.findingResolution.decide({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        changeId: change.id,
+        branch: activeBranch,
+        profile: resolution.profile,
+        session: work.session,
+        taskScope,
+        signal: context.signal,
+        onAgentCreated: (agentId) => {
+          context.updateActionLinks([
+            { kind: "agent", agentId, label: "Решения по implementation findings" },
+          ]);
+        },
+        onDecisionsRecorded: async () => {
+          await assertRunCurrent();
+          await context.checkpointState({
+            ...context.state,
+            pendingImplementationFindingDecisionSession: null,
+          });
+        },
+      });
+      return {
+        kind: "continue",
+        next: "resolve-implementation-review-findings",
+        state: { pendingImplementationFindingDecisionSession: null },
+        summary: boundedSummary(
+          `Записаны решения по findings implementation review (${summarizeFindingDecisions(recorded.decisions)})`,
+        ),
+      };
+    } catch (error) {
+      return findingFailure(
+        context,
+        error,
+        "Не удалось записать решения по implementation findings",
+      );
+    }
+  }
+  const session = work.session;
+
   try {
     const completed = await dependencies.findingResolution.run({
       workspaceDirectory: dependencies.workspaceDirectory,
@@ -165,13 +224,7 @@ async function resolveImplementationReviewFindingsStep(
         ]);
       },
       onFindingResolved: async () => {
-        if (implementationRun) {
-          await dependencies.implementationRunVerification.assertCurrent(
-            dependencies.workspaceDirectory,
-            implementationRun,
-            context.signal,
-          );
-        }
+        await assertRunCurrent();
         await context.checkpointState({
           ...context.state,
           pendingImplementationFindingResolutionSession: null,
@@ -179,22 +232,23 @@ async function resolveImplementationReviewFindingsStep(
       },
     });
 
-    if (completed.remainingFindingIds.length === 0) {
-      if (implementationRun) {
-        return await continueImplementationAfterFindings(
-          dependencies,
-          context,
-          implementationRun,
-          completed.commit,
-          `Обработана последняя implementation finding ${completed.findingId}; обновлён PR #${completed.pullRequest.number}`,
-        );
-      }
+    if (completed.outcome === "blocked") {
       return {
         kind: "continue",
-        next: "validate-phase-planning",
+        next: "resolve-implementation-review-findings",
         state: { pendingImplementationFindingResolutionSession: null },
-        summary: `Обработана последняя implementation finding ${completed.findingId}; обновлён PR #${completed.pullRequest.number}`,
+        summary: boundedSummary(
+          `Implementation finding ${completed.findingId} возвращена к решению пользователя: ${completed.reason}`,
+        ),
       };
+    }
+    if (completed.remainingFindingIds.length === 0) {
+      return await finishFindings(
+        dependencies,
+        context,
+        completed.commit,
+        `Обработана последняя implementation finding ${completed.findingId}; обновлён PR #${completed.pullRequest.number}`,
+      );
     }
     return {
       kind: "continue",
@@ -212,6 +266,37 @@ async function resolveImplementationReviewFindingsStep(
   }
 }
 
+/**
+ * Все implementation findings решены: implementation run переходит к
+ * следующему пакету задач, планирование фазы — к финальной проверке.
+ */
+async function finishFindings(
+  dependencies: ResolveImplementationReviewFindingsDependencies,
+  context: WorkflowStepContext,
+  headCommit: string,
+  summary: string,
+): Promise<WorkflowStepResult> {
+  const implementationRun = context.state.implementationRun;
+  if (implementationRun) {
+    return await continueImplementationAfterFindings(
+      dependencies,
+      context,
+      implementationRun,
+      headCommit,
+      summary,
+    );
+  }
+  return {
+    kind: "continue",
+    next: "validate-phase-planning",
+    state: {
+      pendingImplementationFindingDecisionSession: null,
+      pendingImplementationFindingResolutionSession: null,
+    },
+    summary,
+  };
+}
+
 function findingFailure(
   context: WorkflowStepContext,
   error: unknown,
@@ -224,6 +309,7 @@ function findingFailure(
   const summary =
     error instanceof ImplementationFindingResolutionError ||
       error instanceof ImplementationRunVerificationError ||
+      error instanceof RootBranchDeliveryError ||
       error instanceof PhaseWorkError
       ? error.message
       : fallback;
@@ -266,10 +352,17 @@ async function continueImplementationAfterFindings(
     state: {
       phaseProgress: decision.progress,
       implementationRun: clearImplementationBatch(implementationRun, headCommit),
+      pendingImplementationFindingDecisionSession: null,
       pendingImplementationFindingResolutionSession: null,
     },
     summary,
   };
+}
+
+/** Текст действия в ledger ограничен по длине. */
+function boundedSummary(text: string): string {
+  const maximum = ORCHESTRATOR_LIMITS.actionText;
+  return text.length <= maximum ? text : `${text.slice(0, maximum - 1)}…`;
 }
 
 function errorCode(error: unknown): string {

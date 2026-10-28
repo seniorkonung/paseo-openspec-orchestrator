@@ -1,9 +1,23 @@
+import type { lstat } from "node:fs/promises";
 import { z } from "zod";
 import type { BoundedCommandRunner } from "./bounded-command.ts";
 import { commitHashSchema } from "./change-artifact-model.ts";
 import type { TaskScopeCheck } from "./phase-work.ts";
 import type { ReviewFindingOutcome } from "./review-finding-publication.ts";
 import { deliverRootCommit } from "./root-branch-delivery.ts";
+import {
+  commitFindingDecisions,
+  findingDecisionsRepositoryPath,
+  readFindingDecisionsAt,
+} from "./review-finding-decision-git.ts";
+import {
+  FindingDecisionsError,
+  decisionsAfterBlock,
+  decisionsAfterResolution,
+  sameFindingDecisions,
+  type ExecutableFindingDecisionRecord,
+  type FindingDecisionRecord,
+} from "./review-finding-decision-model.ts";
 import {
   ReviewFindingResolutionError,
   findingResolutionBranchSchema,
@@ -98,11 +112,6 @@ async function verifyLocalResolution<Session extends ReviewFindingResolutionSess
   await assertCurrentBranch(command, context.gitRoot, session.branch, signal);
   await assertCleanWorktree(command, context.gitRoot, signal);
   const report = await readReport(context, signal);
-  if (report.findings.some(({ id }) => id === session.findingId)) {
-    throw new ReviewFindingResolutionError(
-      `Finding «${session.findingId}» всё ещё присутствует в ${behavior.report.fileName}`,
-    );
-  }
   await assertReviewTracked(command, context, behavior.report.fileName, signal);
   const head = await readHeadCommit(command, context.gitRoot, signal);
   await assertDescendsFromBaseline(
@@ -132,9 +141,56 @@ async function verifyLocalResolution<Session extends ReviewFindingResolutionSess
     head,
     signal,
   );
+  const decisionsPath = findingDecisionsRepositoryPath(
+    context.changeRepositoryPath,
+    behavior.publication.kind,
+  );
+  const baselineRecords = await readDecisions(
+    command, context, behavior, session.baselineCommit, signal,
+  );
+  const decision = await readFindingDecision(command, context, session, behavior, signal);
+  const headRecords = await readDecisions(command, context, behavior, head, signal);
+  const base = {
+    changeId: context.changeId,
+    findingId: session.findingId,
+    remainingFindingIds: Object.freeze(report.findings.map(({ id }) => id)),
+    commit: head,
+  };
+
+  if (report.findings.some(({ id }) => id === session.findingId)) {
+    // Finding остаётся открытой только при препятствии, которое оркестратор
+    // записал отдельным коммитом решений без правок артефактов.
+    const headDecision = headRecords.find(({ findingId }) => findingId === session.findingId)
+      ?.decision;
+    if (
+      headDecision?.kind === "blocked" &&
+      changedPaths.length === 1 &&
+      changedPaths[0] === decisionsPath &&
+      sameFindingDecisions(
+        headRecords,
+        decisionsAfterBlock(baselineRecords, session.findingId, headDecision.reason, report.findings),
+      )
+    ) {
+      return { ...base, outcome: "blocked", reason: headDecision.reason };
+    }
+    throw new ReviewFindingResolutionError(
+      `Finding «${session.findingId}» всё ещё присутствует в ${behavior.report.fileName}`,
+    );
+  }
+
   if (!changedPaths.includes(context.reviewRepositoryPath)) {
     throw new ReviewFindingResolutionError(
       `Finding-коммит должен изменять ${behavior.report.fileName}`,
+    );
+  }
+  if (
+    !sameFindingDecisions(
+      headRecords,
+      decisionsAfterResolution(baselineRecords, session.findingId, report.findings),
+    )
+  ) {
+    throw new ReviewFindingResolutionError(
+      `Удалите из ${decisionsPath} раздел finding «${session.findingId}» и разделы findings, которых больше нет в ${behavior.report.fileName}; решения по открытым findings не меняйте`,
     );
   }
   // Проверка до публикации: задача в фазе, которую планирует оркестратор,
@@ -146,14 +202,102 @@ async function verifyLocalResolution<Session extends ReviewFindingResolutionSess
   )
     ? "accepted-risk"
     : "resolved";
+  if (outcome === "accepted-risk" && decision.decision.kind !== "accept-risk") {
+    throw new ReviewFindingResolutionError(
+      `Пользователь решил устранить finding «${session.findingId}», а не принять её риск`,
+    );
+  }
+  return { ...base, outcome };
+}
 
-  return {
-    changeId: context.changeId,
-    findingId: session.findingId,
-    remainingFindingIds: Object.freeze(report.findings.map(({ id }) => id)),
-    commit: head,
-    outcome,
-  };
+/**
+ * Решение пользователя, от которого начата сессия исполнения. Оно читается из
+ * baseline: сессия сама удаляет его раздел, а прочие правки файла запрещены.
+ */
+export async function readFindingDecision<Session extends ReviewFindingResolutionSession>(
+  command: BoundedCommandRunner,
+  context: FindingResolutionContext,
+  session: Session,
+  behavior: ReviewFindingResolutionBehavior<Session>,
+  signal?: AbortSignal,
+): Promise<ExecutableFindingDecisionRecord> {
+  const records = await readDecisions(command, context, behavior, session.baselineCommit, signal);
+  const record = records.find(({ findingId }) => findingId === session.findingId);
+  if (!record || record.decision.kind === "blocked") {
+    throw new ReviewFindingResolutionError(
+      `Для finding «${session.findingId}» не записано решение пользователя`,
+    );
+  }
+  return { ...record, decision: record.decision };
+}
+
+export async function readDecisions<Session extends ReviewFindingResolutionSession>(
+  command: BoundedCommandRunner,
+  context: FindingResolutionContext,
+  behavior: ReviewFindingResolutionBehavior<Session>,
+  commit: string,
+  signal?: AbortSignal,
+): Promise<readonly FindingDecisionRecord[]> {
+  try {
+    return await readFindingDecisionsAt(
+      command,
+      context.gitRoot,
+      commit,
+      findingDecisionsRepositoryPath(context.changeRepositoryPath, behavior.publication.kind),
+      behavior.publication.kind,
+      signal,
+    );
+  } catch (error) {
+    if (error instanceof FindingDecisionsError) {
+      throw new ReviewFindingResolutionError(error.message);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Возвращает finding к решению пользователя: оркестратор сам записывает
+ * препятствие в файл решений. Сессия исполнения при этом не коммитит ничего.
+ */
+export async function recordBlockedFindingDecision<
+  Session extends ReviewFindingResolutionSession,
+>(
+  command: BoundedCommandRunner,
+  context: FindingResolutionContext,
+  session: Session,
+  behavior: ReviewFindingResolutionBehavior<Session>,
+  readReport: ReportReader,
+  reason: string,
+  signal: AbortSignal,
+  inspectPath?: typeof lstat,
+): Promise<void> {
+  await assertCurrentBranch(command, context.gitRoot, session.branch, signal);
+  await assertCleanWorktree(command, context.gitRoot, signal);
+  const head = await readHeadCommit(command, context.gitRoot, signal);
+  if (head !== session.baselineCommit) {
+    throw new ReviewFindingResolutionError(
+      `Препятствие finding «${session.findingId}» записывается только без новых коммитов сессии; опишите пользователю, что уже закоммичено`,
+    );
+  }
+  await readFindingDecision(command, context, session, behavior, signal);
+  const records = await readDecisions(command, context, behavior, head, signal);
+  const report = await readReport(context, signal);
+  try {
+    await commitFindingDecisions({
+      command,
+      paths: context,
+      kind: behavior.publication.kind,
+      records: decisionsAfterBlock(records, session.findingId, reason, report.findings),
+      subject: behavior.decisions.blockedCommitSubject(session.findingId),
+      signal,
+      ...(inspectPath === undefined ? {} : { inspectPath }),
+    });
+  } catch (error) {
+    if (error instanceof FindingDecisionsError) {
+      throw new ReviewFindingResolutionError(error.message);
+    }
+    throw error;
+  }
 }
 
 export async function assertCleanWorktree(

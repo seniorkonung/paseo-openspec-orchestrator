@@ -220,8 +220,9 @@ async function fixture(context) {
         taskExecution: (session, signal) => taskExecution.assess(workspace, session, signal),
         // Остальные этапы в сценариях не участвуют.
         ...Object.fromEntries([
-          "changeInitialization", "artifact", "review", "findingResolution",
-          "implementationFindingResolution", "implementationReview", "phaseTaskPlanning", "archive",
+          "changeInitialization", "artifact", "review", "findingDecision", "findingResolution",
+          "implementationFindingDecision", "implementationFindingResolution", "implementationReview",
+          "phaseTaskPlanning", "archive",
         ].map((name) => [name, async () => { throw new Error(`Оценка «${name}» не ожидалась`); }])),
       },
     }),

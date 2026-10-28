@@ -424,3 +424,75 @@ test("область задач следует стадии workflow", () => {
     /Не сохранён baseline задач implementation-run/u,
   );
 });
+
+test("review findings сначала собирают решения пользователя, а препятствие возвращает finding в следующий раунд", async () => {
+  const decisionSession = {
+    changeId,
+    branch: changeBranch,
+    findingIds: ["F1", "F2"],
+    baselineCommit: hashes.a,
+  };
+  let planned = { kind: "decisions-required", session: decisionSession };
+  const decideRequests = [];
+  const step = createResolveReviewFindingsStep({
+    workspaceDirectory: "/repo",
+    readAgentProfiles: async () => profiles(),
+    phaseWork: {
+      async inspect() {
+        return phaseDecision([task("1.1")]);
+      },
+    },
+    implementationRunVerification: { async assertCurrent() { return hashes.b; } },
+    findingResolution: {
+      async plan() {
+        return planned;
+      },
+      async decide(request) {
+        decideRequests.push(request);
+        await request.onDecisionsRecorded();
+        return {
+          changeId,
+          commit: hashes.b,
+          decisions: [
+            { findingId: "F1", heading: "F1 · High — A", decision: { kind: "remediate", instruction: "Исправить." } },
+            { findingId: "F2", heading: "F2 · High — B", decision: { kind: "remediate", instruction: "Исправить." } },
+          ],
+        };
+      },
+      async run(request) {
+        await request.onFindingResolved();
+        return {
+          changeId,
+          findingId: request.session.findingId,
+          commit: hashes.c,
+          remainingFindingIds: ["F1", "F2"],
+          outcome: "blocked",
+          reason: "Нужно выбрать формат миграции данных.",
+        };
+      },
+    },
+  });
+
+  const decisions = stepContext(initialState({ initialPlannedPhases: [1] }));
+  const recorded = await step.run(decisions.context);
+  assert.equal(recorded.kind, "continue");
+  assert.equal(recorded.next, "resolve-review-findings");
+  assert.deepEqual(recorded.state, { pendingFindingDecisionSession: null });
+  assert.equal(recorded.summary, "Записаны решения по findings review (устранить: F1, F2)");
+  assert.deepEqual(decideRequests[0].taskScope, { kind: "initial-planning", plannedPhases: [1] });
+  assert.deepEqual(
+    decisions.checkpoints.map(({ pendingFindingDecisionSession }) => pendingFindingDecisionSession),
+    [decisionSession, null],
+  );
+
+  planned = findingPlan("F1")();
+  planned = await planned;
+  const blocked = await step.run(stepContext(initialState({ initialPlannedPhases: [1] })).context);
+  assert.equal(blocked.kind, "continue");
+  assert.equal(blocked.next, "resolve-review-findings");
+  assert.deepEqual(blocked.state, { pendingFindingResolutionSession: null });
+  assert.equal(
+    blocked.summary,
+    "Finding F1 возвращена к решению пользователя: Нужно выбрать формат миграции данных.",
+  );
+});

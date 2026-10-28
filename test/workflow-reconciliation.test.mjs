@@ -174,7 +174,9 @@ function workspace({
       changeInitialization: assessor("changeInitialization"),
       artifact: assessor("artifact"),
       review: assessor("review"),
+      findingDecision: assessor("findingDecision"),
       findingResolution: assessor("findingResolution"),
+      implementationFindingDecision: assessor("implementationFindingDecision"),
       implementationFindingResolution: assessor("implementationFindingResolution"),
       taskExecution: assessor("taskExecution"),
       implementationReview: assessor("implementationReview"),
@@ -849,4 +851,69 @@ test("сводка принятого состояния ограничена д
   assert.equal(result.kind, "adopted");
   assert.equal(result.summary.length, 500);
   assert.ok(result.summary.endsWith("…"));
+});
+
+test("сессия решений по findings сохраняется, пока её можно завершить, и сбрасывается устаревшей", async () => {
+  const session = {
+    changeId,
+    branch: changeBranch,
+    findingIds: ["F1", "F2"],
+    baselineCommit: commits.first,
+  };
+  const resumable = workspace({ assessments: { findingDecision: { kind: "resumable" } } });
+  const kept = await resumable.run(
+    "resolve-review-findings",
+    baseState({ pendingFindingDecisionSession: session }),
+  );
+  assert.equal(kept.kind, "unchanged");
+  assert.ok(resumable.calls.includes("assess:findingDecision"));
+
+  const stale = workspace({
+    assessments: {
+      findingDecision: {
+        kind: "stale",
+        reason: "Текущий Git HEAD больше не продолжает baseline сессии решений",
+      },
+    },
+  });
+  const result = await stale.run(
+    "resolve-review-findings",
+    baseState({ pendingFindingDecisionSession: session }),
+  );
+  assert.equal(result.kind, "adopted");
+  assert.equal(result.state.pendingFindingDecisionSession, null);
+  assert.match(
+    result.summary,
+    /сессия решений по findings review сброшена \(Текущий Git HEAD больше не продолжает baseline сессии решений\)/u,
+  );
+  workflowStateSchema.parse(result.state);
+});
+
+test("checkpoint не допускает сессию решений вместе с другой pending-сессией", () => {
+  const decision = {
+    changeId,
+    branch: changeBranch,
+    findingIds: ["F1"],
+    baselineCommit: commits.first,
+  };
+  assert.throws(
+    () => baseState({
+      pendingFindingDecisionSession: decision,
+      pendingFindingResolutionSession: {
+        changeId,
+        branch: changeBranch,
+        findingId: "F1",
+        baselineCommit: commits.first,
+      },
+    }),
+    /не может одновременно восстанавливать несколько агентских сессий/u,
+  );
+  assert.throws(
+    () => baseState({ pendingImplementationFindingDecisionSession: decision }),
+    /Implementation finding session требует implementation- или planning-run/u,
+  );
+  assert.throws(
+    () => baseState({ pendingFindingDecisionSession: { ...decision, findingIds: ["F1", "F1"] } }),
+    /не должны повторяться/u,
+  );
 });

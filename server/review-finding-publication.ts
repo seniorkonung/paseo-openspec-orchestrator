@@ -65,15 +65,21 @@ export const findingCompletionSummarySchema = z
     "Краткое описание finding содержит служебный marker",
   );
 
+export const findingPublishInputSchema = z
+  .object({
+    mode: z.literal("publish"),
+    problem: findingCompletionSummarySchema,
+    resolution: findingCompletionSummarySchema,
+  })
+  .strict();
+
+export const findingAcknowledgeInputSchema = z
+  .object({ mode: z.literal("acknowledge-existing") })
+  .strict();
+
 export const findingCompletionInputSchema = z.discriminatedUnion("mode", [
-  z
-    .object({
-      mode: z.literal("publish"),
-      problem: findingCompletionSummarySchema,
-      resolution: findingCompletionSummarySchema,
-    })
-    .strict(),
-  z.object({ mode: z.literal("acknowledge-existing") }).strict(),
+  findingPublishInputSchema,
+  findingAcknowledgeInputSchema,
 ]);
 
 export type ReviewFindingPublicationKind = z.infer<

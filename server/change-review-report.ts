@@ -14,6 +14,8 @@ export type ReviewFindingId = z.infer<typeof reviewFindingIdSchema>;
 
 export interface ChangeReviewFinding {
   readonly id: ReviewFindingId;
+  /** Полный текст заголовка finding: по нему решение привязывается к finding. */
+  readonly heading: string;
 }
 
 export interface ChangeReviewAcceptedRisk {
@@ -140,7 +142,7 @@ export function extractReviewFindingReferences(
         findings.length < MAX_CHANGE_REVIEW_FINDINGS
       ) {
         findingIds.add(parsedId.data);
-        findings.push(Object.freeze({ id: parsedId.data }));
+        findings.push(Object.freeze({ id: parsedId.data, heading }));
       }
       continue;
     }

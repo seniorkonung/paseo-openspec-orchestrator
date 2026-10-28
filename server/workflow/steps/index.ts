@@ -100,6 +100,18 @@ export function createOpenSpecWorkflow(
           dependencies.changeArtifacts.assess(workspaceDirectory, changeId, session, signal),
         review: (session, signal) =>
           dependencies.changeReview.assess(workspaceDirectory, session, signal),
+        findingDecision: (session, signal) =>
+          dependencies.changeFindingResolution.assessDecisions({
+            workspaceDirectory,
+            session,
+            signal,
+          }),
+        implementationFindingDecision: (session, signal) =>
+          dependencies.implementationFindingResolution.assessDecisions({
+            workspaceDirectory,
+            session,
+            signal,
+          }),
         findingResolution: (session, taskScope, signal) =>
           dependencies.changeFindingResolution.assess({
             workspaceDirectory,

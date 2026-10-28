@@ -96,7 +96,7 @@ test("parser одинаково трактует чистый и неполны�
   assert.deepEqual(incomplete.findings, []);
 });
 
-test("parser молча игнорирует формат отчёта и дедуплицирует finding-заголовки", () => {
+test("parser молча игнорирует формат отчёта, дедуплицирует finding-заголовки и сохраняет их текст", () => {
   const parsed = parseChangeReviewReport([
     "неизвестный формат без обязательных разделов",
     "### F2: Короткий заголовок",
@@ -108,7 +108,7 @@ test("parser молча игнорирует формат отчёта и дед
     "```",
   ].join("\n"), "other-change");
 
-  assert.deepEqual(parsed.findings, [{ id: "F2" }]);
+  assert.deepEqual(parsed.findings, [{ id: "F2", heading: "F2: Короткий заголовок" }]);
 });
 
 test("parser молча ограничивает число активных findings", () => {

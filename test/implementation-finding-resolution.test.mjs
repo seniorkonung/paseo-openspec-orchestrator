@@ -11,6 +11,7 @@ import {
   implementationFindingResolutionPrompt,
 } from "../server/implementation-finding-resolution.ts";
 import { classifyPhaseWork, phaseTaskFingerprint } from "../server/phase-work.ts";
+import { renderFindingDecisions } from "../server/review-finding-decision-model.ts";
 
 const execFileAsync = promisify(execFile);
 const changeId = "resolve-implementation-findings";
@@ -93,8 +94,31 @@ const implementationScope = {
   baseline: phaseDecision([phaseTask("1.1")], null).progress,
 };
 
+function findingHeading(id) {
+  return `${id} · High — Проблема ${id}`;
+}
+
+function decision(kind) {
+  return kind === "accept-risk"
+    ? {
+        kind,
+        rationale: "Автоматизация rollback дороже ограниченного риска.",
+        scope: "Только legacy deployments сентября 2026.",
+        reopenWhen: "Срок миграции будет продлён.",
+      }
+    : { kind: "remediate", instruction: "Добавить задачу на сохранение экспорта до подтверждения." };
+}
+
+// Файл решений с решением по каждой finding; kinds задаёт вид решения.
+function decisionsSource(findingIds, kinds = {}) {
+  return renderFindingDecisions(
+    "implementation-review",
+    findingIds.map((id) => ({ findingId: id, heading: findingHeading(id), decision: decision(kinds[id]) })),
+  );
+}
+
 function finding(id) {
-  return `### ${id} · High — Проблема ${id}
+  return `### ${findingHeading(id)}
 
 - **Evidence:** src/export.js подтверждает запрос до сохранения.
 - **Evidence revisions:** ["${reviewedHead}"]
@@ -192,7 +216,11 @@ function firstText(result) {
   return content.text;
 }
 
-async function createRepository(context, findingIds = ["F1", "F3"], { report = true } = {}) {
+async function createRepository(context, findingIds = ["F1", "F3"], {
+  report = true,
+  decided = report ? findingIds : [],
+  kinds = {},
+} = {}) {
   const root = await mkdtemp(join(tmpdir(), "implementation-finding-resolution-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const workspace = join(root, "workspace");
@@ -206,6 +234,8 @@ async function createRepository(context, findingIds = ["F1", "F3"], { report = t
   const reviewPath = join(changeRoot, "implementation-review.md");
   await writeFile(join(changeRoot, "spec.md"), "# Спецификация\n");
   if (report) await writeFile(reviewPath, reviewReport(findingIds));
+  const decisionsPath = join(changeRoot, "implementation-review-decisions.md");
+  if (decided.length > 0) await writeFile(decisionsPath, decisionsSource(decided, kinds));
   await execFileAsync("git", ["add", "openspec"], { cwd: workspace });
   await execFileAsync("git", ["commit", "-m", "docs(openspec): add implementation review"], { cwd: workspace });
   const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace });
@@ -218,6 +248,8 @@ async function createRepository(context, findingIds = ["F1", "F3"], { report = t
     remote,
     changeRoot,
     reviewPath,
+    decisionsPath,
+    decisionKinds: kinds,
     baselineCommit,
     pullRequest: {
       number: 44,
@@ -305,6 +337,11 @@ function createCommand(fixture) {
   return { command, calls };
 }
 
+// Сессия исполнения удаляет из файла решений раздел закрытой finding.
+async function writeRemainingDecisions(fixture, findingIds) {
+  await writeFile(fixture.decisionsPath, decisionsSource(findingIds, fixture.decisionKinds));
+}
+
 async function commitResolution(fixture, {
   findingIds = ["F3"],
   acceptedRisks = [],
@@ -313,6 +350,7 @@ async function commitResolution(fixture, {
   push = false,
 } = {}) {
   await writeFile(fixture.reviewPath, reviewReport(findingIds, acceptedRisks));
+  await writeRemainingDecisions(fixture, findingIds);
   await writeFile(join(fixture.changeRoot, "spec.md"), "# Спецификация\n\nДобавлена remediation.\n");
   for (const path of extraPaths) {
     const filePath = join(fixture.workspace, path);
@@ -392,8 +430,8 @@ test("High завершает implementation finding, а оркестратор 
   assert.deepEqual(createdOptions.labels, { ntfy: "true" });
   assert.equal("cwd" in createdOptions, false);
   assert.match(createdOptions.prompt, /openspec-review-implementation/);
-  assert.match(createdOptions.prompt, /one explicit decision/);
-  assert.match(createdOptions.prompt, /without asking for another approval/);
+  assert.match(createdOptions.prompt, /Do not ask the user for a decision or an approval/);
+  assert.match(createdOptions.prompt, /without asking for approval/);
   assert.match(createdOptions.prompt, /never reopen a completed task/);
   assert.equal(
     calls.some(({ executable, arguments: arguments_ }) =>
@@ -412,7 +450,7 @@ test("High завершает implementation finding, а оркестратор 
     arguments: publishInput,
   });
   assert.equal(result.isError, true);
-  assert.match(firstText(result), /F1.*всё ещё присутствует/);
+  assert.match(firstText(result), /F1.*требуется хотя бы один новый Git-коммит/);
 
   const untrackedPath = join(fixture.workspace, "untracked-resolution.tmp");
   await writeFile(untrackedPath, "неотслеживаемый файл\n");
@@ -425,6 +463,7 @@ test("High завершает implementation finding, а оркестратор 
   await rm(untrackedPath);
 
   await writeFile(fixture.reviewPath, reviewReport(["F3"]));
+  await writeRemainingDecisions(fixture, ["F3"]);
   result = await client.callTool({
     name: "complete_implementation_review_finding",
     arguments: publishInput,
@@ -459,7 +498,7 @@ test("High завершает implementation finding, а оркестратор 
 });
 
 test("explicit accepted risk удаляет implementation finding из активного списка", async (context) => {
-  const fixture = await createRepository(context, ["F1"]);
+  const fixture = await createRepository(context, ["F1"], { kinds: { F1: "accept-risk" } });
   const { command } = createCommand(fixture);
   let runTool;
   const service = createImplementationFindingResolutionService({
@@ -700,7 +739,7 @@ test("ошибка checkpoint восстанавливает ntfy и recovery н
   });
   await created;
   assert.match(options.prompt, /This is a recovery session/);
-  assert.match(options.prompt, /do not request the user's decision again/);
+  assert.match(options.prompt, /Do not invoke the skill and do not create or amend a commit/);
   const [{ url }] = Object.values(options.config.mcpServers);
   const client = await connectClient(url);
   const first = await client.callTool({
@@ -765,33 +804,39 @@ test("implementation finding-сессия продолжается после п
   });
 });
 
-test("prompt требует одно решение, сохраняет задачи и оставляет push оркестратору", () => {
-  const prompt = implementationFindingResolutionPrompt({
+test("prompt исполняет записанное решение без пользователя, сохраняет задачи и оставляет push оркестратору", () => {
+  const input = {
     changeId,
     findingId: "F42",
+    baselineCommit: "c".repeat(40),
+    findingHeading: findingHeading("F42"),
+    decision: decision("remediate"),
     branch,
     reviewRepositoryPath: `openspec/changes/${changeId}/implementation-review.md`,
-    alreadyCommitted: false,
-    publicationAlreadyCompleted: false,
+    decisionsRepositoryPath: `openspec/changes/${changeId}/implementation-review-decisions.md`,
+    recovery: { kind: "none" },
     taskScope: implementationScope,
-  });
+  };
+  const prompt = implementationFindingResolutionPrompt(input);
   assert.match(prompt, /openspec-review-implementation/);
   assert.match(prompt, /F42/);
+  assert.match(prompt, /You carry out the user's recorded decision on one finding from an OpenSpec implementation review/u);
+  assert.match(prompt, /"decisionsPath":"openspec\/changes\/resolve-implementation-findings\/implementation-review-decisions\.md"/u);
+  assert.match(prompt, /Do not ask the user for a decision or an approval/u);
   // Устранение finding после implementation review правит только артефакты и фазу не завершает.
   assert.match(prompt, /changes no implementation code and does not complete a plan\.md phase: never run tests, builds, or project checks/u);
   assert.doesNotMatch(prompt, /so this session completes that plan\.md phase/u);
   assert.match(prompt, /related repository documentation outside the selected change root/u);
   assert.match(prompt, /ADRs, README files, domain documents, and guides/u);
-  assert.match(prompt, /only as needed for the agreed resolution of this finding/u);
+  assert.match(prompt, /only as needed for the recorded decision on this finding/u);
   assert.match(prompt, /All changed files must stay inside the Git root/u);
   assert.match(prompt, /never edit implementation code, tests, or configuration and never invoke Apply/u);
   assert.match(prompt, /Record requirement changes in the selected change's delta specs; never edit `openspec\/specs` directly/u);
   assert.match(prompt, /synchronizes the main specs when archiving the change/u);
   assert.match(prompt, /Validate the changed OpenSpec artifacts, related documentation, and report state/u);
-  assert.match(prompt, /commit only the changed artifacts of the selected change and the related repository documentation/u);
+  assert.match(prompt, /commit only the changed artifacts of the selected change, the decisions file, and the related repository documentation/u);
   assert.doesNotMatch(prompt, /Change only planning artifacts inside the selected change root:|commit only files inside the change root/u);
-  assert.match(prompt, /one explicit decision/);
-  assert.match(prompt, /without asking for another approval/);
+  assert.match(prompt, /without asking for approval/);
   assert.match(prompt, /never reopen a completed task/);
   assert.match(prompt, /append new unfinished tasks/);
   assert.match(prompt, /Preserve the existing task list exactly/u);
@@ -804,25 +849,85 @@ test("prompt требует одно решение, сохраняет зада
     /right after Phase 1 with a number greater than every existing phase number, keep every existing phase number unchanged/u,
   );
   assert.match(prompt, /"phaseNumber":1/u);
-  assert.doesNotMatch(prompt, /second explicit permission|third permission/);
   assert.match(prompt, /Do not push/u);
   assert.match(prompt, /complete_implementation_review_finding/);
   assert.match(prompt, /"mode":"publish"/);
+  assert.match(prompt, /"mode":"blocked","reason"/);
   assert.doesNotMatch(prompt, /gh pr/);
   const recoveredPrompt = implementationFindingResolutionPrompt({
-    changeId,
-    findingId: "F42",
-    branch,
-    reviewRepositoryPath: `openspec/changes/${changeId}/implementation-review.md`,
-    alreadyCommitted: true,
-    publicationAlreadyCompleted: true,
-    taskScope: implementationScope,
+    ...input,
+    recovery: { kind: "published" },
   });
   assert.match(recoveredPrompt, /"mode":"acknowledge-existing"/);
-  assert.match(recoveredPrompt, /do not invoke the skill, request the user's decision, commit, or push/);
+  assert.match(recoveredPrompt, /Change nothing: do not invoke the skill, commit, or push/);
   assert.doesNotMatch(recoveredPrompt, /git push --set-upstream/);
   assert.doesNotMatch(
     recoveredPrompt,
     /Invoke the `openspec-review-implementation` skill/,
   );
+});
+
+test("сессия решений implementation review записывает отдельный файл решений", async (context) => {
+  const fixture = await createRepository(context, ["F2"], { decided: [] });
+  const { command } = createCommand(fixture);
+  let options;
+  let toolResult;
+  const service = createImplementationFindingResolutionService({
+    command,
+    phaseWork: stubPhaseWork(),
+    async createAgent(value) {
+      options = value;
+      toolResult = (async () => {
+        const [{ url }] = Object.values(value.config.mcpServers);
+        const client = await connectClient(url);
+        try {
+          return await client.callTool({
+            name: "submit_implementation_review_finding_decisions",
+            arguments: {
+              decisions: [{
+                findingId: "F2",
+                kind: "remediate",
+                instruction: "Добавить задачу Phase 1 на сохранение экспорта до подтверждения.",
+              }],
+            },
+          });
+        } finally {
+          await client.close();
+        }
+      })();
+      return {
+        id: "agent-implementation-decisions",
+        async refresh() { return { agent: { status: "idle", archivedAt: null } }; },
+        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
+        async waitForFinish() { await toolResult; },
+      };
+    },
+    updateNotificationLabel: async () => {},
+    logger: { error() {}, warn() {} },
+  });
+  const plan = await service.plan(fixture.workspace, changeId, branch);
+  assert.equal(plan.kind, "decisions-required");
+  const recorded = await service.decide({
+    workspaceDirectory: fixture.workspace,
+    changeId,
+    branch,
+    profile: highProfile(),
+    session: plan.session,
+    taskScope: implementationScope,
+    signal: new AbortController().signal,
+    onAgentCreated() {},
+    async onDecisionsRecorded() {},
+  });
+  assert.equal((await toolResult).isError, undefined);
+  assert.match(options.prompt, /from an OpenSpec implementation review/u);
+  assert.match(options.prompt, /openspec-review-implementation/u);
+  assert.match(options.prompt, /Add new tasks only to Phase 1 or to a new phase of your own/u);
+  assert.equal(await remoteHead(fixture), recorded.commit);
+  const written = await readFile(fixture.decisionsPath, "utf8");
+  assert.match(written, /^# Решения по findings OpenSpec implementation review\n/u);
+  const { stdout: subject } = await execFileAsync("git", ["log", "-1", "--format=%s"], { cwd: fixture.workspace });
+  assert.equal(String(subject).trim(), "docs(openspec): record implementation review finding decisions");
+  const next = await service.plan(fixture.workspace, changeId, branch);
+  assert.equal(next.kind, "finding-required");
+  assert.equal(next.findingId, "F2");
 });

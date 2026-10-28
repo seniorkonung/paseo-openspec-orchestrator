@@ -37,8 +37,10 @@ workflow input.
 
 Agents still request the decisions required by their stage prompts and skills.
 In particular, planning artifact approval and decisions about review findings
-remain interactive. The orchestrator itself no longer adds a manual merge gate
-between planning and implementation stages.
+remain interactive. Decisions about all open findings of a review are collected
+in one decision session, so the user is not needed again while each finding is
+resolved. The orchestrator itself no longer adds a manual merge gate between
+planning and implementation stages.
 
 ## Core concepts and architecture
 
@@ -123,9 +125,43 @@ Draft/Ready state.
 
 An OpenSpec review agent may correct code and artifacts according to its review
 skill, then commits the added or updated `review.md` together with all stage
-changes. Remaining findings are resolved one at a time after an explicit user
-decision. The orchestrator verifies and pushes each commit range and records
+changes. The orchestrator verifies and pushes each commit range and records
 finding outcomes in the managed findings section of the same root PR.
+
+Remaining findings of `review.md` and `implementation-review.md` are handled in
+rounds that separate the user's decisions from their execution:
+
+1. **Decision session.** One interactive High agent first rechecks every open
+   finding of the report without the user, relates findings that share a root
+   cause, conflict, or touch the same artifact, and prepares options and a
+   recommendation. It then presents all findings at once and collects one
+   explicit decision per finding: remediate in a stated way, or accept the
+   residual risk with its rationale, scope, and reopening conditions. The agent
+   changes no files. Its scoped MCP tool accepts decisions only when they cover
+   exactly the open findings, and the orchestrator itself writes, commits, and
+   publishes them as `review-decisions.md` or
+   `implementation-review-decisions.md` next to the report.
+2. **Execution.** One autonomous High session per finding carries out the
+   recorded decision without asking the user, in report order. Its commit
+   removes the finding from the report and deletes from the decisions file the
+   finding's section and the sections of findings it closed along the way;
+   sections of open findings must stay unchanged, and residual risk is
+   accepted only where the user decided so, citing the decision at its commit.
+3. **Blocker.** When a decision cannot be carried out as agreed, the session
+   commits nothing and reports the blocker. The orchestrator records it in the
+   decisions file as "Нужно новое решение" and continues with the next decided
+   finding. Blocked findings and findings that remediation adds without a
+   decision form the next decision round.
+
+The orchestrator owns the decisions file format and parses it strictly; a
+manual edit that breaks it stops the workflow with the exact problem. A
+decision is bound to both the finding ID and its heading, so a reworded or
+reused finding ID needs a new decision. Changing the decisions of open
+findings while a resolution session is pending makes that session stale, and
+the step plans again from the edited file. The orchestrator commits the
+decisions file through the repository's Git hooks: a rejected commit is rolled
+back and its hook output is reported, and a hook that reformats Markdown so
+the file no longer parses stops the step.
 
 Finding-resolution agents for both OpenSpec and implementation reviews may
 update the selected change's planning artifacts and related documentation

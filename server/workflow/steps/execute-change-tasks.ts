@@ -35,7 +35,9 @@ async function executeChangeTasksStep(
   if (
     context.state.pendingArtifactSession ||
     context.state.pendingReviewSession ||
+    context.state.pendingFindingDecisionSession ||
     context.state.pendingFindingResolutionSession ||
+    context.state.pendingImplementationFindingDecisionSession ||
     context.state.pendingImplementationFindingResolutionSession
   ) {
     return {
