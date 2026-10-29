@@ -9,6 +9,7 @@ import { createChangeFindingResolutionService } from "./change-finding-resolutio
 import { createImplementationFindingResolutionService } from "./implementation-finding-resolution.ts";
 import { createImplementationRunVerifier } from "./implementation-run-verification.ts";
 import { createChangeTaskExecutionService } from "./change-task-execution.ts";
+import { createTaskProfileService } from "./task-profile-assessment.ts";
 import { createChangeArchiveService } from "./change-archive.ts";
 import { readGitBranch } from "./git-branch.ts";
 import { readGitWorktreeStatus } from "./git-worktree.ts";
@@ -182,6 +183,7 @@ export class OrchestratorController {
       ...agentLifecycle,
       phaseWork,
     });
+    const taskProfiles = createTaskProfileService(agentLifecycle);
     const workflow = createOpenSpecWorkflow({
       workspaceDirectory,
       readAgentProfiles,
@@ -199,7 +201,8 @@ export class OrchestratorController {
       changeReview: createChangeReviewService({ ...agentLifecycle, phaseWork }),
       changeFindingResolution,
       implementationFindingResolution,
-      changeTaskExecution: createChangeTaskExecutionService(agentLifecycle),
+      changeTaskExecution: createChangeTaskExecutionService({ ...agentLifecycle, taskProfiles }),
+      taskProfiles,
       phaseWork,
       phaseTaskPlanning: createPhaseTaskPlanningService({ ...agentLifecycle, phaseWork }),
       rootBranch: createRootBranchService(),

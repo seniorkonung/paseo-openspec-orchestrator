@@ -12,7 +12,10 @@ import { OpenSpecOrchestratorEngine } from "../server/openspec-orchestrator-engi
 import { OrchestratorLedger } from "../server/orchestrator-ledger.ts";
 import { classifyPhaseWork, phaseTaskFingerprint } from "../server/phase-work.ts";
 import { createRootBranchService } from "../server/root-branch-state.ts";
+import { createTaskProfileService } from "../server/task-profile-assessment.ts";
+import { parseTaskProfiles, renderTaskProfiles } from "../server/task-profile-model.ts";
 import { createWorkflowReconciler } from "../server/workflow/reconciliation.ts";
+import { createAssessTaskProfilesStep } from "../server/workflow/steps/assess-task-profiles.ts";
 import { createExecuteChangeTasksStep } from "../server/workflow/steps/execute-change-tasks.ts";
 import { createInitialWorkflowState } from "../server/workflow/types.ts";
 
@@ -43,12 +46,20 @@ function parseTasks(markdown) {
   }));
 }
 
+/** Оценки исходных задач Phase 2: сценарии без изменения задач обходятся без оценки. */
+const seededProfiles = renderTaskProfiles(["2.1 Чтение", "2.2 Оболочка", "2.3 Замена вставок"].map((heading) => ({
+  taskNumber: heading.split(" ", 1)[0],
+  heading,
+  assignment: { kind: "assessed", profile: "High", rationale: "Задача требует High" },
+})));
+
 function profiles() {
   return REQUIRED_AGENT_PROFILE_NAMES.map((name) => ({
     id: `profile-${name.toLowerCase().replaceAll(" ", "-")}`,
     name,
     provider: "codex",
-    model: "gpt-6-astra",
+    // Модель различает профили в конфигурации созданного агента.
+    model: `model-${name.toLowerCase()}`,
     modeId: "default",
     thinkingOptionId: "high",
   }));
@@ -58,7 +69,7 @@ function profiles() {
  * Настоящий Git-репозиторий с bare origin. OpenSpec и GitHub CLI заменены
  * ответами, которые вычисляются из файлов и refs этого репозитория.
  */
-async function fixture(context) {
+async function fixture(context, { seedProfiles = true } = {}) {
   const root = await mkdtemp(join(tmpdir(), "workflow-reconciliation-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const workspace = join(root, "workspace");
@@ -72,6 +83,9 @@ async function fixture(context) {
   await git("config", "user.name", "OpenSpec Test");
   await git("config", "user.email", "openspec@example.test");
   await writeFile(tasksPath, initialTasks);
+  if (seedProfiles) {
+    await writeFile(join(workspace, "openspec", "changes", changeId, "task-profiles.md"), seededProfiles);
+  }
   await git("add", ".");
   await git("commit", "-m", "docs(openspec): plan phase tasks");
   await git("remote", "add", "origin", remote);
@@ -83,6 +97,16 @@ async function fixture(context) {
   const calls = [];
   const command = async (executable, args, options) => {
     calls.push(`${executable} ${args.join(" ")}`);
+    if (executable === "mise" && args.includes("status")) {
+      return {
+        stdout: JSON.stringify({
+          changeName: changeId,
+          changeRoot: join(workspace, "openspec", "changes", changeId),
+          actionContext: { mode: "repo-local", sourceOfTruth: "repo" },
+        }),
+        stderr: "",
+      };
+    }
     if (executable === "mise") {
       const tasks = parseTasks(await readFile(tasksPath, "utf8"));
       const complete = tasks.filter(({ done }) => done).length;
@@ -138,17 +162,64 @@ async function fixture(context) {
     },
   };
 
-  // Агент этапа: каждое поручение исполняет очередной сценарий из очереди.
-  const agentScripts = [];
-  const agentRuns = [];
-  const taskExecution = createChangeTaskExecutionService({
+  /**
+   * Агент оценки профилей: назначает задачам профили по `assignProfile` и
+   * записывает их через MCP-инструмент сразу после создания.
+   */
+  const assessments = [];
+  let assignProfile = () => "High";
+  const taskProfiles = createTaskProfileService({
     command,
     async createAgent(options) {
       const [{ url }] = Object.values(options.config.mcpServers);
+      const { tasks } = JSON.parse(/Workflow data: (\{.*\})$/mu.exec(options.prompt)[1]);
+      assessments.push({ tasks: tasks.map(({ description }) => description), config: options.config });
+      const submitted = (async () => {
+        const client = new Client({ name: "profile-assessment-test", version: "1.0.0" });
+        await client.connect(new StreamableHTTPClientTransport(new URL(url)));
+        try {
+          const result = await client.callTool({
+            name: "submit_task_profiles",
+            arguments: {
+              assessments: tasks.map(({ number, description }) => ({
+                taskNumber: number,
+                profile: assignProfile(description),
+                rationale: "Профиль назначен тестовым оценщиком",
+              })),
+            },
+          });
+          assert.equal(result.isError, undefined, result.content?.[0]?.text);
+        } finally {
+          await client.close();
+        }
+      })();
+      return {
+        id: `profile-agent-${assessments.length}`,
+        async refresh() { return { agent: { status: "idle", archivedAt: null } }; },
+        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
+        async waitForFinish() { await submitted; return { status: "idle" }; },
+      };
+    },
+    updateNotificationLabel: async () => {},
+    logger: { error() {}, warn() {} },
+  });
+
+  // Агент этапа: каждое поручение исполняет очередной сценарий из очереди.
+  const agentScripts = [];
+  const agentRuns = [];
+  const agentConfigs = [];
+  const agentPrompts = [];
+  const taskExecution = createChangeTaskExecutionService({
+    command,
+    taskProfiles,
+    async createAgent(options) {
+      const [{ url }] = Object.values(options.config.mcpServers);
+      agentConfigs.push(options.config);
       return {
         id: `task-agent-${agentRuns.length + 1}`,
         async commands() { return { commands: [{ name: "openspec-apply-change" }], error: null }; },
         async send(prompt) {
+          agentPrompts.push(prompt);
           const script = agentScripts.shift();
           assert.ok(script, "Агент запущен без сценария");
           const run = script({ prompt, url });
@@ -198,10 +269,16 @@ async function fixture(context) {
           return { kind: "continue", next: "execute-change-tasks", state: await seed(), summary: "Run подготовлен" };
         },
       },
+      createAssessTaskProfilesStep({
+        workspaceDirectory: workspace,
+        readAgentProfiles: async () => profiles(),
+        taskProfiles,
+      }),
       createExecuteChangeTasksStep({
         workspaceDirectory: workspace,
         readAgentProfiles: async () => profiles(),
         taskExecution,
+        taskProfiles,
       }),
       {
         id: "review-implementation",
@@ -218,6 +295,7 @@ async function fixture(context) {
       phaseWork,
       sessions: {
         taskExecution: (session, signal) => taskExecution.assess(workspace, session, signal),
+        taskProfileAssessment: (session, signal) => taskProfiles.assess(workspace, session, signal),
         // Остальные этапы в сценариях не участвуют.
         ...Object.fromEntries([
           "changeInitialization", "artifact", "review", "findingDecision", "findingResolution",
@@ -297,7 +375,9 @@ async function fixture(context) {
   };
 
   return {
-    workspace, tasksPath, baseline, git, remoteHead, calls, agentScripts, agentRuns,
+    workspace, tasksPath, profilesPath: join(workspace, "openspec", "changes", changeId, "task-profiles.md"),
+    baseline, git, remoteHead, calls, agentScripts, agentRuns, agentConfigs, agentPrompts,
+    assessments, assignProfiles: (assign) => { assignProfile = assign; },
     implementTask, pauseAfterFirstTask, reviewedRuns, startPlugin, settle,
   };
 }
@@ -375,10 +455,14 @@ test("перестановка задач по просьбе пользоват
   assert.deepEqual(run.batch.tasks.map(({ taskId, taskNumber }) => [taskId, taskNumber]), [
     ["2", "2.1"], ["3", "2.2"], ["4", "2.3"],
   ]);
-  // Коммиты перестановки лежат внутри диапазона review и опубликованы.
+  // Перенумерованные задачи потеряли прежние оценки и оценены заново до выполнения.
+  assert.deepEqual(value.assessments.map(({ tasks }) => tasks), [
+    ["2.1 Замена вставок", "2.2 Чтение", "2.3 Оболочка"],
+  ]);
+  // Коммиты перестановки и оценки лежат внутри диапазона review и опубликованы.
   const range = (await value.git("rev-list", `${run.batch.baseCommit}..${run.batch.headCommit}`)).split("\n");
   assert.ok(range.includes(reorderedHead));
-  assert.equal(range.length, 5);
+  assert.equal(range.length, 6);
   assert.equal(await value.remoteHead(), head);
   assert.equal(value.calls.some((call) => call.includes("--force")), false);
 });
@@ -451,4 +535,178 @@ test("переписанная история требует публикаци�
     ["2.1", true], ["2.2", false], ["2.3", false],
   ]);
   assert.equal(run.batch.headCommit, await value.git("rev-parse", "HEAD"));
+});
+
+/** Профили из файла профилей на HEAD: номер задачи → назначение. */
+async function committedProfiles(value) {
+  const records = parseTaskProfiles(await value.git("show", `HEAD:openspec/changes/${changeId}/task-profiles.md`));
+  return Object.fromEntries(records.map(({ taskNumber, assignment }) => [taskNumber, assignment]));
+}
+
+test("задачи фазы оцениваются одной High-сессией до первой задачи и выполняются назначенными профилями", async (context) => {
+  const value = await fixture(context, { seedProfiles: false });
+  value.assignProfiles((description) => (description.startsWith("2.2 ") ? "Medium" : "High"));
+  value.agentScripts.push(value.implementTask(), value.implementTask(), value.implementTask());
+  const plugin = await value.startPlugin();
+  plugin.engine.command(workspaceId, "start");
+  await value.settle(plugin.ledger);
+  await Promise.all(value.agentRuns);
+
+  const snapshot = plugin.ledger.get(workspaceId);
+  assert.equal(snapshot.lifecycle.status, "completed", snapshot.lifecycle.message);
+  // Одна сессия оценивает все незавершённые задачи фазы, и её ведёт High.
+  assert.deepEqual(value.assessments.map(({ tasks }) => tasks), [
+    ["2.1 Чтение", "2.2 Оболочка", "2.3 Замена вставок"],
+  ]);
+  assert.equal(value.assessments[0].config.provider, "codex/model-high");
+  assert.ok(snapshot.history.some(({ text }) =>
+    text === "Профили задач Phase 2 назначены: High: 2.1, 2.3; Medium: 2.2"));
+  // Каждая задача выполнена агентом своего профиля.
+  assert.deepEqual(value.agentConfigs.map(({ provider }) => provider), [
+    "codex/model-high", "codex/model-medium", "codex/model-high",
+  ]);
+  assert.match(value.agentPrompts[1], /"profile":"Medium"/u);
+  assert.match(value.agentPrompts[1], /escalate_change_task/u);
+  assert.doesNotMatch(value.agentPrompts[0], /escalate_change_task/u);
+  const profiles = await committedProfiles(value);
+  assert.deepEqual(Object.keys(profiles), ["2.1", "2.2", "2.3"]);
+  assert.equal(profiles["2.2"].profile, "Medium");
+
+  // Коммит оценки опубликован и входит в диапазон review вместе с задачами.
+  const [run] = value.reviewedRuns;
+  const subjects = (await value.git("log", "--format=%s", `${run.batch.baseCommit}..${run.batch.headCommit}`)).split("\n");
+  assert.deepEqual(subjects.reverse(), [
+    "docs(openspec): assess task profiles for phase 2",
+    "feat: implement task 2.1",
+    "feat: implement task 2.2",
+    "feat: implement task 2.3",
+  ]);
+  assert.deepEqual(run.batch.tasks.map(({ taskNumber }) => taskNumber), ["2.1", "2.2", "2.3"]);
+  assert.equal(await value.remoteHead(), await value.git("rev-parse", "HEAD"));
+});
+
+test("Medium-агент эскалирует задачу, и её выполняет High-агент поверх частичной работы", async (context) => {
+  context.mock.method(console, "error", () => undefined);
+  const value = await fixture(context, { seedProfiles: false });
+  value.assignProfiles((description) => (description.startsWith("2.1 ") ? "Medium" : "High"));
+  const reason = "Причина падения тестов не ясна после нескольких попыток";
+  let partialCommit;
+  value.agentScripts.push(async ({ prompt, url }) => {
+    assert.match(prompt, /"taskNumber":"2\.1"/u);
+    await writeFile(join(value.workspace, "task-2.1-draft.ts"), "export const draft = true;\n");
+    await value.git("add", ".");
+    await value.git("commit", "-m", "feat: draft task 2.1");
+    partialCommit = await value.git("rev-parse", "HEAD");
+    const client = new Client({ name: "escalation-test", version: "1.0.0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(url)));
+    try {
+      const result = await client.callTool({ name: "escalate_change_task", arguments: { reason } });
+      assert.equal(result.isError, undefined, result.content?.[0]?.text);
+    } finally {
+      await client.close();
+    }
+  });
+  value.agentScripts.push(value.implementTask(), value.implementTask(), value.implementTask());
+  const plugin = await value.startPlugin();
+  plugin.engine.command(workspaceId, "start");
+  await value.settle(plugin.ledger);
+  await Promise.all(value.agentRuns);
+
+  const snapshot = plugin.ledger.get(workspaceId);
+  assert.equal(snapshot.lifecycle.status, "completed", snapshot.lifecycle.message);
+  assert.ok(snapshot.history.some(({ text }) => text === `Задача 2.1 передана с Medium на High: ${reason}`));
+  // Задача 2.1 запущена дважды: сначала Medium, после эскалации — High.
+  assert.deepEqual(value.agentConfigs.map(({ provider }) => provider), [
+    "codex/model-medium", "codex/model-high", "codex/model-high", "codex/model-high",
+  ]);
+  assert.match(value.agentPrompts[1], /"taskNumber":"2\.1"/u);
+  assert.ok(value.agentPrompts[1].includes(`"escalationReason":"${reason}"`));
+  assert.doesNotMatch(value.agentPrompts[1], /escalate_change_task/u);
+  const profiles = await committedProfiles(value);
+  assert.deepEqual(profiles["2.1"], {
+    kind: "escalated",
+    rationale: "Профиль назначен тестовым оценщиком",
+    reason,
+  });
+
+  // Частичная работа Medium-агента сохранена и входит в пакет review.
+  const [run] = value.reviewedRuns;
+  const range = (await value.git("rev-list", `${run.batch.baseCommit}..${run.batch.headCommit}`)).split("\n");
+  assert.ok(range.includes(partialCommit));
+  assert.deepEqual(run.batch.tasks.map(({ taskNumber }) => taskNumber), ["2.1", "2.2", "2.3"]);
+  assert.equal(await value.remoteHead(), await value.git("rev-parse", "HEAD"));
+  assert.equal(value.calls.some((call) => call.includes("--force")), false);
+});
+
+test("профиль, изменённый пользователем в файле, применяется к следующей задаче", async (context) => {
+  context.mock.method(console, "error", () => undefined);
+  const value = await fixture(context);
+  const plugin = await value.startPlugin();
+  await value.pauseAfterFirstTask(plugin);
+
+  // Пока workflow на паузе, пользователь переводит задачу 2.2 на Medium.
+  const records = parseTaskProfiles(await readFile(value.profilesPath, "utf8")).map((record) =>
+    record.taskNumber === "2.2"
+      ? { ...record, assignment: { kind: "assessed", profile: "Medium", rationale: "Пользователь считает задачу простой" } }
+      : record);
+  await writeFile(value.profilesPath, renderTaskProfiles(records));
+  await value.git("commit", "-am", "docs(openspec): run task 2.2 on Medium");
+
+  value.agentScripts.push(value.implementTask(), value.implementTask());
+  plugin.engine.command(workspaceId, "resume");
+  await value.settle(plugin.ledger);
+  await Promise.all(value.agentRuns);
+
+  const snapshot = plugin.ledger.get(workspaceId);
+  assert.equal(snapshot.lifecycle.status, "completed", snapshot.lifecycle.message);
+  assert.deepEqual(value.agentConfigs.map(({ provider }) => provider), [
+    "codex/model-high", "codex/model-medium", "codex/model-high",
+  ]);
+  // Переопределение не требует новой оценки.
+  assert.deepEqual(value.assessments, []);
+});
+
+test("эскалация, закоммиченная до сбоя плагина, после перезапуска выполняется на High", async (context) => {
+  context.mock.method(console, "error", () => undefined);
+  const value = await fixture(context, { seedProfiles: false });
+  value.assignProfiles((description) => (description.startsWith("2.1 ") ? "Medium" : "High"));
+  const reason = "Артефакты оставляют открытым выбор формата хранения";
+
+  // Medium-агент закоммитил частичную работу и запись эскалации, но плагин
+  // упал раньше, чем workflow сохранил checkpoint.
+  let committed;
+  const escalationCommitted = new Promise((resolve) => { committed = resolve; });
+  value.agentScripts.push(async () => {
+    await writeFile(join(value.workspace, "task-2.1-draft.ts"), "export const draft = true;\n");
+    await value.git("add", ".");
+    await value.git("commit", "-m", "feat: draft task 2.1");
+    const records = parseTaskProfiles(await readFile(value.profilesPath, "utf8")).map((record) =>
+      record.taskNumber === "2.1"
+        ? { ...record, assignment: { kind: "escalated", rationale: record.assignment.rationale, reason } }
+        : record);
+    await writeFile(value.profilesPath, renderTaskProfiles(records));
+    await value.git("commit", "-am", "docs(openspec): escalate task 2.1 to High");
+    committed();
+  });
+  const first = await value.startPlugin();
+  first.engine.command(workspaceId, "start");
+  await escalationCommitted;
+  assert.equal(first.ledger.getWorkflowCheckpoint(workspaceId).state.pendingTaskExecutionSession.profile, "Medium");
+  await first.stop();
+
+  value.agentScripts.push(value.implementTask(), value.implementTask(), value.implementTask());
+  const second = await value.startPlugin();
+  second.engine.command(workspaceId, "start");
+  await value.settle(second.ledger);
+  await Promise.all(value.agentRuns);
+
+  const snapshot = second.ledger.get(workspaceId);
+  assert.equal(snapshot.lifecycle.status, "completed", snapshot.lifecycle.message);
+  assert.ok(snapshot.history.some(({ text }) => /сессия задачи 2\.1 сброшена/u.test(text)));
+  assert.deepEqual(value.agentConfigs.map(({ provider }) => provider), [
+    "codex/model-medium", "codex/model-high", "codex/model-high", "codex/model-high",
+  ]);
+  assert.ok(value.agentPrompts[1].includes(`"escalationReason":"${reason}"`));
+  assert.equal(value.assessments.length, 1, "эскалация не требует новой оценки");
+  assert.equal(await value.remoteHead(), await value.git("rev-parse", "HEAD"));
 });

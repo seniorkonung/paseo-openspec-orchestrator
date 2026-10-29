@@ -26,7 +26,8 @@ main
 change/<id>
   | scaffold and planning artifact commits
   | initial OpenSpec review and finding resolutions
-  | for each phase: task planning, task commits, bounded reviews, resolutions
+  | for each phase: task planning, task profiles, task commits,
+  |   bounded reviews, resolutions
   | final spec synchronization and archive commits
 ```
 
@@ -199,8 +200,10 @@ described in that phase of `plan.md`.
 
 ### Implementation
 
-Each implementation run covers one phase. Tasks execute sequentially with one
-High agent and at least one commit per task. A nonempty batch is reviewed over
+Each implementation run covers one phase. Tasks execute sequentially, one agent
+per task on the profile assigned to that task (see
+[Task profiles](#task-profiles)), with at least one commit per task. A nonempty
+batch is reviewed over
 its commit range from the batch baseline to the reviewed head. The range
 includes every commit of each task and every commit the user added in between;
 a task completed outside a task session joins the batch without a commit
@@ -238,6 +241,49 @@ repeating the agent's work. An interrupted implementation review with correction
 commits but no added or updated report resumes its review work; a verified report
 with corrections is reused before or after push. The existing root PR is the
 only pull request associated with every stage.
+
+### Task profiles
+
+No task of a phase starts while an incomplete task of that phase lacks a valid
+assessment. One read-only High agent then assesses all such tasks in a single
+session and assigns each the Paseo profile that will execute it: `High` or
+`Medium`. Both are frontier models of one provider, for example Opus and
+Sonnet, and the assessor decides by who makes the decisions rather than by the
+size or area of a task. Medium gets a task when every substantial decision is
+already made: the specs and design settle the behavior, and the way to
+implement it is evident from the artifacts or existing code, even in sensitive
+areas such as concurrency, security, persistence, or recovery. High gets a task
+whose session must itself choose the approach, resolve ambiguous or conflicting
+requirements, preserve non-obvious invariants across several components, or
+find the cause of behavior nobody understands yet. High is the default: Medium
+is assigned only when the assessor is confident that the decisions are already
+made. Ultra and Low are never assigned to tasks.
+
+The assessor changes no files. Its scoped MCP tool accepts profiles only when
+they cover exactly the assessed tasks, and the orchestrator itself writes,
+commits, and publishes them as `task-profiles.md` in the change directory. The
+commit joins the open implementation batch. A profile is bound to the task's
+full text including its number, so a task that a review, a finding
+resolution, or the user rewords or renumbers is assessed again, while the file
+keeps the profiles of completed tasks as a record. The user may override a
+profile by editing its `Профиль` field and committing the file; deleting a
+task's section makes it assessed again. The orchestrator parses the file
+strictly, so a broken edit stops the workflow with the exact problem. An
+assessment interrupted after its commit is published on recovery without a new
+agent.
+
+A Medium task agent may escalate its task to High through a second scoped MCP
+tool when it hits an objective obstacle: a failure it cannot explain after
+several focused attempts, artifacts that contradict the code, a design decision
+the artifacts leave open, or a change that reaches far beyond the task. It must
+leave the worktree clean and the task unmarked; its commits stay. The
+orchestrator records the escalation and its reason in `task-profiles.md`,
+publishes the commits, and reruns the task with a High agent that receives the
+reason. A task escalates at most once, because High agents have no escalation
+tool. Escalation helps only when the agent notices the obstacle; a subtle
+mistake it does not notice is left to the implementation review.
+
+### Archive
 
 After all phases and review findings are complete, one High agent invokes the
 `openspec-archive-change` skill. It synchronizes every delta spec with the main

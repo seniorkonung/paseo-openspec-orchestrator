@@ -29,6 +29,7 @@ import { planningRunSchema } from "../planning-run-model.ts";
 import { RootBranchDeliveryError } from "../root-branch-delivery.ts";
 import type { RootBranchOrigin, RootBranchService } from "../root-branch-state.ts";
 import type { SessionAssessment } from "../session-assessment.ts";
+import type { PendingTaskProfileAssessmentSession } from "../task-profile-assessment.ts";
 import { ORCHESTRATOR_LIMITS } from "../../shared/orchestrator.ts";
 import { workflowTaskScope } from "./task-scope.ts";
 import type {
@@ -70,6 +71,10 @@ export interface WorkflowSessionAssessors {
   implementationFindingResolution(
     session: PendingImplementationFindingResolutionSession,
     taskScope: PhaseTaskScope,
+    signal: AbortSignal,
+  ): Promise<SessionAssessment>;
+  taskProfileAssessment(
+    session: PendingTaskProfileAssessmentSession,
     signal: AbortSignal,
   ): Promise<SessionAssessment>;
   taskExecution(
@@ -116,6 +121,7 @@ export const PUBLISHED_HEAD_STEPS: ReadonlySet<WorkflowStepId> = new Set([
   "inspect-phase-work",
   "prepare-phase-planning-branch",
   "prepare-implementation-branch",
+  "assess-task-profiles",
   "execute-change-tasks",
   "review-implementation",
   "resolve-implementation-review-findings",
@@ -177,6 +183,7 @@ const STAGE_SESSION_FIELDS = [
   "pendingFindingResolutionSession",
   "pendingImplementationFindingDecisionSession",
   "pendingImplementationFindingResolutionSession",
+  "pendingTaskProfileAssessmentSession",
   "pendingTaskExecutionSession",
   "pendingImplementationReviewSession",
   "pendingPhaseTaskPlanningSession",
@@ -383,6 +390,10 @@ export function createWorkflowReconciler(
       pendingImplementationFindingResolutionSession: (session) => ({
         label: `сессия implementation finding «${session.findingId}»`,
         assess: () => sessions.implementationFindingResolution(session, taskScope(), signal),
+      }),
+      pendingTaskProfileAssessmentSession: (session) => ({
+        label: `сессия оценки профилей задач Phase ${session.phaseNumber}`,
+        assess: () => sessions.taskProfileAssessment(session, signal),
       }),
       pendingTaskExecutionSession: (session) => ({
         label: `сессия задачи ${session.taskNumber}`,
@@ -688,6 +699,7 @@ function clearPendingSessions(state: WorkflowState): WorkflowState {
     pendingFindingResolutionSession: null,
     pendingImplementationFindingDecisionSession: null,
     pendingImplementationFindingResolutionSession: null,
+    pendingTaskProfileAssessmentSession: null,
     pendingTaskExecutionSession: null,
     pendingImplementationReviewSession: null,
     pendingPhaseTaskPlanningSession: null,

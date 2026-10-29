@@ -16,8 +16,10 @@ import { isCommitAncestor } from "./git-ancestry.ts";
 import { deliverRootCommit } from "./root-branch-delivery.ts";
 import {
   ChangeTaskExecutionError,
+  TASK_NUMBER_PREFIX,
   applyInstructionsSchema,
   pendingTaskExecutionSessionSchema,
+  plannedTaskExecutionSessionSchema,
   taskNumberSchema,
   type ApplyInstructions,
   type ApplyTask,
@@ -31,7 +33,6 @@ import {
 } from "./implementation-run-model.ts";
 import { runWorkspaceMiseCommand } from "./mise-toolchain.ts";
 
-const TASK_NUMBER_PREFIX = /^(\d+(?:\.\d+)+(?:[A-Za-z]+)?)(?=\s|$)/u;
 
 /**
  * Состояние сохранённой task-сессии относительно репозитория.
@@ -124,7 +125,7 @@ export async function planChangeTaskExecution(
   );
   return {
     kind: "next-task",
-    session: pendingTaskExecutionSessionSchema.parse({
+    session: plannedTaskExecutionSessionSchema.parse({
       changeId: run.changeId,
       schemaName: instructions.schemaName,
       taskId: selected.task.id,
@@ -246,6 +247,51 @@ export async function verifyCompletedTask(
   };
 }
 
+/**
+ * Проверяет, что задачу сессии можно передать другому профилю: рабочее дерево
+ * чистое, HEAD продолжает baseline, задача не отмечена выполненной, а список
+ * задач не изменён. Коммиты агента после baseline допускаются: следующая
+ * сессия продолжит работу с ними.
+ */
+export async function verifyTaskEscalation(
+  command: BoundedCommandRunner,
+  workspaceDirectory: string,
+  gitRoot: string,
+  sessionInput: PendingTaskExecutionSession,
+  signal: AbortSignal,
+): Promise<void> {
+  const session = pendingTaskExecutionSessionSchema.parse(sessionInput);
+  try {
+    await assertCleanWorktree(command, gitRoot, signal);
+  } catch (error) {
+    if (!(error instanceof ChangeTaskExecutionError)) throw error;
+    throw new ChangeTaskExecutionError(
+      `${error.message}: перед эскалацией закоммитьте полезную частичную работу и отмените остальные изменения`,
+    );
+  }
+  const outdated = await inspectTaskSessionState(command, gitRoot, session, signal);
+  if (outdated !== null) throw new ChangeTaskExecutionError(outdated);
+  const instructions = await readApplyInstructions(
+    command,
+    workspaceDirectory,
+    session.changeId,
+    signal,
+  );
+  const mismatch = describeSessionTaskMismatch(instructions, session);
+  if (mismatch !== null) throw new ChangeTaskExecutionError(mismatch);
+  const digest = taskListDigest(instructions.tasks);
+  if (digest === session.tasksAfterDigest) {
+    throw new ChangeTaskExecutionError(
+      `Задача ${session.taskNumber} уже отмечена выполненной: завершите её инструментом complete_change_task`,
+    );
+  }
+  if (digest !== session.tasksBeforeDigest) {
+    throw new ChangeTaskExecutionError(
+      "Перед эскалацией верните описания, порядок и отметки OpenSpec-задач к состоянию начала сессии",
+    );
+  }
+}
+
 async function readApplyInstructions(
   command: BoundedCommandRunner,
   workspaceDirectory: string,
@@ -301,13 +347,32 @@ async function readApplyInstructions(
   return instructions;
 }
 
-function numberTasks(
-  tasks: readonly ApplyTask[],
-): readonly {
+/** Задача OpenSpec с номером из её описания. */
+export interface NumberedChangeTask {
   readonly task: ApplyTask;
   readonly number: string;
   readonly phaseNumber: number;
-}[] {
+}
+
+/** Читает задачи change в порядке файла вместе с их номерами и фазами. */
+export async function readNumberedChangeTasks(
+  command: BoundedCommandRunner,
+  workspaceDirectory: string,
+  changeId: string,
+  signal?: AbortSignal,
+): Promise<readonly NumberedChangeTask[]> {
+  const instructions = await readApplyInstructions(command, workspaceDirectory, changeId, signal);
+  if (instructions.state === "blocked") {
+    throw new ChangeTaskExecutionError(
+      `OpenSpec apply для change «${changeId}» заблокирован: ${instructions.instruction}`,
+    );
+  }
+  return numberTasks(instructions.tasks);
+}
+
+function numberTasks(
+  tasks: readonly ApplyTask[],
+): readonly NumberedChangeTask[] {
   const ids = new Set<string>();
   const numbered = tasks.map((task) => {
     const match = TASK_NUMBER_PREFIX.exec(task.description);

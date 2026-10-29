@@ -175,6 +175,28 @@ export function collectImplementationTask(
   });
 }
 
+/**
+ * Продолжает открытый пакет до коммита оркестратора между задачами, например
+ * записи файла профилей. Коммит входит в диапазон review пакета, как и любой
+ * коммит после его baseline. Пустой пакет не меняется: его диапазон и так
+ * заканчивается текущим HEAD.
+ */
+export function extendImplementationBatch(
+  runInput: ImplementationRun,
+  headCommit: string,
+): ImplementationRun {
+  const run = implementationRunSchema.parse(runInput);
+  const head = commitHashSchema.parse(headCommit);
+  switch (run.batch.kind) {
+    case "empty":
+      return run;
+    case "collecting":
+      return implementationRunSchema.parse({ ...run, batch: { ...run.batch, headCommit: head } });
+    case "reviewed":
+      throw new Error("Нельзя продолжить уже проверенный implementation-пакет");
+  }
+}
+
 export function clearImplementationBatch(
   runInput: ImplementationRun,
   baseCommit: string,

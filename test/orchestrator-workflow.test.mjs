@@ -330,8 +330,25 @@ function workflowHarness({ feedbackOnce = false, reviewFindings = 0, twoPhases =
         phaseTasks.find(({ id }) => id === request.session.taskId).done = true;
         head = result.commit;
         await request.onTaskCompleted(result);
-        return result;
+        return { kind: "completed", task: result };
       },
+    },
+    // Все задачи уже оценены: этап оценки профилей проверяется отдельно.
+    taskProfiles: {
+      async inspect(_workspace, run) {
+        const number = run.phaseNumber === 1 ? "1.1" : "2.1";
+        return {
+          kind: "assessed",
+          records: [{
+            taskNumber: number,
+            heading: `${number} Реализовать поведение`,
+            assignment: { kind: "assessed", profile: "High", rationale: "Задача требует High" },
+          }],
+        };
+      },
+      async assess() { return { kind: "resumable" }; },
+      async run() { throw new Error("оценка профилей не требуется"); },
+      async recordEscalation() { throw new Error("эскалация не ожидалась"); },
     },
     implementationReview: {
       async plan(_workspace, run) {
@@ -649,3 +666,69 @@ test("checkpoint v6 без полей архивации сохраняет со
   assert.equal(checkpoint.state.pendingArchiveSession, null);
   assert.equal(checkpoint.state.archivedChange, null);
 });
+
+test("task-сессия прежнего checkpoint v6 выполняется на High, а эскалация требует High", () => {
+  const run = {
+    changeId,
+    changeBranch,
+    implementationBranch,
+    phaseNumber: 1,
+    runNumber: 1,
+    rootBaselineCommit: hashes.d,
+    repository,
+    publication: { kind: "unreviewed" },
+    batch: { kind: "empty", baseCommit: hashes.d },
+  };
+  const session = {
+    changeId,
+    schemaName: "spec-driven",
+    taskId: "task-a",
+    taskNumber: "1.1",
+    taskDescription: "1.1 Реализовать поведение",
+    phaseNumber: 1,
+    changeBranch,
+    implementationBranch,
+    rootBaselineCommit: hashes.d,
+    baselineCommit: hashes.d,
+    tasksBeforeDigest: "1".repeat(64),
+    tasksAfterDigest: "2".repeat(64),
+    progressTotal: 1,
+    progressComplete: 0,
+    repositoryHost: repository.host,
+    repositoryNameWithOwner: repository.nameWithOwner,
+    repositoryUrl: repository.url,
+  };
+  const state = (pendingTaskExecutionSession) => ({
+    ...createInitialWorkflowState(),
+    changeBranch,
+    activeBranch: implementationBranch,
+    change: { id: changeId },
+    phaseProgress: phaseSnapshotProgress(),
+    implementationRun: run,
+    pendingTaskExecutionSession,
+  });
+  // Поле сессии оценки отсутствует в прежних checkpoint v6.
+  const legacy = state(session);
+  delete legacy.pendingTaskProfileAssessmentSession;
+  const checkpoint = workflowCheckpointSchema.parse({ version: 6, nextStepId: "execute-change-tasks", state: legacy });
+  assert.equal(checkpoint.state.pendingTaskExecutionSession.profile, "High");
+  assert.equal(checkpoint.state.pendingTaskExecutionSession.escalationReason, null);
+  assert.equal(checkpoint.state.pendingTaskProfileAssessmentSession, null);
+  assert.throws(
+    () => workflowCheckpointSchema.parse({
+      version: 6,
+      nextStepId: "execute-change-tasks",
+      state: state({ ...session, profile: "Medium", escalationReason: "Причина эскалации" }),
+    }),
+    /После эскалации задачу выполняет профиль High/u,
+  );
+});
+
+function phaseSnapshotProgress() {
+  return {
+    phases: [{ number: 1 }],
+    tasks: phaseSnapshot([{ id: "task-a", number: "1.1", done: false }], false).tasks
+      .map(({ id, number, description, done, fingerprint }) => ({ id, number, description, done, fingerprint })),
+    nextImplementationRun: 2,
+  };
+}

@@ -19,12 +19,14 @@ import type { PhaseWorkService } from "../../phase-work.ts";
 import type { PhaseTaskPlanningService } from "../../phase-task-planning.ts";
 import type { RootBranchService } from "../../root-branch-state.ts";
 import type { RootPullRequestService } from "../../root-pull-request.ts";
+import type { TaskProfileService } from "../../task-profile-assessment.ts";
 import { createWorkflowReconciler } from "../reconciliation.ts";
 import type { WorkflowDefinition } from "../types.ts";
 import { createCheckAgentProfilesStep } from "./check-agent-profiles.ts";
 import { createCheckGitBranchStep } from "./check-git-branch.ts";
 import { createCheckGitWorktreeStep } from "./check-git-worktree.ts";
 import { createCheckMiseToolchainStep } from "./check-mise-toolchain.ts";
+import { createAssessTaskProfilesStep } from "./assess-task-profiles.ts";
 import { createChangeArtifactsStep } from "./create-change-artifacts.ts";
 import { createExecuteChangeTasksStep } from "./execute-change-tasks.ts";
 import { createPublishChangeStep } from "./publish-change.ts";
@@ -68,6 +70,7 @@ export interface OpenSpecWorkflowDependencies {
   readonly changeFindingResolution: ChangeFindingResolutionService;
   readonly implementationFindingResolution: ImplementationFindingResolutionService;
   readonly changeTaskExecution: ChangeTaskExecutionService;
+  readonly taskProfiles: TaskProfileService;
   readonly phaseWork: PhaseWorkService;
   readonly phaseTaskPlanning: PhaseTaskPlanningService;
   readonly rootBranch: RootBranchService;
@@ -126,6 +129,8 @@ export function createOpenSpecWorkflow(
             taskScope,
             signal,
           }),
+        taskProfileAssessment: (session, signal) =>
+          dependencies.taskProfiles.assess(workspaceDirectory, session, signal),
         taskExecution: (session, signal) =>
           dependencies.changeTaskExecution.assess(workspaceDirectory, session, signal),
         implementationReview: (run, session, taskBaseline, signal) =>
@@ -234,10 +239,16 @@ export function createOpenSpecWorkflow(
         workspaceDirectory: dependencies.workspaceDirectory,
         implementationBranch: dependencies.implementationBranch,
       }),
+      createAssessTaskProfilesStep({
+        workspaceDirectory: dependencies.workspaceDirectory,
+        readAgentProfiles: dependencies.readAgentProfiles,
+        taskProfiles: dependencies.taskProfiles,
+      }),
       createExecuteChangeTasksStep({
         workspaceDirectory: dependencies.workspaceDirectory,
         readAgentProfiles: dependencies.readAgentProfiles,
         taskExecution: dependencies.changeTaskExecution,
+        taskProfiles: dependencies.taskProfiles,
       }),
       createReviewImplementationStep({
         workspaceDirectory: dependencies.workspaceDirectory,

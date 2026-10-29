@@ -7,6 +7,12 @@ import {
 } from "./github-repository-identity.ts";
 import { openSpecChangeIdSchema } from "./openspec-change.ts";
 import {
+  ESCALATION_PROFILE,
+  taskProfileNameSchema,
+  taskProfileTextSchema,
+  type TaskProfileName,
+} from "./task-profile-level.ts";
+import {
   changeBranchFor,
   changeBranchSchema,
   implementationBranchSchema,
@@ -21,6 +27,9 @@ const MAX_TASK_ID_LENGTH = 128;
 const MAX_TASK_NUMBER_LENGTH = 128;
 const MAX_BRANCH_LENGTH = 512;
 const MAX_URL_LENGTH = 2_048;
+
+/** Номер задачи в начале её описания: `1.1`, `1.1.2` или `1.1a`. */
+export const TASK_NUMBER_PREFIX = /^(\d+(?:\.\d+)+(?:[A-Za-z]+)?)(?=\s|$)/u;
 
 export const taskIdSchema = z.string().trim().min(1).max(MAX_TASK_ID_LENGTH);
 export const taskNumberSchema = z
@@ -103,47 +112,81 @@ export const taskRepositorySchema = z
 
 export const taskCompletionInputSchema = z.object({}).strict();
 
+const taskExecutionSessionShape = {
+  changeId: openSpecChangeIdSchema,
+  schemaName: schemaNameSchema,
+  taskId: taskIdSchema,
+  taskNumber: taskNumberSchema,
+  taskDescription: taskDescriptionSchema,
+  phaseNumber: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(1),
+  changeBranch: changeBranchSchema,
+  implementationBranch: implementationBranchSchema,
+  rootBaselineCommit: commitHashSchema,
+  baselineCommit: commitHashSchema,
+  tasksBeforeDigest: taskDigestSchema,
+  tasksAfterDigest: taskDigestSchema,
+  progressTotal: z.number().int().positive().max(MAX_TASKS),
+  progressComplete: z.number().int().nonnegative().max(MAX_TASKS),
+  repositoryHost: taskGithubHostSchema,
+  repositoryNameWithOwner: taskRepositoryNameWithOwnerSchema,
+  repositoryUrl: taskHttpsUrlSchema,
+};
+
+function refineTaskExecutionSession(
+  session: {
+    readonly changeId: string;
+    readonly changeBranch: string;
+    readonly implementationBranch: string;
+    readonly progressTotal: number;
+    readonly progressComplete: number;
+  },
+  context: z.RefinementCtx,
+): void {
+  if (session.changeBranch !== changeBranchFor(session.changeId)) {
+    context.addIssue({
+      code: "custom",
+      path: ["changeBranch"],
+      message: "Корневая ветка task-сессии не соответствует change",
+    });
+  }
+  if (session.implementationBranch !== session.changeBranch) {
+    context.addIssue({
+      code: "custom",
+      path: ["implementationBranch"],
+      message: "Implementation-ветка task-сессии не соответствует change",
+    });
+  }
+  if (session.progressComplete >= session.progressTotal) {
+    context.addIssue({
+      code: "custom",
+      path: ["progressComplete"],
+      message: "Pending task требует хотя бы одну незавершённую задачу",
+    });
+  }
+}
+
+/** Выбранная задача до назначения профиля агента. */
+export const plannedTaskExecutionSessionSchema = z
+  .object(taskExecutionSessionShape)
+  .strict()
+  .superRefine(refineTaskExecutionSession);
+
 export const pendingTaskExecutionSessionSchema = z
   .object({
-    changeId: openSpecChangeIdSchema,
-    schemaName: schemaNameSchema,
-    taskId: taskIdSchema,
-    taskNumber: taskNumberSchema,
-    taskDescription: taskDescriptionSchema,
-    phaseNumber: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(1),
-    changeBranch: changeBranchSchema,
-    implementationBranch: implementationBranchSchema,
-    rootBaselineCommit: commitHashSchema,
-    baselineCommit: commitHashSchema,
-    tasksBeforeDigest: taskDigestSchema,
-    tasksAfterDigest: taskDigestSchema,
-    progressTotal: z.number().int().positive().max(MAX_TASKS),
-    progressComplete: z.number().int().nonnegative().max(MAX_TASKS),
-    repositoryHost: taskGithubHostSchema,
-    repositoryNameWithOwner: taskRepositoryNameWithOwnerSchema,
-    repositoryUrl: taskHttpsUrlSchema,
+    ...taskExecutionSessionShape,
+    /** Профиль агента задачи; checkpoint до появления профилей выполнялся на High. */
+    profile: taskProfileNameSchema.default("High"),
+    /** Почему задачу передали этому профилю после эскалации; `null` — без эскалации. */
+    escalationReason: taskProfileTextSchema.nullable().default(null),
   })
   .strict()
   .superRefine((session, context) => {
-    if (session.changeBranch !== changeBranchFor(session.changeId)) {
+    refineTaskExecutionSession(session, context);
+    if (session.escalationReason !== null && session.profile !== ESCALATION_PROFILE) {
       context.addIssue({
         code: "custom",
-        path: ["changeBranch"],
-        message: "Корневая ветка task-сессии не соответствует change",
-      });
-    }
-    if (session.implementationBranch !== session.changeBranch) {
-      context.addIssue({
-        code: "custom",
-        path: ["implementationBranch"],
-        message: "Implementation-ветка task-сессии не соответствует change",
-      });
-    }
-    if (session.progressComplete >= session.progressTotal) {
-      context.addIssue({
-        code: "custom",
-        path: ["progressComplete"],
-        message: "Pending task требует хотя бы одну незавершённую задачу",
+        path: ["profile"],
+        message: `После эскалации задачу выполняет профиль ${ESCALATION_PROFILE}`,
       });
     }
   });
@@ -151,9 +194,31 @@ export const pendingTaskExecutionSessionSchema = z
 export type ApplyTask = z.output<typeof applyTaskSchema>;
 export type ApplyInstructions = z.output<typeof applyInstructionsSchema>;
 export type TaskCompletionInput = z.output<typeof taskCompletionInputSchema>;
+export type PlannedTaskExecutionSession = z.infer<
+  typeof plannedTaskExecutionSessionSchema
+>;
 export type PendingTaskExecutionSession = z.infer<
   typeof pendingTaskExecutionSessionSchema
 >;
+
+/**
+ * Профиль, которым выполняется выбранная задача. Причина эскалации есть,
+ * только когда задачу передал агент более слабого профиля.
+ */
+export type TaskExecutionProfile =
+  | { readonly profile: TaskProfileName; readonly escalationReason: null }
+  | { readonly profile: typeof ESCALATION_PROFILE; readonly escalationReason: string };
+
+export function assignTaskExecutionProfile(
+  planned: PlannedTaskExecutionSession,
+  assignment: TaskExecutionProfile,
+): PendingTaskExecutionSession {
+  return pendingTaskExecutionSessionSchema.parse({
+    ...plannedTaskExecutionSessionSchema.parse(planned),
+    profile: assignment.profile,
+    escalationReason: assignment.escalationReason,
+  });
+}
 
 export type ChangeTaskExecutionPlan =
   | {
@@ -163,7 +228,7 @@ export type ChangeTaskExecutionPlan =
     }
   | {
       readonly kind: "next-task";
-      readonly session: PendingTaskExecutionSession;
+      readonly session: PlannedTaskExecutionSession;
     };
 
 export interface CompletedChangeTask {

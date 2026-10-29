@@ -13,6 +13,8 @@ import {
 import { inspectTaskExecutionRecovery, verifyCompletedTask } from "../server/change-task-publication.ts";
 import { collectImplementationTask } from "../server/implementation-run-model.ts";
 import { createImplementationReviewService, implementationReviewPrompt } from "../server/implementation-review.ts";
+import { createTaskProfileService } from "../server/task-profile-assessment.ts";
+import { parseTaskProfiles, renderTaskProfiles } from "../server/task-profile-model.ts";
 import { classifyPhaseWork, phaseTaskFingerprint } from "../server/phase-work.ts";
 
 const execFileAsync = promisify(execFile);
@@ -316,15 +318,18 @@ test("High-агент создаёт один task-коммит без task PR",
     logger: { error() {}, warn() {} },
   });
   const plan = await service.plan(value.workspace, value.run);
-  const completed = await service.run({
+  const outcome = await service.run({
     workspaceDirectory: value.workspace,
     profile: highProfile(),
     session: plan.session,
     signal: new AbortController().signal,
     onAgentCreated() {},
     onTaskCompleted: async (result) => completedCheckpoints.push(result),
+    async onTaskEscalated() { assert.fail("High-задача не эскалируется"); },
   });
   assert.equal(toolResult.isError, undefined);
+  assert.equal(outcome.kind, "completed");
+  const completed = outcome.task;
   assert.equal(completed.branch, implementationBranch);
   assert.equal(completed.taskId, "internal-a");
   assert.equal(completed.remainingTasks, 1);
@@ -1030,4 +1035,186 @@ test("неопубликованный reviewed head делает review-сес�
     }),
     { kind: "stale", reason: "Origin корневой ветки не совпадает с reviewed head" },
   );
+});
+
+/** Запускает task-сессию с агентом, который выполняет `action` через MCP-клиент. */
+async function runTaskAgent(value, { profile, action, taskProfiles = {} }) {
+  let finished;
+  const done = new Promise((resolve) => { finished = resolve; });
+  const service = createChangeTaskExecutionService({
+    command: value.command,
+    taskProfiles,
+    async createAgent(options) {
+      const [{ url }] = Object.values(options.config.mcpServers);
+      return {
+        id: "profile-task-agent",
+        async commands() { return { commands: [{ name: "openspec-apply-change" }], error: null }; },
+        async send(prompt) {
+          const client = await connectClient(url);
+          try { await action(client, prompt); } finally { await client.close(); finished(); }
+        },
+        async refresh() { return { agent: { status: "idle", archivedAt: null } }; },
+        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
+        async waitForFinish() { return { status: "idle" }; },
+      };
+    },
+    updateNotificationLabel: async () => {},
+    logger: { error() {}, warn() {} },
+  });
+  const plan = await service.plan(value.workspace, value.run);
+  const controller = new AbortController();
+  const pending = service.run({
+    workspaceDirectory: value.workspace,
+    profile: { ...highProfile(), name: profile },
+    session: { ...plan.session, profile, escalationReason: null },
+    signal: controller.signal,
+    onAgentCreated() {},
+    async onTaskCompleted() {},
+    async onTaskEscalated() { assert.fail("Эскалация не должна быть принята"); },
+  });
+  await done;
+  controller.abort();
+  await assert.rejects(pending, /abort/iu);
+}
+
+test("High-агент задачи не получает инструмент эскалации", async (context) => {
+  const value = await fixture(context);
+  let tools;
+  let prompt;
+  await runTaskAgent(value, {
+    profile: "High",
+    async action(client, input) {
+      prompt = input;
+      tools = (await client.listTools()).tools.map(({ name }) => name);
+    },
+  });
+  assert.deepEqual(tools, ["complete_change_task"]);
+  assert.doesNotMatch(prompt, /escalate_change_task/u);
+  assert.match(prompt, /"profile":"High"/u);
+});
+
+test("Medium-агент эскалирует задачу только с чистым деревом и неотмеченной задачей", async (context) => {
+  const value = await fixture(context);
+  const recorded = [];
+  const results = [];
+  let tools;
+  let prompt;
+  await runTaskAgent(value, {
+    profile: "Medium",
+    taskProfiles: { async recordEscalation(request) { recorded.push(request); return value.baseline; } },
+    async action(client, input) {
+      prompt = input;
+      tools = (await client.listTools()).tools.map(({ name }) => name).sort();
+      const escalate = () => client.callTool({
+        name: "escalate_change_task",
+        arguments: { reason: "Спецификация противоречит коду" },
+      });
+      await writeFile(join(value.workspace, "draft.ts"), "export const draft = true;\n");
+      results.push(await escalate());
+      await rm(join(value.workspace, "draft.ts"));
+      await commitTask(value);
+      results.push(await escalate());
+    },
+  });
+  assert.deepEqual(tools, ["complete_change_task", "escalate_change_task"]);
+  assert.match(prompt, /You run on the Medium profile/u);
+  assert.match(prompt, /Never escalate merely because the task is large or tedious/u);
+  assert.deepEqual(results.map(({ isError }) => isError), [true, true]);
+  assert.match(results[0].content[0].text, /перед эскалацией закоммитьте полезную частичную работу/u);
+  assert.match(results[1].content[0].text, /Задача 1\.1 уже отмечена выполненной/u);
+  assert.deepEqual(recorded, [], "отклонённая эскалация не меняет файл профилей");
+  assert.equal(value.calls.some((call) => call.startsWith("git push")), false);
+});
+
+test("эскалация отклоняет причину не на русском языке", async (context) => {
+  const value = await fixture(context);
+  let result;
+  await runTaskAgent(value, {
+    profile: "Medium",
+    taskProfiles: { async recordEscalation() { assert.fail("Причина не прошла проверку"); } },
+    async action(client) {
+      result = await client.callTool({ name: "escalate_change_task", arguments: { reason: "too hard" } });
+    },
+  });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /русском/u);
+});
+
+test("эскалация после сбоя публикации повторяется одним коммитом и не даёт завершить задачу на Medium", async (context) => {
+  const value = await fixture(context);
+  const git = async (...args) => (await execFileAsync("git", args, { cwd: value.workspace })).stdout.trim();
+  const profilesPath = join(value.workspace, "openspec", "changes", changeId, "task-profiles.md");
+  await writeFile(profilesPath, renderTaskProfiles([{
+    taskNumber: "1.1",
+    heading: "1.1 Первая задача",
+    assignment: { kind: "assessed", profile: "Medium", rationale: "Локальная правка по паттерну" },
+  }]));
+  await git("add", ".");
+  await git("commit", "-m", "docs(openspec): assess task profiles for phase 1");
+  await git("push", "origin", changeBranch);
+  const assessedHead = await git("rev-parse", "HEAD");
+
+  const reason = "Спецификация противоречит текущему коду";
+  const results = {};
+  const escalations = [];
+  const service = createChangeTaskExecutionService({
+    command: value.command,
+    taskProfiles: createTaskProfileService({ command: value.command, async createAgent() { assert.fail("Агент оценки не нужен"); } }),
+    async createAgent(options) {
+      const [{ url }] = Object.values(options.config.mcpServers);
+      return {
+        id: "medium-task-agent",
+        async commands() { return { commands: [{ name: "openspec-apply-change" }], error: null }; },
+        async send() {
+          await writeFile(join(value.workspace, "draft.ts"), "export const draft = true;\n");
+          await git("add", ".");
+          await git("commit", "-m", "feat: draft task 1.1");
+          const client = await connectClient(url);
+          try {
+            const escalate = () => client.callTool({ name: "escalate_change_task", arguments: { reason } });
+            value.pullRequest.isDraft = false;
+            results.undelivered = await escalate();
+            results.completion = await client.callTool({ name: "complete_change_task", arguments: {} });
+            value.pullRequest.isDraft = true;
+            results.retried = await escalate();
+          } finally {
+            await client.close();
+          }
+        },
+        async refresh() { return { agent: { status: "idle", archivedAt: null } }; },
+        async archive() { return { archivedAt: "2026-10-09T00:00:00.000Z" }; },
+        async waitForFinish() { return { status: "idle" }; },
+      };
+    },
+    updateNotificationLabel: async () => {},
+    logger: { error() {}, warn() {} },
+  });
+  const plan = await service.plan(value.workspace, { ...value.run, batch: { kind: "empty", baseCommit: assessedHead } });
+  const outcome = await service.run({
+    workspaceDirectory: value.workspace,
+    profile: { ...highProfile(), name: "Medium" },
+    session: { ...plan.session, profile: "Medium", escalationReason: null },
+    signal: new AbortController().signal,
+    onAgentCreated() {},
+    async onTaskCompleted() { assert.fail("Задача не завершается на Medium"); },
+    async onTaskEscalated(escalation) { escalations.push(escalation); },
+  });
+
+  assert.equal(results.undelivered.isError, true);
+  assert.match(results.undelivered.content[0].text, /Draft/u);
+  assert.equal(results.completion.isError, true);
+  assert.match(results.completion.content[0].text, /Эскалация задачи 1\.1 уже записана/u);
+  assert.equal(results.retried.isError, undefined, results.retried.content?.[0]?.text);
+  assert.equal(outcome.kind, "escalated");
+  assert.deepEqual(escalations, [outcome.escalation]);
+  const head = await git("rev-parse", "HEAD");
+  assert.equal(outcome.escalation.commit, head);
+  assert.deepEqual((await git("log", "--format=%s", `${assessedHead}..HEAD`)).split("\n"), [
+    "docs(openspec): escalate task 1.1 to High",
+    "feat: draft task 1.1",
+  ]);
+  const [profile] = parseTaskProfiles(await readFile(profilesPath, "utf8"));
+  assert.deepEqual(profile.assignment, { kind: "escalated", rationale: "Локальная правка по паттерну", reason });
+  const remote = (await git("ls-remote", "--heads", "origin", `refs/heads/${changeBranch}`)).split(/\s/u)[0];
+  assert.equal(remote, head);
 });

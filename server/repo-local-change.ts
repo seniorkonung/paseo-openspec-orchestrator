@@ -2,6 +2,8 @@ import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { BoundedCommandRunner } from "./bounded-command.ts";
+import { runWorkspaceMiseCommand } from "./mise-toolchain.ts";
+import { openSpecChangeIdSchema } from "./openspec-change.ts";
 
 const MAX_PATH_LENGTH = 8_192;
 
@@ -10,6 +12,64 @@ export interface RepoLocalChangePaths {
   readonly changeRoot: string;
   readonly gitRoot: string;
   readonly changeRepositoryPath: string;
+}
+
+const repoLocalStatusSchema = z
+  .object({
+    changeName: openSpecChangeIdSchema,
+    changeRoot: z.string().trim().min(1).max(MAX_PATH_LENGTH),
+    actionContext: z
+      .object({ mode: z.literal("repo-local"), sourceOfTruth: z.literal("repo") })
+      .loose(),
+  })
+  .loose();
+
+/**
+ * Определяет каталог change по `openspec status`. Change должен храниться в
+ * репозитории рабочей области; ошибки создаёт фабрика вызывающего этапа.
+ */
+export async function readRepoLocalChangePaths(
+  command: BoundedCommandRunner,
+  workspaceDirectory: string,
+  changeId: string,
+  createError: (message: string) => Error,
+  signal?: AbortSignal,
+): Promise<RepoLocalChangePaths> {
+  let stdout: string;
+  try {
+    ({ stdout } = await runWorkspaceMiseCommand(
+      command,
+      workspaceDirectory,
+      "openspec",
+      ["status", "--change", changeId, "--json"],
+      signal,
+    ));
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw createError(`Не удалось прочитать OpenSpec change «${changeId}»`);
+  }
+
+  let status: z.output<typeof repoLocalStatusSchema>;
+  try {
+    status = repoLocalStatusSchema.parse(JSON.parse(stdout) as unknown);
+  } catch {
+    throw createError("OpenSpec вернул некорректный status change");
+  }
+  if (status.changeName !== changeId) {
+    throw createError("OpenSpec вернул status другого change");
+  }
+
+  try {
+    return await resolveRepoLocalChangePaths({
+      command,
+      workspaceDirectory,
+      reportedChangeRoot: status.changeRoot,
+      ...(signal === undefined ? {} : { signal }),
+    });
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw createError("Не удалось безопасно определить change root");
+  }
 }
 
 export interface ResolveRepoLocalChangePathsRequest {

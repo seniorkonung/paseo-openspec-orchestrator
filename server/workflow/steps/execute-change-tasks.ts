@@ -7,17 +7,31 @@ import {
   ChangeTaskExecutionError,
   type ChangeTaskExecutionService,
 } from "../../change-task-execution.ts";
+import { assignTaskExecutionProfile } from "../../change-task-model.ts";
 import type {
   WorkflowStepContext,
   WorkflowStepDefinition,
   WorkflowStepResult,
 } from "../types.ts";
-import { collectImplementationTask } from "../../implementation-run-model.ts";
+import {
+  collectImplementationTask,
+  extendImplementationBatch,
+} from "../../implementation-run-model.ts";
+import type { TaskProfileService } from "../../task-profile-assessment.ts";
+import { ESCALATION_PROFILE } from "../../task-profile-level.ts";
+import {
+  TaskProfilesError,
+  executionProfileFor,
+  listTaskNumbers,
+  recordForTask,
+} from "../../task-profile-model.ts";
+import { boundedMessage, boundedSummary } from "../bounded-text.ts";
 
 export interface ExecuteChangeTasksDependencies {
   readonly workspaceDirectory: string;
   readonly readAgentProfiles: AgentProfileReader;
   readonly taskExecution: Pick<ChangeTaskExecutionService, "plan" | "run">;
+  readonly taskProfiles: Pick<TaskProfileService, "inspect">;
 }
 
 async function executeChangeTasksStep(
@@ -38,7 +52,8 @@ async function executeChangeTasksStep(
     context.state.pendingFindingDecisionSession ||
     context.state.pendingFindingResolutionSession ||
     context.state.pendingImplementationFindingDecisionSession ||
-    context.state.pendingImplementationFindingResolutionSession
+    context.state.pendingImplementationFindingResolutionSession ||
+    context.state.pendingTaskProfileAssessmentSession
   ) {
     return {
       kind: "halt",
@@ -78,19 +93,42 @@ async function executeChangeTasksStep(
               : `Все OpenSpec-задачи change ${change.id} выполнены`,
         };
       }
-      session = plan.session;
+      // Ни одна задача фазы не запускается, пока не оценены все её
+      // незавершённые задачи: так новые и изменённые задачи оцениваются
+      // одной сессией, а не по одной.
+      const taskProfiles = await dependencies.taskProfiles.inspect(
+        dependencies.workspaceDirectory,
+        implementationRun,
+        context.signal,
+      );
+      if (taskProfiles.kind === "assessment-required") {
+        return {
+          kind: "continue",
+          next: "assess-task-profiles",
+          state: { pendingTaskExecutionSession: null },
+          summary: `Нужна оценка профилей задач Phase ${implementationRun.phaseNumber}: ${listTaskNumbers(taskProfiles.session.tasks.map(({ number }) => number))}`,
+        };
+      }
+      const task = { number: plan.session.taskNumber, description: plan.session.taskDescription };
+      const record = recordForTask(taskProfiles.records, task);
+      if (!record) {
+        throw new TaskProfilesError(`Для задачи ${task.number} нет действующей оценки профиля`);
+      }
+      const assigned = assignTaskExecutionProfile(plan.session, executionProfileFor(record));
       await context.checkpointState({
         ...context.state,
-        pendingTaskExecutionSession: session,
+        pendingTaskExecutionSession: assigned,
       });
+      session = assigned;
     } catch (error) {
       return taskFailure(context, error, "Не удалось определить следующую OpenSpec-задачу");
     }
   }
+  const pending = session;
 
-  let profiles;
+  let agentProfiles;
   try {
-    profiles = await dependencies.readAgentProfiles();
+    agentProfiles = await dependencies.readAgentProfiles();
   } catch (error) {
     if (context.signal.aborted) throw error;
     console.error("[OpenSpec] Не удалось перечитать профили перед выполнением задачи", {
@@ -100,13 +138,13 @@ async function executeChangeTasksStep(
       kind: "halt",
       summary: "Не удалось перечитать профили агентов",
       message:
-        "Не удалось перечитать профиль High перед выполнением OpenSpec-задачи; проверьте Paseo и нажмите «Повторить»",
+        `Не удалось перечитать профиль ${pending.profile} перед выполнением OpenSpec-задачи; проверьте Paseo и нажмите «Повторить»`,
     };
   }
 
-  const resolution = resolveRequiredAgentProfile(profiles, "High");
+  const resolution = resolveRequiredAgentProfile(agentProfiles, pending.profile);
   if (resolution.kind === "invalid") {
-    const summary = describeRequiredAgentProfileProblem("High", resolution);
+    const summary = describeRequiredAgentProfileProblem(pending.profile, resolution);
     return {
       kind: "halt",
       summary,
@@ -115,17 +153,17 @@ async function executeChangeTasksStep(
   }
 
   try {
-    const completed = await dependencies.taskExecution.run({
+    const outcome = await dependencies.taskExecution.run({
       workspaceDirectory: dependencies.workspaceDirectory,
       profile: resolution.profile,
-      session,
+      session: pending,
       signal: context.signal,
       onAgentCreated: (agentId) => {
         context.updateActionLinks([
           {
             kind: "agent",
             agentId,
-            label: `OpenSpec-задача ${session.taskNumber}`,
+            label: `OpenSpec-задача ${pending.taskNumber} · ${pending.profile}`,
           },
         ]);
       },
@@ -142,23 +180,49 @@ async function executeChangeTasksStep(
           pendingTaskExecutionSession: null,
         });
       },
-    });
-    const nextRun = collectImplementationTask(implementationRun, {
-      taskId: completed.taskId,
-      taskNumber: completed.taskNumber,
-      commit: completed.commit,
-    });
-    return {
-      kind: "continue",
-      next: "execute-change-tasks",
-      state: {
-        activeBranch: completed.branch,
-        implementationRun: nextRun,
-        pendingTaskExecutionSession: null,
+      onTaskEscalated: async (escalation) => {
+        await context.checkpointState({
+          ...context.state,
+          implementationRun: extendImplementationBatch(implementationRun, escalation.commit),
+          pendingTaskExecutionSession: null,
+        });
       },
-      summary:
-        `Задача ${completed.taskNumber} добавлена в implementation-пакет; осталось ${completed.remainingTasks}`,
-    };
+    });
+    switch (outcome.kind) {
+      case "completed": {
+        const completed = outcome.task;
+        const nextRun = collectImplementationTask(implementationRun, {
+          taskId: completed.taskId,
+          taskNumber: completed.taskNumber,
+          commit: completed.commit,
+        });
+        return {
+          kind: "continue",
+          next: "execute-change-tasks",
+          state: {
+            activeBranch: completed.branch,
+            implementationRun: nextRun,
+            pendingTaskExecutionSession: null,
+          },
+          summary:
+            `Задача ${completed.taskNumber} (${pending.profile}) добавлена в implementation-пакет; осталось ${completed.remainingTasks}`,
+        };
+      }
+      case "escalated": {
+        const { escalation } = outcome;
+        return {
+          kind: "continue",
+          next: "execute-change-tasks",
+          state: {
+            implementationRun: extendImplementationBatch(implementationRun, escalation.commit),
+            pendingTaskExecutionSession: null,
+          },
+          summary: boundedSummary(
+            `Задача ${escalation.taskNumber} передана с ${pending.profile} на ${ESCALATION_PROFILE}: ${escalation.reason}`,
+          ),
+        };
+      }
+    }
   } catch (error) {
     return taskFailure(context, error, "Не удалось завершить OpenSpec-задачу");
   }
@@ -173,11 +237,14 @@ function taskFailure(
   console.error("[OpenSpec] Ошибка выполнения OpenSpec-задачи", {
     code: errorCode(error),
   });
-  const summary = error instanceof ChangeTaskExecutionError ? error.message : fallback;
+  const reason =
+    error instanceof ChangeTaskExecutionError || error instanceof TaskProfilesError
+      ? error.message
+      : fallback;
   return {
     kind: "halt",
-    summary,
-    message: `${summary}; исправьте состояние и нажмите «Повторить»`,
+    summary: boundedSummary(reason),
+    message: boundedMessage(`${reason}; исправьте состояние и нажмите «Повторить»`),
   };
 }
 

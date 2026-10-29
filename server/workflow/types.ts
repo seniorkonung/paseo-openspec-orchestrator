@@ -23,6 +23,10 @@ import {
   type PendingTaskExecutionSession,
 } from "../change-task-execution.ts";
 import {
+  pendingTaskProfileAssessmentSessionSchema,
+  type PendingTaskProfileAssessmentSession,
+} from "../task-profile-assessment.ts";
+import {
   pendingChangeInitializationSessionSchema,
   type PendingChangeInitializationSession,
 } from "../change-initialization.ts";
@@ -113,6 +117,8 @@ export interface WorkflowState {
   readonly pendingImplementationFindingResolutionSession:
     | PendingImplementationFindingResolutionSession
     | null;
+  /** Сессия оценки профилей агентов для незавершённых задач фазы. */
+  readonly pendingTaskProfileAssessmentSession: PendingTaskProfileAssessmentSession | null;
   readonly pendingTaskExecutionSession: PendingTaskExecutionSession | null;
   readonly pendingImplementationReviewSession: PendingImplementationReviewSession | null;
   readonly pendingPhaseTaskPlanningSession: PendingPhaseTaskPlanningSession | null;
@@ -172,6 +178,9 @@ export const workflowStateSchema = z
       .default(null),
     pendingImplementationFindingResolutionSession:
       pendingImplementationFindingResolutionSessionSchema.nullable().default(null),
+    pendingTaskProfileAssessmentSession: pendingTaskProfileAssessmentSessionSchema
+      .nullable()
+      .default(null),
     pendingTaskExecutionSession: pendingTaskExecutionSessionSchema.nullable().default(null),
     pendingImplementationReviewSession: pendingImplementationReviewSessionSchema
       .nullable()
@@ -192,6 +201,7 @@ export const workflowStateSchema = z
       state.pendingFindingResolutionSession,
       state.pendingImplementationFindingDecisionSession,
       state.pendingImplementationFindingResolutionSession,
+      state.pendingTaskProfileAssessmentSession,
       state.pendingTaskExecutionSession,
       state.pendingImplementationReviewSession,
       state.pendingPhaseTaskPlanningSession,
@@ -338,6 +348,19 @@ export const workflowStateSchema = z
           message: "Сессия finding не соответствует сохранённым change и activeBranch",
         });
       }
+    }
+    const profileAssessment = state.pendingTaskProfileAssessmentSession;
+    if (
+      profileAssessment &&
+      (state.change?.id !== profileAssessment.changeId ||
+        state.activeBranch !== profileAssessment.branch ||
+        state.implementationRun?.phaseNumber !== profileAssessment.phaseNumber)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["pendingTaskProfileAssessmentSession"],
+        message: "Сессия оценки профилей не соответствует change и implementation-run",
+      });
     }
     const task = state.pendingTaskExecutionSession;
     if (
@@ -620,6 +643,7 @@ export function createInitialWorkflowState(): WorkflowState {
     pendingFindingResolutionSession: null,
     pendingImplementationFindingDecisionSession: null,
     pendingImplementationFindingResolutionSession: null,
+    pendingTaskProfileAssessmentSession: null,
     pendingTaskExecutionSession: null,
     pendingImplementationReviewSession: null,
     pendingPhaseTaskPlanningSession: null,

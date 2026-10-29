@@ -178,6 +178,7 @@ function workspace({
       findingResolution: assessor("findingResolution"),
       implementationFindingDecision: assessor("implementationFindingDecision"),
       implementationFindingResolution: assessor("implementationFindingResolution"),
+      taskProfileAssessment: assessor("taskProfileAssessment"),
       taskExecution: assessor("taskExecution"),
       implementationReview: assessor("implementationReview"),
       phaseTaskPlanning: assessor("phaseTaskPlanning"),
@@ -916,4 +917,47 @@ test("checkpoint не допускает сессию решений вмест�
     () => baseState({ pendingFindingDecisionSession: { ...decision, findingIds: ["F1", "F1"] } }),
     /не должны повторяться/u,
   );
+});
+
+test("сессия оценки профилей удерживает пакет, а устаревшая сбрасывается и пакет продолжается", async () => {
+  const session = {
+    changeId,
+    branch: changeBranch,
+    phaseNumber: 2,
+    baselineCommit: commits.first,
+    tasks: [{ number: "2.2", description: "2.2 Оболочка" }, { number: "2.3", description: "2.3 Замена вставок" }],
+  };
+  const state = baseState({
+    phaseProgress: progress(baselineTasks),
+    implementationRun: implementationRun(collectingBatch),
+    pendingTaskProfileAssessmentSession: session,
+  });
+
+  // Продолжаемая сессия владеет своим baseline: run вокруг неё не переносится.
+  const resumable = workspace({
+    head: commits.head,
+    origin: { kind: "unpublished", remoteHead: commits.first, commits: 1 },
+    assessments: { taskProfileAssessment: { kind: "resumable" } },
+  });
+  assert.deepEqual(await resumable.run("assess-task-profiles", state), { kind: "unchanged" });
+  assert.deepEqual(resumable.calls, ["inspect", "tasks", "assess:taskProfileAssessment"]);
+
+  const stale = workspace({
+    head: commits.head,
+    origin: { kind: "unpublished", remoteHead: commits.first, commits: 1 },
+    assessments: {
+      taskProfileAssessment: { kind: "stale", reason: "После начала оценки профилей изменены файлы" },
+    },
+  });
+  const result = await stale.run("assess-task-profiles", state);
+  assert.equal(result.kind, "adopted");
+  assert.equal(result.next, "assess-task-profiles");
+  assert.equal(result.state.pendingTaskProfileAssessmentSession, null);
+  assert.equal(result.state.implementationRun.batch.headCommit, commits.head);
+  assert.equal(
+    result.summary,
+    "Принято состояние репозитория: сессия оценки профилей задач Phase 2 сброшена (После начала оценки профилей изменены файлы); " +
+      "пакет implementation продолжен до текущего HEAD; опубликовано коммитов: 1",
+  );
+  workflowStateSchema.parse(result.state);
 });
